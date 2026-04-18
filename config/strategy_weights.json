@@ -68,6 +68,11 @@
       "name": "涨停横盘策略",
       "weight": 60,
       "description": "正向信号，涨停后横盘"
+    },
+    {
+      "name": "连阳回调策略",
+      "weight": 50,
+      "description": "正向信号，连阳后缩量回调"
     }
   ],
   "veto_config": {
