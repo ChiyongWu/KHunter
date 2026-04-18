@@ -42,3 +42,6 @@ doc/
 .env
 .env.local
 *.log
+
+# Configuration files (local)
+config/config.yaml
