@@ -284,6 +284,160 @@ export function renderTrackingResult(data, container, selectionDate) {
 }
 
 /**
+ * 重新生成排名 - 用于修复评分不完整或为0的情况
+ */
+export async function regenerateRanking() {
+    const dateInput = document.getElementById('stock-ranking-date');
+    const resultContainer = document.getElementById('stock-ranking-result');
+    
+    if (!dateInput || !resultContainer) return;
+    
+    const selectionDate = dateInput.value;
+    if (!selectionDate) {
+        alert('请选择选股日期');
+        return;
+    }
+    
+    // 确认操作
+    if (!confirm('确定要重新生成排名吗？这将重新计算所有评分为0的股票。')) {
+        return;
+    }
+    
+    // 显示加载状态
+    resultContainer.innerHTML = '<p class="loading">正在重新生成排名，请稍候...</p>';
+    
+    try {
+        const response = await fetch('/api/ranking/regenerate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                selection_date: selectionDate,
+                force_recalculate: false  // 默认只重新计算评分为0的股票
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            // 显示重新生成结果
+            const data = result.data || {};
+            resultContainer.innerHTML = `
+                <div style="padding: 15px; background: #d1fae5; border: 1px solid #6ee7b7; border-radius: 8px; margin-bottom: 20px;">
+                    <h5 style="color: #065f46; margin-bottom: 10px;">✅ 排名重新生成成功</h5>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>总股票数：</strong> ${data.total || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>重新计算：</strong> ${data.recalculated || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>失败数量：</strong> ${data.failed || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>消息：</strong> ${result.message || ''}
+                    </p>
+                </div>
+                <p class="text-muted">请点击"生成排名"按钮查看最新的排名结果。</p>
+            `;
+        } else {
+            resultContainer.innerHTML = `
+                <div style="padding: 15px; background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px;">
+                    <h5 style="color: #7f1d1d; margin-bottom: 10px;">❌ 重新生成排名失败</h5>
+                    <p style="color: #991b1b;">${result.message || '未知错误'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('重新生成排名异常:', error);
+        resultContainer.innerHTML = `
+            <div style="padding: 15px; background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px;">
+                <h5 style="color: #7f1d1d; margin-bottom: 10px;">❌ 重新生成排名失败</h5>
+                <p style="color: #991b1b;">${error.message || '网络错误'}</p>
+            </div>
+        `;
+    }
+}
+
+/**
+ * 强制重新生成排名 - 重新计算所有股票的评分
+ */
+export async function forceRegenerateRanking() {
+    const dateInput = document.getElementById('stock-ranking-date');
+    const resultContainer = document.getElementById('stock-ranking-result');
+    
+    if (!dateInput || !resultContainer) return;
+    
+    const selectionDate = dateInput.value;
+    if (!selectionDate) {
+        alert('请选择选股日期');
+        return;
+    }
+    
+    // 确认操作
+    if (!confirm('确定要强制重新生成排名吗？这将重新计算所有股票的评分，可能需要较长时间。')) {
+        return;
+    }
+    
+    // 显示加载状态
+    resultContainer.innerHTML = '<p class="loading">正在强制重新生成排名，请稍候...</p>';
+    
+    try {
+        const response = await fetch('/api/ranking/regenerate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                selection_date: selectionDate,
+                force_recalculate: true  // 强制重新计算所有股票
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            // 显示重新生成结果
+            const data = result.data || {};
+            resultContainer.innerHTML = `
+                <div style="padding: 15px; background: #d1fae5; border: 1px solid #6ee7b7; border-radius: 8px; margin-bottom: 20px;">
+                    <h5 style="color: #065f46; margin-bottom: 10px;">✅ 排名强制重新生成成功</h5>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>总股票数：</strong> ${data.total || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>重新计算：</strong> ${data.recalculated || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>失败数量：</strong> ${data.failed || 0}
+                    </p>
+                    <p style="color: #047857; margin: 5px 0;">
+                        <strong>消息：</strong> ${result.message || ''}
+                    </p>
+                </div>
+                <p class="text-muted">请点击"生成排名"按钮查看最新的排名结果。</p>
+            `;
+        } else {
+            resultContainer.innerHTML = `
+                <div style="padding: 15px; background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px;">
+                    <h5 style="color: #7f1d1d; margin-bottom: 10px;">❌ 强制重新生成排名失败</h5>
+                    <p style="color: #991b1b;">${result.message || '未知错误'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('强制重新生成排名异常:', error);
+        resultContainer.innerHTML = `
+            <div style="padding: 15px; background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px;">
+                <h5 style="color: #7f1d1d; margin-bottom: 10px;">❌ 强制重新生成排名失败</h5>
+                <p style="color: #991b1b;">${error.message || '网络错误'}</p>
+            </div>
+        `;
+    }
+}
+
+/**
  * 设置排名相关事件监听
  */
 export function setupRankingEvents() {
@@ -297,5 +451,11 @@ export function setupRankingEvents() {
     const trackBtn = document.getElementById('track-ranking-btn');
     if (trackBtn) {
         trackBtn.addEventListener('click', trackRanking);
+    }
+    
+    // 绑定强制重新生成排名按钮（改名为"重新生成"）
+    const forceRegenerateBtn = document.getElementById('force-regenerate-ranking-btn');
+    if (forceRegenerateBtn) {
+        forceRegenerateBtn.addEventListener('click', forceRegenerateRanking);
     }
 }

@@ -1604,3 +1604,29 @@ body {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.1);
 }
+
+
+/* ===== 排名页面样式 ===== */
+/* 排名页面的 form-row 使用 flex 布局，确保元素在一行显示 */
+#stock-ranking-page .form-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: nowrap;
+}
+
+/* 日期输入框宽度缩小 */
+#stock-ranking-date {
+    width: 120px !important;
+    padding: 6px 4px !important;
+    font-size: 13px !important;
+}
+
+/* 排名页面的 form-group 样式调整 */
+#stock-ranking-page .form-group {
+    flex: 0 0 auto;
+}
+
+#stock-ranking-page .form-group:first-child {
+    flex: 0 0 120px;
+}
