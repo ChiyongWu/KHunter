@@ -102,8 +102,9 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         # 计算选股日（今天）的索引 - 数据按日期降序，所以今天是第一行（iloc[0]）
         today_idx = 0
 
-        # 第一步：检查3-4天前是否有倍量阳线
-        # 降序数据中，3天前是iloc[3]，4天前是iloc[4]
+        # 第一步：检查3-4个交易日前是否有倍量阳线
+        # 注意：这里只计算交易日，不计算周末和节假日
+        # 由于数据中只包含交易日，所以直接使用索引即可
         for key_day_offset in [self.key_day_offset_min, self.key_day_offset_max]:
             key_day_idx = today_idx + key_day_offset
 
@@ -142,29 +143,40 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             if not (3 <= total_consecutive_阳 <= 5):
                 continue
 
-            # 【条件2】检查倍量阳线后是否有连续缩量K线（2-3天）
+            # 【条件2】检查倍量阳线后是否有连续缩量K线（2-4天）
             # 获取倍量阳线的成交量
             key_day_volume = df.iloc[key_day_idx]['volume']
 
-            # 检查倍量阳线后的缩量情况
-            valid_shrink_days = 0
-            for shrink_day_offset in range(1, self.max_adjust_days + 1):
-                # 缩量日索引（向今天方向，更小的索引）
-                shrink_day_idx = key_day_idx - shrink_day_offset
-
-                # 检查缩量日是否存在
-                if shrink_day_idx < 0:
+            # 在倍量阳线之后寻找连续缩量K线
+            # 从倍量阳线后的第一根K线开始检查
+            found_shrink_sequence = False
+            
+            # 检查倍量阳线后面的所有K线，寻找连续缩量序列
+            for start_offset in range(1, min(10, key_day_idx)):  # 最多向后检查10根K线
+                # 从这个位置开始检查连续缩量
+                valid_shrink_days = 0
+                
+                for shrink_offset in range(start_offset, start_offset + self.max_adjust_days):
+                    shrink_day_idx = key_day_idx - shrink_offset
+                    
+                    # 检查缩量日是否存在
+                    if shrink_day_idx < 0:
+                        break
+                    
+                    # 检查是否缩量（成交量小于倍量阳线）
+                    shrink_volume = df.iloc[shrink_day_idx]['volume']
+                    if shrink_volume >= key_day_volume:
+                        break
+                    
+                    valid_shrink_days += 1
+                
+                # 如果找到足够的连续缩量天数，则满足条件
+                if valid_shrink_days >= self.min_adjust_days:
+                    found_shrink_sequence = True
                     break
-
-                # 检查是否缩量（成交量小于倍量阳线）
-                shrink_volume = df.iloc[shrink_day_idx]['volume']
-                if shrink_volume >= key_day_volume:
-                    break
-
-                valid_shrink_days += 1
             
             # 检查是否满足连续缩量天数要求（至少2天）
-            if valid_shrink_days >= self.min_adjust_days:
+            if found_shrink_sequence:
                 # 找到倍量阳线的日期
                 key_date = df.iloc[key_day_idx]['date']
                 if hasattr(key_date, 'strftime'):
