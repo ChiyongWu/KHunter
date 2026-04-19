@@ -871,7 +871,7 @@ def get_strategies():
             "data": {
                 "strategies": [
                     {
-                        "name": "ContinuousRisingWithVolumeStrategyV2",
+                        "name": "连阳回调策略",
                         "display_name": "连阳回调策略"
                     }
                 ]
@@ -886,23 +886,15 @@ def get_strategies():
         
         strategies = []
         for strategy_name in registry.list_strategies():
-            # 获取策略对象，以便获取其display_name
+            # 获取策略对象
             strategy = registry.get_strategy(strategy_name)
-            # 尝试从metadata中获取display_name，如果没有则使用策略对象的name属性
-            display_name = strategy_name
             if strategy:
-                if hasattr(strategy, 'metadata') and 'display_name' in strategy.metadata:
-                    display_name = strategy.metadata['display_name']
-                elif hasattr(strategy, 'name'):
-                    display_name = strategy.name
-            
-            # 将英文策略名称转换为中文显示名称
-            chinese_display_name = get_chinese_name(display_name)
-            
-            strategies.append({
-                'name': strategy_name,  # 保留英文名称用于后端处理
-                'display_name': chinese_display_name  # 返回中文名称供前端显示
-            })
+                # 使用策略对象的name属性（中文名称）
+                chinese_name = strategy.name
+                strategies.append({
+                    'name': chinese_name,  # 中文名称
+                    'display_name': chinese_name  # 中文名称
+                })
         
         return jsonify({
             'success': True,
@@ -914,6 +906,8 @@ def get_strategies():
     
     except Exception as e:
         logger.error(f"获取策略列表失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'message': f'获取策略列表失败: {str(e)}',
