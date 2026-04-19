@@ -12,7 +12,7 @@ let backtestConfig = {
     buy_amount: 100000,
     max_daily_buys: 5,
     support_level_method: 'ma20',
-    stop_loss: 0.05,
+    stop_loss: -0.05,  // 修复：应该是负数，表示 -5%（止损 5%）
     take_profit: 0.15,
     max_hold_days: 10
 };
