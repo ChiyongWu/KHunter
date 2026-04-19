@@ -69,8 +69,8 @@ strategies:
 
   # 连阳回调策略
   ContinuousRisingWithVolumeStrategyV2:
-    support_method: key_open
-    description: 连阳后倍量突破，缩量调整不跌破关键日开盘价
+    support_method: key_close_5
+    description: 连阳后倍量突破，缩量调整不跌破关键日收盘价以下5%
 
 # 默认支撑位计算方法（当策略未配置时使用）
 default_support_method: ma20
