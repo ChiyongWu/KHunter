@@ -171,18 +171,19 @@ class StrategyRegistry:
                         issubclass(attr, BaseStrategy) and 
                         attr is not BaseStrategy):
                         
-                        # 检查是否有name属性
-                        strategy_instance = attr()
-                        strategy_name = getattr(strategy_instance, 'name', attr_name)
+                        # 使用类名作为策略名称，以便与配置文件中的键匹配
+                        # 这样可以确保 register 方法能正确加载参数
+                        strategy_class_name = attr.__name__
                         
-                        # 跳过事件驱动策略
-                        if strategy_name == "事件驱动策略":
-                            print(f"  [SKIP] 跳过策略: {strategy_name}")
+                        # 跳过事件驱动策略（通过检查实例的name属性）
+                        strategy_instance = attr()
+                        if strategy_instance.name == "事件驱动策略":
+                            print(f"  [SKIP] 跳过策略: {strategy_instance.name}")
                             continue
                         
-                        # 注册策略（排除基类）
-                        self.register(attr, name=strategy_name)
-                        print(f"  [OK] 注册策略: {strategy_name}")
+                        # 注册策略（使用类名作为键，以便与配置文件匹配）
+                        self.register(attr, name=strategy_class_name)
+                        print(f"  [OK] 注册策略: {strategy_instance.name} (类名: {strategy_class_name})")
                         
             except Exception as e:
                 print(f"  [ERROR] 加载 {module_name} 失败: {e}")
