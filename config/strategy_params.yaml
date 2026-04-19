@@ -1112,7 +1112,7 @@ strategies:
   ContinuousRisingWithVolumeStrategyV2:
     support_method: key_open
     color: '#8b5cf6'
-    description: 识别3~5天连阳后出现倍量突破，随后缩量调整的股票，捕捉潜在的上涨机会
+    description: 识别3~10天连阳后出现倍量突破，随后缩量调整的股票，捕捉潜在的上涨机会
     display_name: 连阳回调策略
     icon: 📈
     param_details:
@@ -1125,7 +1125,7 @@ strategies:
         min: 3
         type: int
       max_consecutive_阳:
-        default: 5
+        default: 10
         description: 最大连续阳线天数
         display_name: 最大连续阳线天数
         group: 连阳参数
@@ -1175,7 +1175,7 @@ strategies:
       name: 调整参数
     params:
       min_consecutive_阳: 3
-      max_consecutive_阳: 5
+      max_consecutive_阳: 10
       volume_multiplier: 2.2
       key_day_rise_min: 0.07
       max_adjust_days: 4
