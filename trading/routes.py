@@ -6,6 +6,7 @@ from trading.backtest_dao import BacktestDAO
 from trading.backtest_engine import BacktestEngine
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
+from utils.strategy_name_mapper import get_chinese_name, get_english_name
 import logging
 
 # 获取日志记录器
@@ -401,10 +402,13 @@ def run_backtest():
         if 'capital_history' in result and result['capital_history']:
             final_capital = result['capital_history'][-1]
         
+        # 将策略名称转换为中文（如果是英文类名）
+        chinese_strategy_name = get_chinese_name(strategy_name)
+        
         save_result = {
-            'strategy_name': strategy_name,
+            'strategy_name': chinese_strategy_name,  # 保存中文策略名称
             'support_level_method': support_level_method,
-            'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
+            'backtest_name': f"{chinese_strategy_name}_{start_date}_{end_date}",
             'start_date': start_date,
             'end_date': end_date,
             'total_trades': result.get('performance', {}).get('total_trades', 0),
@@ -424,8 +428,9 @@ def run_backtest():
         
         # 检查是否已存在相同参数的回测结果
         # 检查条件：策略名称、开始日期、结束日期相同
+        # 使用中文策略名称查询
         existing_result = backtest_dao.get_result_by_strategy_and_dates(
-            strategy_name, start_date, end_date
+            chinese_strategy_name, start_date, end_date
         )
         
         if existing_result:
@@ -864,8 +869,8 @@ def get_strategies():
             "data": {
                 "strategies": [
                     {
-                        "name": "多方炮策略",
-                        "display_name": "多方炮策略"
+                        "name": "ContinuousRisingWithVolumeStrategyV2",
+                        "display_name": "连阳回调策略"
                     }
                 ]
             }
@@ -888,9 +893,13 @@ def get_strategies():
                     display_name = strategy.metadata['display_name']
                 elif hasattr(strategy, 'name'):
                     display_name = strategy.name
+            
+            # 将英文策略名称转换为中文显示名称
+            chinese_display_name = get_chinese_name(display_name)
+            
             strategies.append({
-                'name': strategy_name,
-                'display_name': display_name
+                'name': strategy_name,  # 保留英文名称用于后端处理
+                'display_name': chinese_display_name  # 返回中文名称供前端显示
             })
         
         return jsonify({
