@@ -36,7 +36,7 @@ logs/
 reports/
 .kiro/
 test/
-doc/
+# doc/ 目录保留用于存放修复和文档，不忽略
 
 # Environment
 .env
