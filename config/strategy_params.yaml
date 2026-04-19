@@ -1112,7 +1112,7 @@ strategies:
   ContinuousRisingWithVolumeStrategyV2:
     support_method: key_open
     color: '#8b5cf6'
-    description: 识别3~4天连阳后出现倍量突破，随后缩量调整的股票，捕捉潜在的上涨机会
+    description: 识别3~5天连阳后出现倍量突破，随后缩量调整的股票，捕捉潜在的上涨机会
     display_name: 连阳回调策略
     icon: 📈
     param_details:
@@ -1125,7 +1125,7 @@ strategies:
         min: 3
         type: int
       max_consecutive_阳:
-        default: 4
+        default: 5
         description: 最大连续阳线天数
         display_name: 最大连续阳线天数
         group: 连阳参数
@@ -1140,43 +1140,43 @@ strategies:
         max: 3.0
         min: 1.5
         type: float
+      key_day_rise_min:
+        default: 0.04
+        description: 倍量阳线最小涨幅
+        display_name: 倍量阳线最小涨幅(%)
+        group: 倍量参数
+        max: 0.1
+        min: 0.01
+        type: float
       max_adjust_days:
         default: 4
         description: 缩量调整最大天数
         display_name: 缩量调整最大天数
         group: 调整参数
         max: 7
-        min: 3
+        min: 2
         type: int
       min_adjust_days:
-        default: 3
+        default: 2
         description: 缩量调整最小天数
         display_name: 缩量调整最小天数
         group: 调整参数
         max: 5
         min: 2
         type: int
-      lookback_days:
-        default: 10
-        description: 回溯天数
-        display_name: 回溯天数
-        group: 其他参数
-        max: 20
-        min: 5
-        type: int
     param_groups:
     - description: 控制连续阳线判断的参数
       name: 连阳参数
+    - description: 控制倍量阳线判断的参数
+      name: 倍量参数
     - description: 控制成交量条件的参数
       name: 成交量参数
     - description: 控制缩量调整判断的参数
       name: 调整参数
-    - description: 其他控制参数
-      name: 其他参数
     params:
       min_consecutive_阳: 3
-      max_consecutive_阳: 4
+      max_consecutive_阳: 5
       volume_multiplier: 1.5
+      key_day_rise_min: 0.04
       max_adjust_days: 4
-      min_adjust_days: 3
-      lookback_days: 10
+      min_adjust_days: 2
