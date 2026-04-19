@@ -53,56 +53,149 @@ class LimitUpPullbackStrategy(BaseStrategy):
         """
         计算技术指标（MA、KDJ、MACD、成交量均线） - 优化版本
         
+        优化策略：
+        1. 一次性排序数据（从倒序转为正序）
+        2. 在正序数据上计算所有指标
+        3. 一次性恢复原始顺序
+        这样避免了KDJ、MACD、MA函数内部的重复排序
+        
         注意：调用此方法前应先进行快速预检查，确保股票有涨停板
         
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: 添加了指标列的DataFrame
         """
-        from utils.technical import MA, KDJ, MACD
+        # 检测数据顺序
+        try:
+            is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+        except (IndexError, KeyError):
+            is_descending = False
         
-        result = df.copy()
+        # 统一转换为正序计算（从早到晚）
+        if is_descending:
+            df_calc = df.iloc[::-1].copy().reset_index(drop=True)
+        else:
+            df_calc = df.copy().reset_index(drop=True)
         
-        # 标记涨停（向量化操作，使用-1计算相对于下一行，即更旧日期的变化）
-        result['pct_change'] = result['close'].pct_change(-1)
+        # 在正序数据上计算所有指标
+        result = df_calc.copy()
+        
+        # 标记涨停（向量化操作）
+        result['pct_change'] = result['close'].pct_change()
         result['is_limit_up'] = result['pct_change'] >= self.params['limit_up_threshold']
         result = result.drop('pct_change', axis=1)
         
-        # 1. 计算均线
-        result['ma5'] = MA(result['close'], 5)
-        result['ma10'] = MA(result['close'], 10)
-        result['ma20'] = MA(result['close'], 20)
+        # 1. 计算均线（直接在正序数据上计算，避免反转）
+        result['ma5'] = result['close'].rolling(window=5, min_periods=1).mean()
+        result['ma10'] = result['close'].rolling(window=10, min_periods=1).mean()
+        result['ma20'] = result['close'].rolling(window=20, min_periods=1).mean()
         
-        # 2. 计算KDJ指标
-        kdj_df = KDJ(df, n=9, m1=3, m2=3)
-        if not kdj_df.empty:
-            result['K'] = kdj_df['K'].values
-            result['D'] = kdj_df['D'].values
-            result['J'] = kdj_df['J'].values
-        else:
-            result['K'] = 0.0
-            result['D'] = 0.0
-            result['J'] = 0.0
+        # 2. 计算KDJ指标（在正序数据上直接计算）
+        kdj_result = self._calculate_kdj_optimized(result)
+        result['K'] = kdj_result['K']
+        result['D'] = kdj_result['D']
+        result['J'] = kdj_result['J']
         
-        # 3. 计算MACD指标
-        macd_df = MACD(df, fastperiod=12, slowperiod=26, signalperiod=9)
-        if not macd_df.empty:
-            result['macd'] = macd_df['macd'].values
-            result['macd_signal'] = macd_df['macd_signal'].values
-            result['macd_hist'] = macd_df['macd_hist'].values
-        else:
-            result['macd'] = 0.0
-            result['macd_signal'] = 0.0
-            result['macd_hist'] = 0.0
+        # 3. 计算MACD指标（在正序数据上直接计算）
+        macd_result = self._calculate_macd_optimized(result)
+        result['macd'] = macd_result['macd']
+        result['macd_signal'] = macd_result['macd_signal']
+        result['macd_hist'] = macd_result['macd_hist']
         
         # 4. 计算成交量均线
-        result['volume_ma5'] = MA(df['volume'], 5)
-        result['volume_ma10'] = MA(df['volume'], 10)
+        result['volume_ma5'] = result['volume'].rolling(window=5, min_periods=1).mean()
+        result['volume_ma10'] = result['volume'].rolling(window=10, min_periods=1).mean()
         
+        # 恢复原始顺序
+        if is_descending:
+            result = result.iloc[::-1].reset_index(drop=True)
+        
+        result.index = df.index
         return result
+    
+    def _calculate_kdj_optimized(self, df_calc):
+        """
+        KDJ指标计算 - 优化版本（假设输入数据已是正序）
+        
+        :param df_calc: 正序排列的DataFrame
+        :return: 包含K、D、J列的DataFrame
+        """
+        n = 9
+        m1 = 3
+        m2 = 3
+        
+        # 计算RSV
+        low_min = df_calc['low'].rolling(window=n, min_periods=1).min()
+        high_max = df_calc['high'].rolling(window=n, min_periods=1).max()
+        
+        range_val = high_max - low_min
+        rsv = pd.Series(index=df_calc.index, dtype=float)
+        
+        # RSV计算，前n-1个周期不足时用50填充
+        for i in range(len(df_calc)):
+            if i < n - 1 or range_val.iloc[i] == 0:
+                rsv.iloc[i] = 50.0
+            else:
+                rsv.iloc[i] = (df_calc['close'].iloc[i] - low_min.iloc[i]) / range_val.iloc[i] * 100
+        
+        # SMA计算 - 通达信风格
+        k = pd.Series(index=df_calc.index, dtype=float)
+        d = pd.Series(index=df_calc.index, dtype=float)
+        
+        # 初始化第一日K、D值为50
+        k.iloc[0] = 50.0
+        d.iloc[0] = 50.0
+        
+        # 递归计算
+        for i in range(1, len(df_calc)):
+            k.iloc[i] = (rsv.iloc[i] * 1 + k.iloc[i-1] * (m1 - 1)) / m1
+            d.iloc[i] = (k.iloc[i] * 1 + d.iloc[i-1] * (m2 - 1)) / m2
+        
+        # 计算J值
+        j = 3 * k - 2 * d
+        
+        return pd.DataFrame({
+            'K': k,
+            'D': d,
+            'J': j
+        })
+    
+    def _calculate_macd_optimized(self, df_calc):
+        """
+        MACD指标计算 - 优化版本（假设输入数据已是正序）
+        
+        :param df_calc: 正序排列的DataFrame
+        :return: 包含macd、macd_signal、macd_hist列的DataFrame
+        """
+        fastperiod = 12
+        slowperiod = 26
+        signalperiod = 9
+        
+        # 计算快速和慢速EMA
+        ema_fast = df_calc['close'].ewm(span=fastperiod, adjust=False, min_periods=1).mean()
+        ema_slow = df_calc['close'].ewm(span=slowperiod, adjust=False, min_periods=1).mean()
+        
+        # 计算DIF（MACD线）
+        dif = ema_fast - ema_slow
+        
+        # 计算DEA（信号线）
+        dea = dif.ewm(span=signalperiod, adjust=False, min_periods=1).mean()
+        
+        # 计算MACD柱状图
+        macd = 2 * (dif - dea)
+        
+        return pd.DataFrame({
+            'macd': dif,
+            'macd_signal': dea,
+            'macd_hist': macd
+        })
 
     def _find_limit_up(self, df):
         """
         寻找最近的涨停板 - 向量化优化版本
+        
+        优化点：
+        1. 使用向量化操作找出涨停板
+        2. 使用numpy数组操作，避免循环
         
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :return: 涨停板信息列表，每个元素为 (index, date, close, open, volume)
@@ -131,12 +224,17 @@ class LimitUpPullbackStrategy(BaseStrategy):
         valid_mask = limit_up_mask & volume_ok
         valid_positions = np.where(valid_mask)[0]
         
-        # 构建涨停板信息列表
+        # 如果没有找到符合条件的涨停板，直接返回
+        if len(valid_positions) == 0:
+            return []
+        
+        # 构建涨停板信息列表 - 使用向量化操作
         limit_ups = []
         dates = check_df['date'].values
         closes = check_df['close'].values
         opens = check_df['open'].values
         
+        # 直接使用numpy数组索引，避免循环
         for pos in valid_positions:
             limit_ups.append((
                 int(pos),  # 涨停板在DataFrame中的位置
@@ -151,6 +249,11 @@ class LimitUpPullbackStrategy(BaseStrategy):
     def _check_pullback(self, df, limit_up_info):
         """
         检查涨停后是否出现合理回调 - 向量化优化版本
+        
+        优化点：
+        1. 使用向量化操作计算最高价和最低价
+        2. 避免循环操作
+        3. 使用numpy的any()函数快速检查条件
         
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :param limit_up_info: 涨停板信息 (index, date, close, open, volume)
@@ -204,7 +307,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
 
         # 计算回调天数
         pullback_days = end_idx - start_idx
-        # 确保回调天数在1-5之间
+        # 确保回调天数在范围内
         if pullback_days < pullback_days_min or pullback_days > pullback_days_max:
             return None
 
@@ -313,8 +416,9 @@ class LimitUpPullbackStrategy(BaseStrategy):
         选择符合条件的股票 - 优化版本
         
         优化点：
-        1. 先快速预检查是否有涨停板，无则直接返回
-        2. 避免对无涨停板股票计算复杂指标
+        1. 快速预检查只检查涨幅，不计算其他指标
+        2. 只有通过预检查的股票才计算完整指标
+        3. 避免对无涨停板股票的复杂计算
         
         :param data: 股票数据（DataFrame或list）
         :param stock_name: 股票代码
@@ -333,19 +437,17 @@ class LimitUpPullbackStrategy(BaseStrategy):
             else:
                 df = data.copy()
             
-            # 快速预检查：检查是否有涨停板
+            # 快速预检查：检查是否有涨停板（只检查涨幅，不计算其他指标）
             lookback_days = self.params['limit_up_lookback_days']
+            limit_up_threshold = self.params['limit_up_threshold']
             
             # 只取需要的列，提高速度
             # 注意：数据已经是倒序排列（最新在index=0）
-            # 需要取前lookback_days+1行，这样才能计算出最新日期的涨跌幅
             check_df = df[['close']].head(lookback_days + 1)
             
             # 向量化计算涨跌幅
             # 使用pct_change(-1)计算相对于下一行（更旧日期）的变化
-            # 这样可以正确计算最新日期的涨跌幅
             pct_change = check_df['close'].pct_change(-1)
-            limit_up_threshold = self.params['limit_up_threshold']
             
             # 如果没有涨停板，直接返回空列表
             # 注意：pct_change[-1]是NaN，所以从[:-1]检查（排除最后一行）

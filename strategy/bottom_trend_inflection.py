@@ -49,11 +49,17 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         - KDJ：用于输出信号
         - 趋势线：用于输出信号
         - 市值：用于输出信号
+        
+        优化说明：
+        - 只排序一次（在开始时），计算完所有指标后再恢复顺序
+        - 减少排序操作的开销
         """
         result = df.copy()
         
-        # 计算MACD指标（用于检测底背离）
-        # 确保数据按时间正序排列（从旧到新）
+        # 记录原始顺序（从新到旧）
+        original_order = result.index.tolist()
+        
+        # 一次性排序为时间正序（从旧到新）
         result = result.sort_values('date', ascending=True).reset_index(drop=True)
         
         # DIF = 12日EMA - 26日EMA
@@ -67,8 +73,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         # MACD = DIF - DEA
         result['MACD'] = result['DIF'] - result['DEA']
         
-        # 恢复原始顺序（从新到旧）
-        result = result.sort_values('date', ascending=False).reset_index(drop=True)
+        # 计算10日均量（一次性计算）
+        volume_ma_period = self.params['volume_ma_period']
+        result['volume_ma'] = result['volume'].shift(1).rolling(window=volume_ma_period, min_periods=1).mean()
         
         # 计算KDJ指标（与其他策略保持一致）
         from utils.technical import KDJ
@@ -94,14 +101,8 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             # 估算市值：假设总股本2亿股
             result['market_cap'] = result['close'] * 2e8
         
-        # 计算10日均量（用于放量判断）
-        # 数据已按从新到旧排列，需要先按时间正序排列，计算后再恢复顺序
-        result_sorted = result.sort_values('date', ascending=True).reset_index(drop=True)
-        volume_ma_period = self.params['volume_ma_period']
-        # 计算前N天的均量（shift(1)表示向后移动1行，即不包括当前行）
-        result_sorted['volume_ma'] = result_sorted['volume'].shift(1).rolling(window=volume_ma_period, min_periods=1).mean()
         # 恢复原始顺序（从新到旧）
-        result = result_sorted.sort_values('date', ascending=False).reset_index(drop=True)
+        result = result.sort_values('date', ascending=False).reset_index(drop=True)
         
         return result
     
@@ -143,6 +144,11 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         
         参数说明：
         - lookback_days: 回溯天数，用于寻找底部拐点。设置为120时检查半年内的数据
+        
+        优化说明：
+        - 快速预检查只检查涨幅，不计算volume_ma（节省时间）
+        - 只有通过涨幅预检查的股票才计算完整指标
+        - 消除重复的volume_ma计算
         """
         if df.empty or len(df) < self.params['lookback_days']:
             return []
@@ -157,7 +163,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             if stock_name.startswith('ST') or stock_name.startswith('*ST'):
                 return []
         
-        # 快速预检查：检查是否有放量反弹
+        # 快速预检查：只检查涨幅（不计算volume_ma，节省时间）
         # 1. 计算最近10个交易日的涨跌幅
         recent_df = df.head(11)  # 包括当前一天和前10天
         
@@ -169,21 +175,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if not (pct_change >= price_increase_threshold).any():
             return []
         
-        # 2. 检查成交量是否放大
-        # 计算10日均量（与calculate_indicators保持一致）
-        # 需要按时间正序排列计算，再恢复倒序
-        volume_ma_period = self.params['volume_ma_period']
-        recent_df_sorted = recent_df.sort_values('date', ascending=True).reset_index(drop=True)
-        recent_df_sorted['volume_ma'] = recent_df_sorted['volume'].shift(1).rolling(window=volume_ma_period, min_periods=1).mean()
-        recent_df = recent_df_sorted.sort_values('date', ascending=False).reset_index(drop=True)
-        volume_ratio = recent_df['volume'] / recent_df['volume_ma']
-        
-        # 检查是否有成交量≥2.5倍均量的交易日
-        volume_ratio_threshold = self.params['volume_ratio_threshold']
-        if not (volume_ratio >= volume_ratio_threshold).any():
-            return []
-        
-        # 计算技术指标（只有通过快速预检查的股票才会到达这里）
+        # 通过涨幅预检查后，计算完整指标
         df_with_indicators = self.calculate_indicators(df)
         
         # 获取最新一天的数据
@@ -208,6 +200,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             return []
         
         # 条件3：放量反弹（需要在最近10个交易日内发生）
+        # 传入完整的df_with_indicators和date_to_idx映射以加速查询
         volume_surge_result = self._check_volume_surge(df_with_indicators)
         if not volume_surge_result:
             return []
@@ -240,6 +233,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         - 然后在该位置之后（时间上更近）找最低价
         - 计算下跌幅度 = (最高价 - 最低价) / 最高价
         - 判断下跌幅度是否 > 45%
+        
+        优化说明：
+        - 使用 argmax() 代替 idxmax() + get_loc()，性能更好
         """
         if df.empty or len(df) < 2:
             return False
@@ -248,10 +244,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         lookback_days = self.params['lookback_days']
         lookback_df = df.head(lookback_days)
         
-        # 找到最高价出现的位置 - 使用向量化操作优化
-        # 使用idxmax()找到最高价的索引位置
-        highest_idx = lookback_df['high'].idxmax()
-        highest_price = lookback_df.loc[highest_idx, 'high']
+        # 找到最高价出现的位置 - 使用 argmax() 直接获取位置
+        highest_pos = lookback_df['high'].argmax()
+        highest_price = lookback_df['high'].iloc[highest_pos]
         
         # 如果没有找到有效的最高价，返回False
         if pd.isna(highest_price) or highest_price <= 0:
@@ -259,7 +254,6 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         
         # 在最高价之后（时间上更近）找最低价
         # 从最高价位置到最新一天的数据中找最低价
-        highest_pos = lookback_df.index.get_loc(highest_idx)
         after_highest = lookback_df.iloc[:highest_pos]
         
         if after_highest.empty:
@@ -339,9 +333,15 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         返回：
         - 如果满足条件，返回放量长阳日的日期字符串
         - 如果不满足条件，返回False
+        
+        优化说明：
+        - 使用字典映射加速日期查询，避免逐行比较
         """
         if df.empty or len(df) < 11:
             return False
+        
+        # 创建日期到索引的映射，加速查询
+        date_to_idx = {date: idx for idx, date in enumerate(df['date'])}
         
         # 获取最近10个交易日的数据（包括当前一天）
         recent_10_days = df.head(11)  # 包括当前一天和前10天
@@ -413,16 +413,10 @@ class BottomTrendInflectionStrategy(BaseStrategy):
                 # 长阳线的开盘价作为支撑位
                 long_yang_open = current_day['open']
                 
-                # 数据是从新到旧排列的，长阳线之后的天数在原始df中索引更小
-                # 在recent_10_days中，i是长阳线索引，0..i-1是长阳线之后的天数
-                # 但recent_10_days只有11条，需要用原始df来检查到今天的所有数据
-                # current_day的date可以用来定位在原始df中的位置
+                # 使用日期映射加速查询（优化）
                 long_yang_date = current_day['date']
-                # 在原始df中找到长阳日的位置（df是倒序，最新在前）
-                # 长阳日之后到今天的数据 = df中索引 < 长阳日索引的所有行
-                df_idx = df.index[df['date'] == long_yang_date]
-                if len(df_idx) > 0:
-                    ly_pos = df_idx[0]
+                if long_yang_date in date_to_idx:
+                    ly_pos = date_to_idx[long_yang_date]
                     # 长阳日之后的数据（更新的天数，索引更小）
                     after_data = df.iloc[:ly_pos]
                     if not after_data.empty:
