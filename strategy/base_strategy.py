@@ -57,11 +57,14 @@ class BaseStrategy(ABC):
             if df is None or df.empty or len(df) < 20:
                 return None
             
-            # 2. 执行策略 - 直接调用select_stocks，由策略自身负责具体执行逻辑
+            # 2. 计算技术指标 - 必须先计算指标，select_stocks 依赖这些指标
+            df = self.calculate_indicators(df)
+            
+            # 3. 执行策略 - 直接调用select_stocks，由策略自身负责具体执行逻辑
             # 这样可以利用策略的快速预检查，避免不必要的计算
             signals = self.select_stocks(df, stock_name)
             
-            # 3. 结果过滤和标准化
+            # 4. 结果过滤和标准化
             if signals:
                 return {
                     'code': stock_code,
@@ -71,7 +74,7 @@ class BaseStrategy(ABC):
             return None
             
         except Exception as e:
-            # 4. 错误处理
+            # 5. 错误处理
             # 记录错误但不影响整体流程
             import logging
             logger = logging.getLogger(__name__)
