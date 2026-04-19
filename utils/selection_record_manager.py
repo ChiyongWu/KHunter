@@ -790,7 +790,7 @@ class SelectionRecordManager:
     
     def delete_old_record(self, stock_code: str, selection_date):
         """
-        删除旧记录（逻辑删除）
+        删除旧记录（物理删除）
         
         参数：
             stock_code: 股票代码
@@ -805,14 +805,13 @@ class SelectionRecordManager:
             else:
                 selection_date_str = str(selection_date)
             
-            # 逻辑删除：标记为不活跃
-            update_sql = """
-            UPDATE stock_selection_record
-            SET is_active = 0, updated_at = ?
-            WHERE stock_code = ? AND selection_date = ? AND is_active = 1
+            # 物理删除：直接删除旧记录
+            delete_sql = """
+            DELETE FROM stock_selection_record
+            WHERE stock_code = ? AND selection_date = ?
             """
             
-            self.db_manager.execute_with_retry(update_sql, (datetime.now(), stock_code, selection_date_str))
+            self.db_manager.execute_with_retry(delete_sql, (stock_code, selection_date_str))
             
             logger.info(f"删除股票 {stock_code} 在 {selection_date_str} 的旧记录")
         
