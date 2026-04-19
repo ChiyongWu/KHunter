@@ -284,12 +284,10 @@ class RankingManager:
             板块名称，如果获取失败返回空字符串
         """
         try:
-            # 1. 从stock_score_detail表获取指定日期的板块详情
-            # 直接使用原始格式的score_date进行查询
+            # 从stock_score_detail表获取指定日期的板块详情
             sql = "SELECT sector_details FROM stock_score_detail WHERE stock_code = ? AND score_date = ? LIMIT 1"
             logger.debug(f"查询板块信息: 股票={stock_code}, 日期={score_date}")
             
-            # 直接使用execute方法执行查询，避免query方法的额外处理
             conn = self.db_manager.connect()
             cursor = conn.cursor()
             cursor.execute(sql, (stock_code, score_date))
@@ -306,7 +304,7 @@ class RankingManager:
                         # 解析JSON格式的板块详情
                         sector_data = json.loads(sector_details)
                         
-                        # 直接从sector_details中获取板块名称
+                        # 从sector_details中获取板块名称
                         if 'sector_name' in sector_data and sector_data['sector_name']:
                             logger.debug(f"获取板块名称成功: {sector_data['sector_name']}")
                             return sector_data['sector_name']
@@ -316,32 +314,6 @@ class RankingManager:
                         logger.debug(f"解析板块详情失败: {str(e)}")
             else:
                 logger.debug(f"没有找到板块详情记录")
-            
-            # 2. 尝试从stock_sector_mapping表获取板块信息
-            logger.debug(f"尝试从stock_sector_mapping表获取板块信息: {stock_code}")
-            sector_mapping_sql = """
-                SELECT ss.sector_name 
-                FROM stock_sector_mapping ssm
-                JOIN stock_sector ss ON ssm.sector_code = ss.sector_code
-                WHERE ssm.stock_code = ? AND ssm.mapping_date = ?
-                LIMIT 1
-            """
-            cursor.execute(sector_mapping_sql, (stock_code, score_date))
-            sector_mapping_rows = cursor.fetchall()
-            if sector_mapping_rows and sector_mapping_rows[0] and sector_mapping_rows[0][0]:
-                sector_name = sector_mapping_rows[0][0]
-                logger.debug(f"从stock_sector_mapping表获取到板块: {sector_name}")
-                return sector_name
-            
-            # 3. 如果没有找到，尝试从stock_basic表获取行业信息作为板块
-            logger.debug(f"尝试从stock_basic表获取行业信息: {stock_code}")
-            basic_sql = "SELECT industry FROM stock_basic WHERE code = ? LIMIT 1"
-            cursor.execute(basic_sql, (stock_code,))
-            basic_rows = cursor.fetchall()
-            if basic_rows and basic_rows[0] and basic_rows[0][0]:
-                industry = basic_rows[0][0]
-                logger.debug(f"从stock_basic表获取到行业: {industry}")
-                return industry
             
             logger.debug(f"无法获取股票 {stock_code} 的板块信息")
             return ''
