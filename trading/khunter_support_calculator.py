@@ -9,6 +9,7 @@ import pandas as pd
 import logging
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+from pathlib import Path
 import yaml
 
 # 配置日志
@@ -41,7 +42,8 @@ class KHunterSupportCalculator:
         'key_close': 'key_close',
     }
     
-    # 策略支撑位计算方法配置
+    # 策略支撑位计算方法配置（已移到 config/support_methods.yaml）
+    # 保留此处作为备用，但优先从配置文件读取
     STRATEGY_SUPPORT_METHODS = {
         'LimitUpPullbackStrategy': 'key_close_5',
         'MultiGoldenCrossStrategy': 'ma20',
@@ -74,7 +76,51 @@ class KHunterSupportCalculator:
         # config_manager: 配置管理器，类型object，可选
         self.db_manager = db_manager
         self.config_manager = config_manager
+        
+        # 从配置文件加载支撑位配置
+        self._load_support_methods_config()
+        
         logger.info("KHunter 支撑位计算器初始化完成")
+    
+    def _load_support_methods_config(self):
+        """
+        从配置文件加载支撑位计算方法配置
+        
+        优先级：
+        1. 从 config/support_methods.yaml 读取
+        2. 如果失败，使用代码中的 STRATEGY_SUPPORT_METHODS
+        """
+        try:
+            # 尝试从配置文件加载
+            config_path = Path(__file__).parent.parent / "config" / "support_methods.yaml"
+            
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                
+                # 从配置文件中提取策略支撑位配置
+                strategies_config = config.get('strategies', {})
+                
+                if strategies_config:
+                    # 更新 STRATEGY_SUPPORT_METHODS
+                    self.STRATEGY_SUPPORT_METHODS = {}
+                    for strategy_name, strategy_config in strategies_config.items():
+                        support_method = strategy_config.get('support_method')
+                        if support_method:
+                            self.STRATEGY_SUPPORT_METHODS[strategy_name] = support_method
+                    
+                    logger.info(f"从配置文件加载了 {len(self.STRATEGY_SUPPORT_METHODS)} 个策略的支撑位配置")
+                
+                # 更新默认支撑位方法
+                default_method = config.get('default_support_method')
+                if default_method:
+                    self.DEFAULT_SUPPORT_METHOD = default_method
+                    logger.info(f"默认支撑位计算方法: {self.DEFAULT_SUPPORT_METHOD}")
+            else:
+                logger.warning(f"支撑位配置文件不存在: {config_path}，使用代码中的默认配置")
+        
+        except Exception as e:
+            logger.warning(f"加载支撑位配置文件失败: {str(e)}，使用代码中的默认配置")
     
     # ==================== 公开方法 ====================
     
