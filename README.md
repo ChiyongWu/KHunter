@@ -69,38 +69,11 @@ cd KHunter
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 配置系统
-# 复制配置模板文件为实际配置文件
-cp config/config.yaml.template config/config.yaml
-# 编辑 config/config.yaml，填入你的钉钉机器人配置（可选）
-
-# 4. 启动Web界面
+# 3. 启动Web界面
 python main.py web
 ```
+第2，3步也可以直接在windows下双击根目录下start.bat文件自动处理
 
-windows下直接双击根目录下start.bat文件启动web服务
-
-### 配置说明
-
-首次使用需要配置 `config/config.yaml` 文件：
-
-1. **复制配置模板**
-   ```bash
-   cp config/config.yaml.template config/config.yaml
-   ```
-
-2. **编辑配置文件** (`config/config.yaml`)
-   - `data_dir` - 数据存储目录（默认：data）
-   - `dingtalk.webhook_url` - 钉钉机器人webhook URL（可选）
-   - `dingtalk.secret` - 钉钉机器人加签密钥（可选）
-   - `schedule.time` - 定时任务执行时间（默认：17:00）
-   - `update.lookback_days` - 数据回看天数（默认：10）
-   - `filters.*` - 股票过滤条件（市值、流通股本等）
-
-3. **注意事项**
-   - `config.yaml` 包含敏感信息，已加入 `.gitignore`，不会被提交到仓库
-   - 钉钉配置为可选项，不配置不影响系统使用
-   - 首次运行需要初始化数据，请在Web界面执行"数据初始化"
 
 ## 🌐 Web界面功能
 
@@ -147,7 +120,7 @@ windows下直接双击根目录下start.bat文件启动web服务
 
 ### 策略参数配置
 
-编辑 `config/strategy_params.yaml` 调整策略参数。每个策略都有独立的参数配置，支持在线修改。
+可以前端功能调整策略参数。每个策略都有独立的参数配置，支持在线修改。
 
 
 
