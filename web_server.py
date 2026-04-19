@@ -850,8 +850,13 @@ def run_selection():
                 all_signals = {}
                 
                 strategy_idx = 0
-                for strategy_name, strategy in registry.strategies.items():
-                    if strategy_name not in strategies_to_run:
+                for strategy_name in strategies_to_run:
+                    if strategy_name not in registry.strategies:
+                        continue
+                    
+                    # 使用 get_strategy 获取最新参数的策略对象
+                    strategy = registry.get_strategy(strategy_name)
+                    if not strategy:
                         continue
                     
                     strategy_idx += 1
@@ -933,12 +938,17 @@ def run_selection():
                     # 只获取指定的策略
                     for strategy_name in strategies_to_run:
                         if strategy_name in registry.strategies:
-                            strategies_to_execute.append((strategy_name, registry.strategies[strategy_name]))
+                            # 使用 get_strategy 获取最新参数的策略对象
+                            strategy = registry.get_strategy(strategy_name)
+                            if strategy:
+                                strategies_to_execute.append((strategy_name, strategy))
                         else:
                             func_logger.warning(f"指定的策略不存在: {strategy_name}")
                 else:
                     # 如果没有指定策略，执行所有策略
-                    strategies_to_execute = list(registry.strategies.items())
+                    # 获取所有策略名称
+                    all_strategy_names = list(registry.strategies.keys())
+                    strategies_to_execute = [(name, registry.get_strategy(name)) for name in all_strategy_names if registry.get_strategy(name)]
                 
                 for strategy_name, strategy in strategies_to_execute:
                     func_logger.info(f"执行策略: {strategy_name}")
