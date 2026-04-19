@@ -317,8 +317,24 @@ class RankingManager:
             else:
                 logger.debug(f"没有找到板块详情记录")
             
-            # 2. 如果没有找到，尝试从stock_basic表获取行业信息作为板块
-            logger.debug(f"尝试从stock_basic表获取板块信息: {stock_code}")
+            # 2. 尝试从stock_sector_mapping表获取板块信息
+            logger.debug(f"尝试从stock_sector_mapping表获取板块信息: {stock_code}")
+            sector_mapping_sql = """
+                SELECT ss.sector_name 
+                FROM stock_sector_mapping ssm
+                JOIN stock_sector ss ON ssm.sector_code = ss.sector_code
+                WHERE ssm.stock_code = ? AND ssm.mapping_date = ?
+                LIMIT 1
+            """
+            cursor.execute(sector_mapping_sql, (stock_code, score_date))
+            sector_mapping_rows = cursor.fetchall()
+            if sector_mapping_rows and sector_mapping_rows[0] and sector_mapping_rows[0][0]:
+                sector_name = sector_mapping_rows[0][0]
+                logger.debug(f"从stock_sector_mapping表获取到板块: {sector_name}")
+                return sector_name
+            
+            # 3. 如果没有找到，尝试从stock_basic表获取行业信息作为板块
+            logger.debug(f"尝试从stock_basic表获取行业信息: {stock_code}")
             basic_sql = "SELECT industry FROM stock_basic WHERE code = ? LIMIT 1"
             cursor.execute(basic_sql, (stock_code,))
             basic_rows = cursor.fetchall()
