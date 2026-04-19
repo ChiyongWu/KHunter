@@ -1176,7 +1176,7 @@ strategies:
     params:
       min_consecutive_阳: 3
       max_consecutive_阳: 5
-      volume_multiplier: 1.8
-      key_day_rise_min: 0.05
+      volume_multiplier: 2.2
+      key_day_rise_min: 0.07
       max_adjust_days: 4
       min_adjust_days: 2
