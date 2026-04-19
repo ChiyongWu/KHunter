@@ -30,13 +30,13 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         super().__init__("连阳回调策略", params)
         # 从配置文件加载参数
         self.min_consecutive_阳 = self.params.get('min_consecutive_阳', 3)  # 最小连续阳线天数
-        self.max_consecutive_阳 = self.params.get('max_consecutive_阳', 5)  # 最大连续阳线天数
-        self.volume_multiplier = self.params.get('volume_multiplier', 2.0)  # 倍量阈值（2倍）
-        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.04)  # 倍量阳线最小涨幅（4%）
+        self.max_consecutive_阳 = self.params.get('max_consecutive_阳', 10)  # 最大连续阳线天数
+        self.volume_multiplier = self.params.get('volume_multiplier', 2.2)  # 倍量阈值（2.2倍）
+        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.07)  # 倍量阳线最小涨幅（7%）
         self.max_adjust_days = self.params.get('max_adjust_days', 4)  # 缩量调整最大天数
         self.min_adjust_days = self.params.get('min_adjust_days', 2)  # 缩量调整最小天数
-        self.key_day_offset_min = 3  # 关键日距今最小天数
-        self.key_day_offset_max = 4  # 关键日距今最大天数
+        self.key_day_offset_min = self.params.get('key_day_offset_min', 3)  # 关键日距今最小天数
+        self.key_day_offset_max = self.params.get('key_day_offset_max', 4)  # 关键日距今最大天数
 
     def calculate_indicators(self, df):
         """
@@ -65,8 +65,10 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         # 计算是否收阳
         df['is_阳线'] = df['close'] > df['open']
 
-        # 计算涨幅
-        df['涨幅'] = (df['close'] - df['open']) / df['open']
+        # 计算涨幅（相对于前一天收盘价）
+        # 数据按日期降序排列，所以前一天是下一行（iloc[i+1]）
+        df['前一日收盘'] = df['close'].shift(-1)
+        df['涨幅'] = (df['close'] - df['前一日收盘']) / df['前一日收盘']
 
         # 计算前五日平均成交量
         # 方法：先按升序排列计算，再按降序排列回来

@@ -1133,7 +1133,7 @@ strategies:
         min: 3
         type: int
       volume_multiplier:
-        default: 1.8
+        default: 2.2
         description: 倍量阈值（当日成交量/前五日平均成交量）
         display_name: 倍量阈值
         group: 成交量参数
@@ -1141,13 +1141,29 @@ strategies:
         min: 1.5
         type: float
       key_day_rise_min:
-        default: 0.05
+        default: 0.07
         description: 倍量阳线最小涨幅
         display_name: 倍量阳线最小涨幅(%)
         group: 倍量参数
         max: 0.1
         min: 0.01
         type: float
+      key_day_offset_min:
+        default: 3
+        description: 关键日距今最小天数（交易日）
+        display_name: 关键日最小距离(天)
+        group: 关键日参数
+        max: 5
+        min: 2
+        type: int
+      key_day_offset_max:
+        default: 4
+        description: 关键日距今最大天数（交易日）
+        display_name: 关键日最大距离(天)
+        group: 关键日参数
+        max: 7
+        min: 3
+        type: int
       max_adjust_days:
         default: 4
         description: 缩量调整最大天数
@@ -1169,6 +1185,8 @@ strategies:
       name: 连阳参数
     - description: 控制倍量阳线判断的参数
       name: 倍量参数
+    - description: 控制关键日位置的参数
+      name: 关键日参数
     - description: 控制成交量条件的参数
       name: 成交量参数
     - description: 控制缩量调整判断的参数
@@ -1178,5 +1196,7 @@ strategies:
       max_consecutive_阳: 10
       volume_multiplier: 2.2
       key_day_rise_min: 0.07
+      key_day_offset_min: 3
+      key_day_offset_max: 4
       max_adjust_days: 4
       min_adjust_days: 2
