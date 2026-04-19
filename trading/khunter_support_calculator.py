@@ -59,8 +59,8 @@ class KHunterSupportCalculator:
     # 默认支撑位计算方法
     DEFAULT_SUPPORT_METHOD = 'ma20'
     
-    # 加载范围：跟踪天数 + 60个交易日
-    LOAD_DAYS_BUFFER = 60
+    # 加载范围：跟踪天数 + 120个交易日（增加到120以确保关键日期在范围内）
+    LOAD_DAYS_BUFFER = 120
     
     def __init__(self, db_manager, config_manager=None):
         """
@@ -422,17 +422,45 @@ class KHunterSupportCalculator:
             if not key_date:
                 raise ValueError("关键日期不能为空")
             
-            # 2. 查找关键日期在K线数据中的位置
-            key_date_idx = df_kline[df_kline['date'] == key_date].index
+            # 2. 标准化日期格式（确保为 YYYY-MM-DD）
+            key_date_str = str(key_date)[:10]
             
-            # 3. 验证关键日期是否存在于K线数据中
+            # 3. 尝试精确匹配关键日期
+            key_date_idx = df_kline[df_kline['date'].astype(str).str[:10] == key_date_str].index
+            
+            # 4. 如果精确匹配失败，尝试找最接近的日期
             if len(key_date_idx) == 0:
-                raise ValueError(f"关键日期 {key_date} 不在K线数据中")
+                logger.warning(f"关键日期 {key_date_str} 不在K线数据中，尝试查找最接近的日期")
+                
+                # 转换日期为 datetime 对象进行比较
+                df_kline_copy = df_kline.copy()
+                df_kline_copy['date_obj'] = pd.to_datetime(df_kline_copy['date'].astype(str).str[:10])
+                key_date_obj = pd.to_datetime(key_date_str)
+                
+                # 计算日期差异
+                df_kline_copy['date_diff'] = abs(df_kline_copy['date_obj'] - key_date_obj)
+                
+                # 找到最接近的日期
+                closest_idx = df_kline_copy['date_diff'].idxmin()
+                closest_diff_days = df_kline_copy.loc[closest_idx, 'date_diff'].days
+                
+                # 如果最接近的日期在 1 天以内，使用该日期
+                if closest_diff_days <= 1:
+                    logger.warning(
+                        f"使用最接近的日期 {df_kline.loc[closest_idx, 'date']} "
+                        f"（相差 {closest_diff_days} 天）作为关键日期"
+                    )
+                    key_date_idx = [closest_idx]
+                else:
+                    raise ValueError(
+                        f"关键日期 {key_date_str} 不在K线数据中，"
+                        f"最接近的日期相差 {closest_diff_days} 天"
+                    )
             
-            # 4. 获取关键日的开盘价
+            # 5. 获取关键日的开盘价
             key_open = df_kline['open'].iloc[key_date_idx[0]]
             
-            # 5. 精确到小数点后两位
+            # 6. 精确到小数点后两位
             return round(key_open, 2)
         
         except Exception as e:
