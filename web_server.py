@@ -1108,6 +1108,15 @@ def run_selection():
         # 清理数据中的NaN和Inf值
         cleaned_results = clean_data_for_json(results)
         
+        # 将结果中的键从类名转换为中文名称
+        if strategy_display_names:
+            converted_results = {}
+            for strategy_name, signals in cleaned_results.items():
+                # 获取中文名称，如果没有则使用原名称
+                display_name = strategy_display_names.get(strategy_name, strategy_name)
+                converted_results[display_name] = signals
+            cleaned_results = converted_results
+        
         # 如果启用了B1完美图形匹配
         if b1_match:
             func_logger.info(f"启用B1完美图形匹配，最小相似度: {min_similarity}，回看天数: {lookback_days}")

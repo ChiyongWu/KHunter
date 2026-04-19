@@ -332,34 +332,21 @@ export async function saveSelectionResults() {
     btn.innerHTML = '<span class="icon">⏳</span> 保存中...';
 
     try {
-        // 获取策略名称映射（从全局变量或重新加载）
-        let strategyDisplayNames = window.strategyDisplayNames || {};
+        // 后端已经返回中文名称作为键，直接使用结果
+        // 为每个信号添加策略名称（如果还没有）
+        const resultsToSave = JSON.parse(JSON.stringify(lastSelectionResults));
         
-        // 如果没有缓存的映射，从响应中获取
-        if (Object.keys(strategyDisplayNames).length === 0) {
-            // 从前端缓存的结果中提取策略名称映射
-            // 这需要在renderSelectionResults中保存
-            strategyDisplayNames = window.strategyDisplayNames || {};
-        }
-        
-        // 转换结果中的策略键为中文名称
-        const convertedResults = {};
-        for (const [strategyKey, signals] of Object.entries(lastSelectionResults)) {
+        for (const [strategyName, signals] of Object.entries(resultsToSave)) {
             // 跳过特殊字段
-            if (strategyKey.startsWith('_')) {
-                convertedResults[strategyKey] = signals;
+            if (strategyName.startsWith('_')) {
                 continue;
             }
-            
-            // 获取中文名称，如果没有映射则使用原始键
-            const displayName = strategyDisplayNames[strategyKey] || strategyKey;
-            convertedResults[displayName] = signals;
             
             // 为每个信号添加策略名称
             if (Array.isArray(signals)) {
                 signals.forEach(signal => {
                     if (!signal.strategies) {
-                        signal.strategies = [displayName];
+                        signal.strategies = [strategyName];
                     }
                 });
             }
@@ -370,7 +357,7 @@ export async function saveSelectionResults() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                results: convertedResults,
+                results: resultsToSave,
                 time: lastSelectionTime,
                 end_date: lastSelectionDate
             })
