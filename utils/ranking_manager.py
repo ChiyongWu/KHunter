@@ -538,6 +538,25 @@ class RankingManager:
         try:
             logger.info(f"开始重新生成排名: {selection_date}, 强制重新计算: {force_recalculate}")
             
+            # 0. 清除旧的评分数据（强制重新计算时）
+            if force_recalculate:
+                try:
+                    # 清除 stock_score 表中该日期的数据
+                    delete_score_sql = "DELETE FROM stock_score WHERE score_date = ?"
+                    self.db_manager.execute_with_retry(delete_score_sql, (selection_date,))
+                    logger.info(f"已清除 {selection_date} 的旧评分数据")
+                    
+                    # 清除 stock_score_detail 表中该日期的数据
+                    delete_detail_sql = "DELETE FROM stock_score_detail WHERE score_date = ?"
+                    self.db_manager.execute_with_retry(delete_detail_sql, (selection_date,))
+                    logger.info(f"已清除 {selection_date} 的旧评分详情数据")
+                    
+                    # 提交删除操作
+                    conn = self.db_manager.connect()
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"清除旧数据失败: {e}")
+            
             # 1. 查询需要重新计算的股票
             if force_recalculate:
                 # 强制重新计算所有股票
