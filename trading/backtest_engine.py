@@ -1103,19 +1103,37 @@ class BacktestEngine:
             # 检查是否需要卖出
             sell_type = None
             
+            # 获取卖出条件参数
+            take_profit = config.get('take_profit', 15)
+            stop_loss = config.get('stop_loss', -5)
+            hold_period = config.get('hold_period', 10)
+            
+            # 添加详细日志
+            logger.info(f"检查卖出条件 - {position['stock_code']} {position['stock_name']}: "
+                       f"买入日期={buy_date_str}, 当前日期={current_date_str}, "
+                       f"持有天数={hold_days}, 收益率={return_rate:.2f}%, "
+                       f"止盈阈值={take_profit}%, 止损阈值={stop_loss}%, 持有期={hold_period}天")
+            
             # T+1规则：当天买入的股票不能当天卖出（hold_days必须 > 0）
             if hold_days > 0:
                 # 1. 止盈检查
-                if return_rate >= config.get('take_profit', 15):
+                if return_rate >= take_profit:
                     sell_type = 'take_profit'
+                    logger.info(f"  ✓ 触发止盈条件: {position['stock_code']} 收益率 {return_rate:.2f}% >= {take_profit}%")
                 
                 # 2. 止损检查
-                elif return_rate <= config.get('stop_loss', -5):
+                elif return_rate <= stop_loss:
                     sell_type = 'stop_loss'
+                    logger.info(f"  ✓ 触发止损条件: {position['stock_code']} 收益率 {return_rate:.2f}% <= {stop_loss}%")
                 
                 # 3. 持有到期检查
-                elif hold_days >= config.get('hold_period', 10):
+                elif hold_days >= hold_period:
                     sell_type = 'hold_expired'
+                    logger.info(f"  ✓ 触发持有到期条件: {position['stock_code']} 持有天数 {hold_days} >= {hold_period}")
+                else:
+                    logger.info(f"  ✗ 未触发任何卖出条件: {position['stock_code']}")
+            else:
+                logger.info(f"  ✗ T+1规则限制，不能卖出: {position['stock_code']} (hold_days={hold_days})")
             
             if sell_type:
                 # 执行卖出
