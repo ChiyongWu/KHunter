@@ -1200,7 +1200,8 @@ def run_selection():
             'data': cleaned_results,
             'filter_stats': filter_stats,
             'b1_match': False,
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'strategy_display_names': strategy_display_names  # 添加策略名称映射
         })
     
     except Exception as e:

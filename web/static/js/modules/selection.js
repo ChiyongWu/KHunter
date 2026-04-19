@@ -200,7 +200,7 @@ export async function executeSelectionWithStrategies(strategies, logic = 'or', s
                 saveBtn.innerHTML = '<span class="icon">💾</span> 保存结果';
                 saveBtn.classList.remove('btn-success');
             }
-            renderSelectionResults(result.data, result.time, result.filter_stats);
+            renderSelectionResults(result.data, result.time, result.filter_stats, result.strategy_display_names);
         } else {
             console.error('选股失败:', result.error);
             document.getElementById('selection-results').innerHTML = 
@@ -332,12 +332,45 @@ export async function saveSelectionResults() {
     btn.innerHTML = '<span class="icon">⏳</span> 保存中...';
 
     try {
+        // 获取策略名称映射（从全局变量或重新加载）
+        let strategyDisplayNames = window.strategyDisplayNames || {};
+        
+        // 如果没有缓存的映射，从响应中获取
+        if (Object.keys(strategyDisplayNames).length === 0) {
+            // 从前端缓存的结果中提取策略名称映射
+            // 这需要在renderSelectionResults中保存
+            strategyDisplayNames = window.strategyDisplayNames || {};
+        }
+        
+        // 转换结果中的策略键为中文名称
+        const convertedResults = {};
+        for (const [strategyKey, signals] of Object.entries(lastSelectionResults)) {
+            // 跳过特殊字段
+            if (strategyKey.startsWith('_')) {
+                convertedResults[strategyKey] = signals;
+                continue;
+            }
+            
+            // 获取中文名称，如果没有映射则使用原始键
+            const displayName = strategyDisplayNames[strategyKey] || strategyKey;
+            convertedResults[displayName] = signals;
+            
+            // 为每个信号添加策略名称
+            if (Array.isArray(signals)) {
+                signals.forEach(signal => {
+                    if (!signal.strategies) {
+                        signal.strategies = [displayName];
+                    }
+                });
+            }
+        }
+        
         // 发送保存请求
         const response = await fetch('/api/save_selection', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                results: lastSelectionResults,
+                results: convertedResults,
                 time: lastSelectionTime,
                 end_date: lastSelectionDate
             })
@@ -376,8 +409,12 @@ export async function saveSelectionResults() {
  * @param {Object} results - 选股结果
  * @param {string} time - 选股时间
  * @param {Object} filterStats - 过滤统计信息
+ * @param {Object} strategyDisplayNames - 策略名称映射
  */
-export function renderSelectionResults(results, time, filterStats) {
+export function renderSelectionResults(results, time, filterStats, strategyDisplayNames = {}) {
+    // 保存策略名称映射到全局变量，供保存时使用
+    window.strategyDisplayNames = strategyDisplayNames || {};
+    
     // 设置选股时间
     document.getElementById('selection-time').textContent = `选股时间: ${time}`;
     const container = document.getElementById('selection-results');
