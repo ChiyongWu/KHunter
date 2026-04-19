@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
-from utils.technical import REF, MA
+from utils.technical import REF, MA, calculate_daily_return
 
 
 class MultiPartyCannonStrategy(BaseStrategy):
@@ -91,8 +91,8 @@ class MultiPartyCannonStrategy(BaseStrategy):
         # 计算K线方向（1=阳线，-1=阴线）
         result['candle_direction'] = (result['close'] > result['open']).astype(int) * 2 - 1
         
-        # 计算K线涨幅
-        result['candle_rise'] = (result['close'] - result['open']) / result['open']
+        # 计算K线日收益率（相对于前一天收盘价）- 使用统一的函数
+        result['candle_rise'] = calculate_daily_return(result)
         
         # 计算成交量均线
         volume_ma_period = self.params['volume_ma_period']

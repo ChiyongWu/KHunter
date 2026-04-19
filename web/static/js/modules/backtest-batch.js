@@ -31,7 +31,7 @@ class BacktestTaskManager {
     // 创建任务对象
     const task = {
       id: ++this.taskIdCounter,
-      strategy_name: config.strategy_name,
+      strategy_name: config.strategy_name,  // 中文名称
       start_date: config.start_date,
       end_date: config.end_date,
       support_level_method: config.support_level_method || 'ma20',
@@ -294,7 +294,7 @@ class BacktestUIManager {
       white-space: nowrap;
     `;
     tabTitle.innerHTML = `
-      <span>${task.strategy_name} ${task.start_date}~${task.end_date}</span>
+      <span>${result.strategy_name || task.strategy_name} ${task.start_date}~${task.end_date}</span>
       <button class="close-tab" style="background:none; border:none; cursor:pointer; font-size:14px; padding:0; color:#6b7280;" onclick="event.stopPropagation();">✕</button>
     `;
 
@@ -352,7 +352,7 @@ class BacktestUIManager {
     
     return `
       <div style="padding: 16px;">
-        <h4 style="margin-bottom: 16px; color: #374151;">${task.strategy_name} 回测结果</h4>
+        <h4 style="margin-bottom: 16px; color: #374151;">${result.strategy_name || task.strategy_name} 回测结果</h4>
         
         <!-- 统计数据 -->
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px;">
@@ -771,8 +771,11 @@ class BacktestUIManager {
    * @returns {Object} 表单数据
    */
   getFormData() {
+    // 直接使用中文策略名称
+    const chineseStrategyName = this.elements.strategySelect.value || '';
+    
     return {
-      strategy_name: this.elements.strategySelect.value,
+      strategy_name: chineseStrategyName,  // 发送中文名称给后端
       support_level_method: this.elements.supportLevel.value,
       start_date: this.elements.startDate.value,
       end_date: this.elements.endDate.value
@@ -950,7 +953,7 @@ async function executeBacktestBatch() {
       // 显示执行进度
       const progress = Math.round((i / tasks.length) * 100);
       backtestUIManager.showProgress({
-        strategyName: task.strategy_name,
+        strategyName: task.strategy_name,  // 使用中文名称显示
         currentIndex: i + 1,
         totalCount: tasks.length,
         progress: progress,

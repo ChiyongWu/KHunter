@@ -7,6 +7,7 @@
 4. 缩量调整期间不跌破关键日的开盘价（支撑位）
 """
 from strategy.base_strategy import BaseStrategy
+from utils.technical import calculate_daily_return
 import pandas as pd
 import numpy as np
 
@@ -65,10 +66,8 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         # 计算是否收阳
         df['is_阳线'] = df['close'] > df['open']
 
-        # 计算涨幅（相对于前一天收盘价）
-        # 数据按日期降序排列，所以前一天是下一行（iloc[i+1]）
-        df['前一日收盘'] = df['close'].shift(-1)
-        df['涨幅'] = (df['close'] - df['前一日收盘']) / df['前一日收盘']
+        # 计算涨幅（相对于前一天收盘价）- 使用统一的函数
+        df['涨幅'] = calculate_daily_return(df)
 
         # 计算前五日平均成交量
         # 方法：先按升序排列计算，再按降序排列回来

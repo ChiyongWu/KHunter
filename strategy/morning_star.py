@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
+from utils.technical import calculate_daily_return
 
 
 class MorningStarStrategy(BaseStrategy):
@@ -240,6 +241,7 @@ class MorningStarStrategy(BaseStrategy):
             return False
         
         # 第三根阳线涨幅>5%
+        # 注意：这里使用日内涨幅（相对于开盘价），因为这是K线形态的标准定义
         first_candle_change = (first_candle['close'] - first_candle['open']) / first_candle['open'] * 100
         if first_candle_change <= 5:
             return False

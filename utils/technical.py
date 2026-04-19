@@ -308,3 +308,82 @@ def MACD(df, fastperiod=12, slowperiod=26, signalperiod=9):
     
     result.index = df.index
     return result
+
+
+def calculate_price_change(df, method='prev_close'):
+    """
+    计算价格变化率 - 统一的涨幅计算函数
+    
+    参数：
+        df: DataFrame，必须包含'open'和'close'列
+        method: 计算方法
+            - 'prev_close': 相对于前一天收盘价的涨幅（标准定义）
+            - 'open': 相对于当天开盘价的涨幅（日内涨幅）
+    
+    返回：
+        Series，包含价格变化率
+    
+    说明：
+        - 数据可能是倒序（最新在前）或正序，函数会自动处理
+        - 对于倒序数据，前一天是下一行（iloc[i+1]）
+        - 对于正序数据，前一天是上一行（iloc[i-1]）
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    
+    # 检测数据顺序
+    try:
+        is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+    except (IndexError, KeyError):
+        is_descending = False
+    
+    if method == 'prev_close':
+        # 相对于前一天收盘价的涨幅（标准定义）
+        if is_descending:
+            # 倒序数据：前一天是下一行
+            prev_close = df['close'].shift(-1)
+        else:
+            # 正序数据：前一天是上一行
+            prev_close = df['close'].shift(1)
+        
+        # 计算涨幅
+        price_change = (df['close'] - prev_close) / prev_close
+        
+    elif method == 'open':
+        # 相对于当天开盘价的涨幅（日内涨幅）
+        price_change = (df['close'] - df['open']) / df['open']
+    
+    else:
+        raise ValueError(f"不支持的计算方法: {method}")
+    
+    return price_change
+
+
+def calculate_daily_return(df):
+    """
+    计算日收益率 - 相对于前一天收盘价的涨幅
+    
+    这是 calculate_price_change(df, method='prev_close') 的简化版本
+    
+    参数：
+        df: DataFrame，必须包含'close'列
+    
+    返回：
+        Series，包含日收益率
+    """
+    return calculate_price_change(df, method='prev_close')
+
+
+def calculate_intraday_return(df):
+    """
+    计算日内收益率 - 相对于当天开盘价的涨幅
+    
+    这是 calculate_price_change(df, method='open') 的简化版本
+    
+    参数：
+        df: DataFrame，必须包含'open'和'close'列
+    
+    返回：
+        Series，包含日内收益率
+    """
+    return calculate_price_change(df, method='open')

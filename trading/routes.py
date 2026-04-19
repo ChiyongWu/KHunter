@@ -6,7 +6,7 @@ from trading.backtest_dao import BacktestDAO
 from trading.backtest_engine import BacktestEngine
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
-from utils.strategy_name_mapper import get_chinese_name, get_english_name
+from utils.strategy_name_mapper import get_english_name
 import logging
 
 # 获取日志记录器
@@ -326,7 +326,7 @@ def run_backtest():
     
     请求体:
         {
-            "strategy_name": "多方炮策略",
+            "strategy_name": "连阳回调策略",  // 中文名称
             "support_level_method": "ma20",
             "start_date": "2024-01-01",
             "end_date": "2024-06-30"
@@ -338,6 +338,7 @@ def run_backtest():
             "message": "成功或错误信息",
             "data": {
                 "result_id": 1,
+                "strategy_name": "连阳回调策略",  // 中文名称
                 "total_return": 10.5,
                 "win_rate": 65.0,
                 "max_drawdown": 8.2,
@@ -350,10 +351,13 @@ def run_backtest():
         data = request.get_json() or {}
         
         # 提取执行条件和回测配置
-        strategy_name = data.get('strategy_name', '')
+        strategy_name = data.get('strategy_name', '')  // 接收中文名称
         support_level_method = data.get('support_level_method', 'ma20')
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
+        
+        # 将中文策略名称转换为英文（用于策略执行）
+        english_strategy_name = get_english_name(strategy_name)
         
         # 提取回测配置参数
         score_threshold = data.get('score_threshold', 60)
@@ -393,8 +397,8 @@ def run_backtest():
         logger.info("使用原有回测引擎")
         engine = BacktestEngine()
         
-        # 运行回测
-        result = engine.run_backtest(strategy_name, config)
+        # 运行回测（使用英文策略名称）
+        result = engine.run_backtest(english_strategy_name, config)
         
         # 构建保存到数据库的结果格式
         # 计算final_capital
@@ -402,13 +406,11 @@ def run_backtest():
         if 'capital_history' in result and result['capital_history']:
             final_capital = result['capital_history'][-1]
         
-        # 将策略名称转换为中文（如果是英文类名）
-        chinese_strategy_name = get_chinese_name(strategy_name)
-        
+        # 使用中文策略名称保存到数据库
         save_result = {
-            'strategy_name': chinese_strategy_name,  # 保存中文策略名称
+            'strategy_name': strategy_name,  // 保存中文策略名称
             'support_level_method': support_level_method,
-            'backtest_name': f"{chinese_strategy_name}_{start_date}_{end_date}",
+            'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
             'start_date': start_date,
             'end_date': end_date,
             'total_trades': result.get('performance', {}).get('total_trades', 0),
@@ -430,7 +432,7 @@ def run_backtest():
         # 检查条件：策略名称、开始日期、结束日期相同
         # 使用中文策略名称查询
         existing_result = backtest_dao.get_result_by_strategy_and_dates(
-            chinese_strategy_name, start_date, end_date
+            strategy_name, start_date, end_date
         )
         
         if existing_result:

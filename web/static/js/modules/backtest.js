@@ -83,8 +83,10 @@ async function loadStrategies() {
                 strategySelect.innerHTML = '';
                 strategies.forEach(strategy => {
                     const option = document.createElement('option');
-                    option.value = strategy.name;
-                    option.textContent = strategy.display_name || strategy.name;
+                    // 使用中文名称作为value和显示文本
+                    const chineseName = strategy.display_name || strategy.name;
+                    option.value = chineseName;
+                    option.textContent = chineseName;
                     strategySelect.appendChild(option);
                 });
             }
@@ -280,9 +282,12 @@ async function runBacktest() {
         // 生成配置名称
         const configName = `${strategySelect?.value || '未知策略'}_${startDateInput?.value || ''}_${endDateInput?.value || ''}`;
         
+        // 直接使用中文策略名称
+        const chineseStrategyName = strategySelect?.value || '';
+        
         backtestConfig = {
             config_name: configName,
-            strategy_name: strategySelect?.value || '',
+            strategy_name: chineseStrategyName,  // 发送中文名称给后端
             start_date: startDateInput?.value || '',
             end_date: endDateInput?.value || '',
             initial_capital: savedParams.initial_capital,
