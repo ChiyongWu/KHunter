@@ -522,3 +522,148 @@ class RankingManager:
                 return current_price
             # 如果当前价格也获取失败，返回0.0
             return 0.0
+
+    def regenerate_ranking(self, selection_date: str, force_recalculate: bool = False) -> Dict:
+        """重新生成指定日期的排名
+        
+        用于修复评分不完整或为0的情况。可以选择是否强制重新计算所有评分。
+        
+        Args:
+            selection_date: 选股日期，格式为YYYY-MM-DD
+            force_recalculate: 是否强制重新计算所有评分（默认False，只重新计算评分为0的股票）
+        
+        Returns:
+            {'success': True/False, 'message': '...', 'total': 10, 'recalculated': 5, 'failed': 0}
+        """
+        try:
+            logger.info(f"开始重新生成排名: {selection_date}, 强制重新计算: {force_recalculate}")
+            
+            # 1. 查询需要重新计算的股票
+            if force_recalculate:
+                # 强制重新计算所有股票
+                sql = """
+                    SELECT id, stock_code, stock_name, industry, sector, selection_price, strategy_name
+                    FROM stock_selection_record 
+                    WHERE selection_date = ? AND is_active = 1 
+                    AND strategy_name NOT LIKE '%M头%' 
+                    AND strategy_name NOT LIKE '%多死叉%'
+                """
+                logger.info(f"强制重新计算所有股票的评分")
+            else:
+                # 只重新计算评分为0或NULL的股票
+                sql = """
+                    SELECT id, stock_code, stock_name, industry, sector, selection_price, strategy_name
+                    FROM stock_selection_record 
+                    WHERE selection_date = ? AND is_active = 1 
+                    AND strategy_name NOT LIKE '%M头%' 
+                    AND strategy_name NOT LIKE '%多死叉%'
+                    AND (score IS NULL OR score = 0.0)
+                """
+                logger.info(f"重新计算评分为0或NULL的股票")
+            
+            records = self.db_manager.query(sql, (selection_date,))
+            
+            if not records:
+                logger.info(f"日期 {selection_date} 没有需要重新计算的股票")
+                return {
+                    'success': True,
+                    'message': f'没有需要重新计算的股票',
+                    'total': 0,
+                    'recalculated': 0,
+                    'failed': 0
+                }
+            
+            # 2. 重新计算每只股票的评分
+            recalculated_count = 0
+            failed_count = 0
+            
+            for record in records:
+                record_id = record['id']
+                stock_code = record['stock_code']
+                stock_name = record['stock_name']
+                
+                try:
+                    # 重新计算评分
+                    score = self._calculate_score(stock_code, selection_date)
+                    logger.info(f"重新计算评分: {stock_code}({stock_name}) = {score}")
+                    
+                    # 获取最佳板块
+                    sector = self._get_best_sector(stock_code, selection_date)
+                    
+                    # 更新数据库
+                    update_sql = """
+                        UPDATE stock_selection_record 
+                        SET score = ?, sector = ? 
+                        WHERE id = ?
+                    """
+                    cursor = self.db_manager.execute_with_retry(update_sql, (score, sector, record_id))
+                    logger.debug(f"更新评分成功: ID={record_id}, 股票={stock_code}, 评分={score}, 板块={sector}")
+                    recalculated_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"重新计算评分失败: {stock_code}({stock_name}) - {str(e)}")
+                    failed_count += 1
+            
+            # 3. 提交事务
+            try:
+                conn = self.db_manager.connect()
+                conn.commit()
+                logger.debug("评分更新事务提交成功")
+            except Exception as e:
+                logger.error(f"事务提交失败: {e}")
+            
+            # 4. 重新生成排名
+            try:
+                # 查询所有有评分的股票
+                all_stocks_sql = """
+                    SELECT id, stock_code, stock_name, industry, sector, selection_price, score
+                    FROM stock_selection_record 
+                    WHERE selection_date = ? AND is_active = 1 
+                    AND strategy_name NOT LIKE '%M头%' 
+                    AND strategy_name NOT LIKE '%多死叉%'
+                    AND score > 0.0
+                    ORDER BY score DESC
+                """
+                all_stocks = self.db_manager.query(all_stocks_sql, (selection_date,))
+                
+                # 重新分配排名
+                for i, stock in enumerate(all_stocks, 1):
+                    update_rank_sql = """
+                        UPDATE stock_selection_record 
+                        SET rank_position = ? 
+                        WHERE id = ?
+                    """
+                    try:
+                        self.db_manager.execute_with_retry(update_rank_sql, (i, stock['id']))
+                    except Exception as e:
+                        logger.error(f"更新排名失败: {stock['id']} - {e}")
+                
+                # 提交排名更新
+                conn = self.db_manager.connect()
+                conn.commit()
+                logger.info(f"已重新生成排名，共 {len(all_stocks)} 只股票")
+                
+            except Exception as e:
+                logger.error(f"重新生成排名失败: {str(e)}")
+            
+            # 5. 返回结果
+            result = {
+                'success': True,
+                'message': f'重新生成排名完成: 重新计算 {recalculated_count} 只股票，失败 {failed_count} 只',
+                'total': len(records),
+                'recalculated': recalculated_count,
+                'failed': failed_count
+            }
+            
+            logger.info(f"重新生成排名完成: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"重新生成排名失败: {str(e)}")
+            return {
+                'success': False,
+                'message': f'重新生成排名失败: {str(e)}',
+                'total': 0,
+                'recalculated': 0,
+                'failed': 0
+            }

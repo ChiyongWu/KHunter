@@ -2605,6 +2605,47 @@ def track_ranking():
         })
 
 
+@app.route('/api/ranking/regenerate', methods=['POST'])
+def regenerate_ranking():
+    """
+    重新生成排名 - 用于修复评分不完整或为0的情况
+    
+    参数：
+        selection_date: 选股日期，格式为YYYY-MM-DD
+        force_recalculate: 是否强制重新计算所有评分（可选，默认false）
+    
+    返回：
+        重新生成结果，包含成功/失败、重新计算数量、失败数量等
+    """
+    try:
+        data = request.get_json()
+        selection_date = data.get('selection_date')
+        force_recalculate = data.get('force_recalculate', False)
+        
+        if not selection_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少选股日期参数'
+            })
+        
+        # 调用排名管理器的重新生成方法
+        result = ranking_manager.regenerate_ranking(selection_date, force_recalculate)
+        
+        return jsonify({
+            'success': result.get('success', False),
+            'message': result.get('message', ''),
+            'data': {
+                'total': result.get('total', 0),
+                'recalculated': result.get('recalculated', 0),
+                'failed': result.get('failed', 0)
+            }
+        })
+    except Exception as e:
+        logger.error(f"重新生成排名失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
 
 
 def run_web_server(host='0.0.0.0', port=5000, debug=False):
