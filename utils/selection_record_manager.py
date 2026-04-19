@@ -128,25 +128,20 @@ class SelectionRecordManager:
             strategy_names: 策略名称列表 ['morning_star', 'bowl_rebound']（已废弃，使用signal中的strategies字段）
             signals: 选股信号列表 [{'code': '000001', 'name': '平安银行', 'strategies': ['morning_star'], ...}]
             selection_time: 选股执行时间
-            end_date: 用户选择的选股日期
+            end_date: 用户选择的选股日期（已废弃，优先使用K线数据中的最新日期）
         
         返回：
             {'success': True, 'saved': 10, 'skipped': 5, 'updated': 2, 'error': 0}
         """
         try:
-            # 使用用户选择的日期作为选入日期
-            if end_date:
-                selection_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                logger.info(f"使用用户选择的日期作为选入日期: {selection_date}")
+            # 优先从stock_kline表获取最新日期作为选入日期（交易日）
+            selection_date = self._get_latest_kline_date()
+            if selection_date is None:
+                # 如果没有K线数据，回退到使用selection_time的日期
+                selection_date = selection_time.date()
+                logger.warning(f"未找到K线数据，使用当前日期作为选入日期: {selection_date}")
             else:
-                # 从stock_kline表获取最新日期作为选入日期
-                selection_date = self._get_latest_kline_date()
-                if selection_date is None:
-                    # 如果没有K线数据，回退到使用selection_time的日期
-                    selection_date = selection_time.date()
-                    logger.warning(f"未找到K线数据，使用当前日期作为选入日期: {selection_date}")
-                else:
-                    logger.info(f"使用K线数据最新日期作为选入日期: {selection_date}")
+                logger.info(f"使用K线数据最新日期作为选入日期: {selection_date}")
             
             # 统计信息
             stats = {'saved': 0, 'skipped': 0, 'updated': 0, 'error': 0}
