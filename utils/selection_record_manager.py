@@ -128,20 +128,31 @@ class SelectionRecordManager:
             strategy_names: 策略名称列表 ['morning_star', 'bowl_rebound']（已废弃，使用signal中的strategies字段）
             signals: 选股信号列表 [{'code': '000001', 'name': '平安银行', 'strategies': ['morning_star'], ...}]
             selection_time: 选股执行时间
-            end_date: 用户选择的选股日期（已废弃，优先使用K线数据中的最新日期）
+            end_date: 用户选择的选股日期（格式：YYYY-MM-DD）
         
         返回：
             {'success': True, 'saved': 10, 'skipped': 5, 'updated': 2, 'error': 0}
         """
         try:
-            # 优先从stock_kline表获取最新日期作为选入日期（交易日）
-            selection_date = self._get_latest_kline_date()
+            # 确定选入日期：优先使用用户选择的日期，如果该日期没有K线则向前查找
+            selection_date = None
+            
+            if end_date:
+                # 用户选择了日期，先检查该日期是否有K线数据
+                try:
+                    user_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+                    selection_date = self._get_nearest_kline_date(user_date)
+                    if selection_date:
+                        logger.info(f"用户选择日期: {user_date}，使用最近的交易日: {selection_date}")
+                    else:
+                        logger.warning(f"用户选择日期 {user_date} 及之前没有K线数据")
+                except Exception as e:
+                    logger.warning(f"解析用户选择日期失败: {str(e)}")
+            
+            # 如果没有找到合适的日期，使用当前时间的日期
             if selection_date is None:
-                # 如果没有K线数据，回退到使用selection_time的日期
                 selection_date = selection_time.date()
-                logger.warning(f"未找到K线数据，使用当前日期作为选入日期: {selection_date}")
-            else:
-                logger.info(f"使用K线数据最新日期作为选入日期: {selection_date}")
+                logger.warning(f"未找到合适的交易日期，使用当前日期: {selection_date}")
             
             # 统计信息
             stats = {'saved': 0, 'skipped': 0, 'updated': 0, 'error': 0}
@@ -1123,6 +1134,45 @@ class SelectionRecordManager:
             return None
         except Exception as e:
             logger.warning(f"获取最新K线日期失败: {str(e)}")
+            return None
+    
+    def _get_nearest_kline_date(self, target_date):
+        """
+        获取最近的有K线数据的日期（不超过target_date）
+        
+        逻辑：
+        1. 先检查target_date是否有K线数据
+        2. 如果没有，则向前查找最近的有K线数据的日期
+        
+        参数：
+            target_date: 目标日期（date对象或字符串YYYY-MM-DD）
+        
+        返回：
+            最近的有K线数据的日期（date对象），如果没有找到则返回None
+        """
+        try:
+            # 确保target_date是date对象
+            if isinstance(target_date, str):
+                target_date = datetime.strptime(target_date, '%Y-%m-%d').date()
+            
+            # 查询不超过target_date的最新日期
+            cursor = self.db_manager.execute_with_retry(
+                "SELECT MAX(date) as nearest_date FROM stock_kline WHERE date <= ?",
+                (target_date.strftime('%Y-%m-%d'),)
+            )
+            row = cursor.fetchone()
+            
+            if row and row[0]:
+                nearest_date = row[0]
+                # 确保日期格式正确
+                if isinstance(nearest_date, str):
+                    return datetime.strptime(nearest_date, '%Y-%m-%d').date()
+                elif hasattr(nearest_date, 'date'):
+                    return nearest_date.date()
+            
+            return None
+        except Exception as e:
+            logger.warning(f"获取最近K线日期失败: {str(e)}")
             return None
     
     def close(self):
