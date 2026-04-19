@@ -326,7 +326,7 @@ def run_backtest():
     
     请求体:
         {
-            "strategy_name": "连阳回调策略",  // 中文名称
+            "strategy_name": "连阳回调策略",  # 中文名称
             "support_level_method": "ma20",
             "start_date": "2024-01-01",
             "end_date": "2024-06-30"
@@ -338,7 +338,7 @@ def run_backtest():
             "message": "成功或错误信息",
             "data": {
                 "result_id": 1,
-                "strategy_name": "连阳回调策略",  // 中文名称
+                "strategy_name": "连阳回调策略",  # 中文名称
                 "total_return": 10.5,
                 "win_rate": 65.0,
                 "max_drawdown": 8.2,
@@ -351,7 +351,7 @@ def run_backtest():
         data = request.get_json() or {}
         
         # 提取执行条件和回测配置
-        strategy_name = data.get('strategy_name', '')  // 接收中文名称
+        strategy_name = data.get('strategy_name', '')  # 接收中文名称
         support_level_method = data.get('support_level_method', 'ma20')
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
@@ -408,7 +408,7 @@ def run_backtest():
         
         # 使用中文策略名称保存到数据库
         save_result = {
-            'strategy_name': strategy_name,  // 保存中文策略名称
+            'strategy_name': strategy_name,  # 保存中文策略名称
             'support_level_method': support_level_method,
             'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
             'start_date': start_date,
