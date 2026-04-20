@@ -120,15 +120,17 @@ class StrongWashWeakToStrongStrategy(BaseStrategy):
         for i in range(min(6, len(df))):
             row = df.iloc[i]
             
-            # 计算涨幅
-            if row['open'] <= 0:
+            # 检查是否为阳线
+            if row['close'] <= row['open']:
                 continue
             
-            change = (row['close'] - row['open']) / row['open']
-            
-            # 检查是否为大阳线（涨幅≥8%）
-            if row['close'] > row['open'] and change >= self.params['big_candle_threshold']:
-                return True
+            # 计算涨幅：相对前一日收盘价的涨幅
+            if i + 1 < len(df):
+                prev_close = df.iloc[i + 1]['close']
+                if prev_close > 0:
+                    change = (row['close'] - prev_close) / prev_close
+                    if change >= self.params['big_candle_threshold']:
+                        return True
         
         return False
     
