@@ -353,8 +353,8 @@ class LimitUpPullbackStrategy(BaseStrategy):
         """
         检查是否出现再次启动信号
         
-        改进逻辑：最近三个交易日未创新低，高点逐步抬高
-        这表明股票已经稳定，并开始反弹
+        改进逻辑：最近三个交易日低点逐步抬高 AND 高点逐步抬高
+        这表明股票处于上升通道，是真正的反转信号
         
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :return: 是否出现反转信号
@@ -377,11 +377,11 @@ class LimitUpPullbackStrategy(BaseStrategy):
         day2_low = df.iloc[2]['low']
         day2_high = df.iloc[2]['high']
         
-        # 条件1：最近三个交易日未创新低
-        # 即：最新一天的低点 >= 前一天的低点 >= 前两天的低点
-        no_new_low = (day0_low >= day1_low) and (day1_low >= day2_low)
+        # 条件1：低点逐步抬高
+        # 即：最新一天的低点 > 前一天的低点 > 前两天的低点
+        higher_lows = (day0_low > day1_low) and (day1_low > day2_low)
         
-        if not no_new_low:
+        if not higher_lows:
             return False
         
         # 条件2：高点逐步抬高
@@ -391,7 +391,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         if not higher_highs:
             return False
         
-        # 两个条件都满足，表示出现反转信号
+        # 两个条件都满足，表示出现反转信号（股票处于上升通道）
         return True
     
     def get_selection_criteria(self):
@@ -419,7 +419,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         criteria.append(f"3. 成交量萎缩：回调期间至少一日成交量 <= 涨停日成交量的{volume_shrinkage_ratio:.0f}%")
         
         # 条件4：再次启动
-        criteria.append(f"4. 再次启动：最近三个交易日未创新低，高点逐步抬高（表示反转信号）")
+        criteria.append(f"4. 再次启动：最近三个交易日低点逐步抬高，高点逐步抬高（股票处于上升通道）")
         
         return criteria
 
