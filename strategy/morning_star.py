@@ -85,30 +85,16 @@ class MorningStarStrategy(BaseStrategy):
         """
         criteria = []
         
-        # 条件1：三根K线组合
-        lookback_days = self.params['lookback_days']
-        criteria.append(f"1. 三根K线组合：在最近{lookback_days}个交易日内出现连续的三根K线组合")
+        # 条件1：第一根K线（长阴线）
+        criteria.append(f"第一根K线（长阴线）")
         
-        # 条件2：第一根K线
-        criteria.append(f"2. 第一根K线：长阴线（收盘价 < 开盘价，实体长度 > 0.01）")
-        
-        # 条件3：第二根K线
+        # 条件2：第二根K线（小实体）
         small_body_ratio = self.params['small_body_ratio'] * 100
-        criteria.append(f"3. 第二根K线：小实体K线（实体长度 <= 第一根K线实体的{small_body_ratio:.0f}%）")
+        criteria.append(f"第二根K线（小实体，实体长度 <= 第一根K线实体的{small_body_ratio:.0f}%）")
         
-        # 条件4：第三根K线
+        # 条件3：第三根K线（长阳线）
         long_candle_ratio = self.params['long_candle_ratio'] * 100
-        criteria.append(f"4. 第三根K线：长阳线（收盘价 > 开盘价，实体长度 > 第一根K线实体的{long_candle_ratio:.0f}%）")
-        
-        # 条件5：涨幅条件
-        criteria.append(f"5. 涨幅条件：第三根阳线涨幅 > 5%")
-        
-        # 条件6：突破条件
-        criteria.append(f"6. 突破条件：第三根K线收盘价突破第一根K线的开盘价")
-        
-        # 条件7：成交量条件
-        volume_ratio = self.params['volume_ratio']
-        criteria.append(f"7. 成交量条件：第三根K线成交量 >= 第二根K线成交量的{volume_ratio:.1f}倍")
+        criteria.append(f"第三根K线（长阳线，涨幅 > 5%，突破开盘价，成交量 >= 1.5倍）")
         
         return criteria
     
