@@ -111,14 +111,6 @@ class WBottomStrategy(BaseStrategy):
         # 恢复倒序
         result['volume_ma'] = vol_ma_reversed.iloc[::-1].values
 
-        # 6. 计算市值（如无 market_cap 字段或值为NaN则用 close * volume 估算）
-        if 'market_cap' not in result.columns or result['market_cap'].isna().all():
-            # 简单估算：收盘价 × 成交量 / 1e8（亿元）
-            result['market_cap'] = result['close'] * result['volume'] / 1e8
-        else:
-            # 填充NaN值
-            result['market_cap'] = result['market_cap'].fillna(result['close'] * result['volume'] / 1e8)
-
         return result
 
 
@@ -638,7 +630,6 @@ class WBottomStrategy(BaseStrategy):
                 'close': float(df_with_indicators['close'].iloc[0]),
                 'J': float(df_with_indicators['J'].iloc[0]) if 'J' in df_with_indicators.columns else 0.0,
                 'volume_ratio': vol_ratio,
-                'market_cap': float(df_with_indicators['market_cap'].iloc[0]) if 'market_cap' in df_with_indicators.columns else 0.0,
                 'short_term_trend': float(df_with_indicators['short_term_trend'].iloc[0]) if 'short_term_trend' in df_with_indicators.columns else 0.0,
                 'bull_bear_line': float(df_with_indicators['bull_bear_line'].iloc[0]) if 'bull_bear_line' in df_with_indicators.columns else 0.0,
                 'neckline': float(neckline),

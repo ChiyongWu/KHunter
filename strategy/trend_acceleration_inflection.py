@@ -145,17 +145,6 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
             result['short_term_trend'] = 0
             result['bull_bear_line'] = 0
         
-        # 计算市值（如果CSV中有market_cap字段则使用，否则估算）
-        if 'market_cap' not in result.columns:
-            # 估算市值：假设总股本2亿股，转换为亿元
-            result['market_cap'] = (result['close'] * 2e8) / 1e8
-        else:
-            # 填充缺失的市值，确保单位是亿元
-            result['market_cap'] = result['market_cap'].fillna((result['close'] * 2e8) / 1e8).infer_objects(copy=False)
-            # 确保市值单位是亿元（如果数据中是元的话）
-            if result['market_cap'].max() > 10000:
-                result['market_cap'] = result['market_cap'] / 1e8
-        
         # 计算5日均量（用于放量判断）
         try:
             # 数据已按从新到旧排列，需要先按时间正序排列，计算后再恢复顺序

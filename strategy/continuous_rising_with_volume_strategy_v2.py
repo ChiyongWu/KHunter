@@ -39,6 +39,33 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         self.key_day_offset_min = self.params.get('key_day_offset_min', 3)  # 关键日距今最小天数
         self.key_day_offset_max = self.params.get('key_day_offset_max', 4)  # 关键日距今最大天数
 
+    def quick_filter(self, df):
+        """
+        快速过滤：检查是否有足够涨幅的阳线
+        
+        只基于价格，不涉及成交量或其他指标
+        
+        :param df: 股票数据DataFrame（正序，从旧到新）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        for key_day_offset in [self.key_day_offset_min, self.key_day_offset_max]:
+            key_day_idx = key_day_offset
+            
+            if key_day_idx >= len(df) or key_day_idx + 1 >= len(df):
+                continue
+            
+            # 快速检查：只检查涨幅是否足够
+            key_day_close = df.iloc[key_day_idx]['close']
+            prev_close = df.iloc[key_day_idx + 1]['close']
+            
+            if prev_close > 0:
+                # 涨跌幅 = (今日收盘 - 前一日收盘) / 前一日收盘
+                rise_ratio = (key_day_close - prev_close) / prev_close
+                if rise_ratio >= self.key_day_rise_min:
+                    return True
+        
+        return False
+
     def calculate_indicators(self, df):
         """
         计算技术指标
@@ -96,8 +123,8 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         :param stock_name: 股票名称
         :return: 选股信号
         """
-        # 首先计算指标
-        df = self.calculate_indicators(df)
+        # 注意：快速过滤已在基类的execute_selection方法中处理
+        # 这里只需要处理完整的选股条件检查
         
         # 确保数据足够
         if len(df) < self.key_day_offset_max + self.max_adjust_days + 5:
@@ -198,3 +225,27 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         
         # 没有找到符合条件的股票，返回空列表
         return []
+
+    def get_selection_criteria(self):
+        """
+        获取选股条件描述
+        :return: 选股条件描述列表
+        """
+        criteria = []
+        
+        # 条件1：倍量阳线
+        volume_multiplier = self.params.get('volume_multiplier', 2.2)
+        key_day_rise_min = self.params.get('key_day_rise_min', 0.07) * 100
+        key_day_offset_min = self.params.get('key_day_offset_min', 3)
+        key_day_offset_max = self.params.get('key_day_offset_max', 4)
+        criteria.append(f"1. 倍量阳线：在选股日前{key_day_offset_min}-{key_day_offset_max}天寻找倍量长阳线（涨幅≥{key_day_rise_min:.0f}%，成交量≥前5日均量的{volume_multiplier:.1f}倍）")
+        
+        # 条件2：连续阳线
+        criteria.append(f"2. 连续阳线：倍量阳线前有3-5天连续阳线")
+        
+        # 条件3：缩量调整
+        min_adjust_days = self.params.get('min_adjust_days', 2)
+        max_adjust_days = self.params.get('max_adjust_days', 4)
+        criteria.append(f"3. 缩量调整：倍量阳线后有{min_adjust_days}-{max_adjust_days}天缩量调整（成交量小于倍量阳线）")
+        
+        return criteria

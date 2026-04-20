@@ -49,6 +49,38 @@ class LimitUpPullbackStrategy(BaseStrategy):
         # 调用父类初始化
         super().__init__("涨停回马枪策略", default_params)
 
+    def quick_filter(self, df):
+        """
+        快速过滤：检查最近10个交易日内是否有涨停板
+        
+        只基于价格，不涉及成交量或其他指标
+        
+        :param df: 股票数据DataFrame（倒序，从新到旧，最新在index=0）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        # 检查数据是否足够
+        if len(df) < 2:
+            return False
+        
+        # 获取最近10个交易日的数据
+        lookback_days = self.params['limit_up_lookback_days']
+        limit_up_threshold = self.params['limit_up_threshold']
+        
+        # 取最近lookback_days+1行数据（数据是倒序的，所以head()取最新的）
+        check_df = df.head(lookback_days + 1)
+        
+        # 由于数据是倒序的（从新到旧），需要反转后计算涨跌幅
+        check_df_asc = check_df.iloc[::-1].reset_index(drop=True)
+        
+        # 计算涨跌幅（相对于前一日收盘价）
+        pct_change = check_df_asc['close'].pct_change(1)
+        
+        # 检查是否有涨停板（涨幅 >= 阈值）
+        # 排除第一行（NaN），检查其余行
+        has_limit_up = (pct_change.iloc[1:] >= limit_up_threshold).any()
+        
+        return has_limit_up
+
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
         计算技术指标（MA、KDJ、MACD、成交量均线） - 优化版本
@@ -302,9 +334,6 @@ class LimitUpPullbackStrategy(BaseStrategy):
         volume_threshold = lu_volume * volume_shrinkage_ratio
         has_volume_shrinkage = np.any(pullback_volumes <= volume_threshold)
 
-        if not has_volume_shrinkage:
-            return None
-
         # 计算回调天数
         pullback_days = end_idx - start_idx
         # 确保回调天数在范围内
@@ -328,6 +357,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         :return: 是否出现反转信号
         """
         # 检查KDJ金叉
+        kdj_gold_cross = False
         if 'K' in df.columns and 'D' in df.columns and 'J' in df.columns:
             # 最新K、D值
             latest_k = df['K'].iloc[0]
@@ -342,32 +372,26 @@ class LimitUpPullbackStrategy(BaseStrategy):
                 prev_k = 0
                 prev_d = 0
             
-            # KDJ金叉：K上穿D，且J值大于阈值
+            # KDJ金叉：K上穿D，或J值大于阈值
             kdj_gold_cross = (latest_k > latest_d and prev_k <= prev_d) or (latest_j > self.params['kdj_gold_cross_threshold'])
-        else:
-            kdj_gold_cross = False
 
         # 检查MACD金叉
-        if 'macd' in df.columns and 'macd_signal' in df.columns and 'macd_hist' in df.columns:
+        macd_gold_cross = False
+        if 'macd' in df.columns and 'macd_signal' in df.columns:
             # 最新MACD值
             latest_macd = df['macd'].iloc[0]
             latest_signal = df['macd_signal'].iloc[0]
-            latest_hist = df['macd_hist'].iloc[0]
             
             # 前一天MACD值
             if len(df) > 1:
                 prev_macd = df['macd'].iloc[1]
                 prev_signal = df['macd_signal'].iloc[1]
-                prev_hist = df['macd_hist'].iloc[1]
             else:
                 prev_macd = 0
                 prev_signal = 0
-                prev_hist = 0
             
-            # MACD金叉：macd上穿signal，且hist由负转正
-            macd_gold_cross = (latest_macd > latest_signal and prev_macd <= prev_signal) or (latest_hist > 0 and prev_hist <= 0)
-        else:
-            macd_gold_cross = False
+            # MACD金叉：macd上穿signal
+            macd_gold_cross = (latest_macd > latest_signal and prev_macd <= prev_signal)
 
         # 检查成交量是否放大
         volume_increase = False
@@ -442,16 +466,22 @@ class LimitUpPullbackStrategy(BaseStrategy):
             limit_up_threshold = self.params['limit_up_threshold']
             
             # 只取需要的列，提高速度
-            # 注意：数据库返回的数据是正序的（从旧到新），所以使用 pct_change(1) 计算相对于前一行的变化
+            # 注意：数据是倒序的（最新在index=0），所以需要计算相对于下一行（更早日期）的变化
             check_df = df[['close']].head(lookback_days + 1)
             
             # 向量化计算涨跌幅
-            # 使用pct_change(1)计算相对于前一行（更新日期）的变化
-            pct_change = check_df['close'].pct_change(1)
+            # 对于倒序数据，涨幅 = (当前close - 前一日close) / 前一日close
+            # 前一日在倒序数据中是 index+1
+            has_limit_up = False
+            for i in range(len(check_df) - 1):
+                if i + 1 < len(check_df):
+                    pct_change = (check_df.iloc[i]['close'] - check_df.iloc[i + 1]['close']) / check_df.iloc[i + 1]['close']
+                    if pct_change >= limit_up_threshold:
+                        has_limit_up = True
+                        break
             
             # 如果没有涨停板，直接返回空列表
-            # 注意：pct_change[-1]是NaN，所以从[:-1]检查（排除最后一行）
-            if not (pct_change.iloc[:-1] >= limit_up_threshold).any():
+            if not has_limit_up:
                 return []
 
             # 计算指标（只有有涨停板的股票才会到达这里）

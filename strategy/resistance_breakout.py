@@ -43,10 +43,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
             # 搜索参数
             'max_search_days': 10,            # 最大搜索天数（在最近N天内搜索突破日）
-
-            # 其他参数
-            'min_market_cap': 20,             # 最小市值（20亿元）
-            'max_market_cap': 1000,           # 最大市值（1000亿元）
         }
 
         # 合并用户参数
@@ -92,10 +88,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         result['short_term_trend'] = trend_df['short_term_trend']
         result['bull_bear_line'] = trend_df['bull_bear_line']
 
-        # 计算市值（如果CSV中有market_cap字段则使用，否则估算）
-        if 'market_cap' not in result.columns:
-            result['market_cap'] = result['close'] * 2e8
-
         # 始终返回正序数据（最新在后），方便后续搜索和索引
         return result
     
@@ -123,11 +115,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         
         # 条件4：趋势配合
         criteria.append(f"4. 趋势配合：短期趋势向上")
-        
-        # 条件5：市值过滤
-        min_market_cap = self.params['min_market_cap']
-        max_market_cap = self.params['max_market_cap']
-        criteria.append(f"5. 市值过滤：市值在{min_market_cap}-{max_market_cap}亿元之间")
         
         return criteria
 
@@ -197,19 +184,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
 
-        # 市值过滤（改进的处理）
-        market_cap = latest.get('market_cap')
-        if market_cap is None or pd.isna(market_cap):
-            # 如果市值为None，尝试估算
-            if 'close' in latest and not pd.isna(latest['close']):
-                market_cap = latest['close'] * 2e8
-            else:
-                return []
-        
-        market_cap = market_cap / 1e8  # 转换为亿元
-        if market_cap < self.params['min_market_cap'] or market_cap > self.params['max_market_cap']:
-            return []
-
         # 核心：搜索放量长阳突破日（已包含涨幅和放量检查）
         breakout_pos = self._find_breakout_day(df)
         if breakout_pos is None:
@@ -224,7 +198,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             return []
 
         # 生成选股信号
-        signal = self._generate_signal(df, latest, market_cap, breakout_pos)
+        signal = self._generate_signal(df, latest, breakout_pos)
         return [signal]
 
     def _validate_data(self, df) -> bool:
@@ -353,7 +327,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         rising = cur > prev
         return bool(above or rising)
 
-    def _generate_signal(self, df, latest, market_cap, breakout_pos) -> dict:
+    def _generate_signal(self, df, latest, breakout_pos) -> dict:
         """
         生成选股信号，基于实际找到的突破日位置。
         """

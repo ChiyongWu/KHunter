@@ -17,6 +17,19 @@ class BaseStrategy(ABC):
         self.name = name
         self.params = params or {}
     
+    def quick_filter(self, df):
+        """
+        快速过滤 - 由子类实现
+        
+        目的：提前过滤不符合条件的股票，避免不必要的指标计算
+        原则：只基于价格，不涉及复杂指标
+        
+        :param df: 股票数据DataFrame
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        # 默认实现：不进行快速过滤
+        return True
+    
     @abstractmethod
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
@@ -43,6 +56,38 @@ class BaseStrategy(ABC):
         """
         return []
     
+    def execute_selection(self, df, stock_code='', stock_name=''):
+        """
+        标准化的选股执行过程
+        
+        执行流程：
+            1. 数据验证
+            2. 快速过滤
+            3. 计算指标
+            4-N. 选股条件检查
+        
+        :param df: 股票数据DataFrame（正序，从旧到新）
+        :param stock_code: 股票代码
+        :param stock_name: 股票名称
+        :return: 选股信号列表
+        """
+        # 第1步：数据验证
+        if df is None or df.empty or len(df) < 20:
+            return []
+        
+        # 第2步：快速过滤（由子类实现）
+        if not self.quick_filter(df):
+            return []
+        
+        # 第3步：计算指标
+        try:
+            df = self.calculate_indicators(df)
+        except Exception:
+            return []
+        
+        # 第4-N步：选股条件检查（由子类实现）
+        return self.select_stocks(df, stock_name)
+    
     def analyze_stock(self, stock_code, stock_name, df):
         """
         分析单只股票 - 专注于流程处理
@@ -53,18 +98,10 @@ class BaseStrategy(ABC):
         :return: 标准化的选股结果或None
         """
         try:
-            # 1. 数据验证
-            if df is None or df.empty or len(df) < 20:
-                return None
+            # 使用标准化的选股执行过程
+            signals = self.execute_selection(df, stock_code, stock_name)
             
-            # 2. 计算技术指标 - 必须先计算指标，select_stocks 依赖这些指标
-            df = self.calculate_indicators(df)
-            
-            # 3. 执行策略 - 直接调用select_stocks，由策略自身负责具体执行逻辑
-            # 这样可以利用策略的快速预检查，避免不必要的计算
-            signals = self.select_stocks(df, stock_name)
-            
-            # 4. 结果过滤和标准化
+            # 结果过滤和标准化
             if signals:
                 return {
                     'code': stock_code,
@@ -74,8 +111,7 @@ class BaseStrategy(ABC):
             return None
             
         except Exception as e:
-            # 5. 错误处理
-            # 记录错误但不影响整体流程
+            # 错误处理
             import logging
             logger = logging.getLogger(__name__)
             logger.debug(f"分析股票 {stock_code} 失败: {str(e)}")

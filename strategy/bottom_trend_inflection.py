@@ -118,6 +118,11 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             if stock_name.startswith('ST') or stock_name.startswith('*ST'):
                 return []
         
+        # 快速过滤：检查是否满足深度下跌条件（使用原始数据，避免计算指标）
+        # 这样可以在计算复杂指标前快速排除不符合条件的股票
+        if not self._quick_check_deep_decline(df):
+            return []
+        
         # 计算指标（只调用一次）
         df_with_indicators = self.calculate_indicators(df)
         
@@ -196,6 +201,48 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         # 在最高价之后（时间上更近）找最低价
         # 从最高价位置到最新一天的数据中找最低价
         after_highest = df.iloc[:highest_pos]
+        
+        if after_highest.empty:
+            return False
+        
+        lowest_price = after_highest['low'].min()
+        
+        # 计算下跌幅度
+        decline_ratio = (highest_price - lowest_price) / highest_price
+        
+        # 判断是否满足条件
+        return decline_ratio > self.params['decline_threshold']
+    
+    def _quick_check_deep_decline(self, df) -> bool:
+        """
+        快速检查：深度下跌（在计算指标前进行）
+        
+        这个方法在计算指标前快速检查是否满足深度下跌条件
+        使用原始数据，避免不必要的指标计算
+        
+        参数：
+            df: 原始股票数据（倒序）
+        
+        返回：
+            True 如果满足深度下跌条件，否则 False
+        """
+        if df.empty or len(df) < self.params['lookback_days']:
+            return False
+        
+        # 获取回溯期间的数据
+        lookback_days = self.params['lookback_days']
+        lookback_df = df.head(lookback_days)
+        
+        # 找到最高价出现的位置
+        highest_pos = lookback_df['high'].argmax()
+        highest_price = lookback_df['high'].iloc[highest_pos]
+        
+        # 如果没有找到有效的最高价，返回False
+        if pd.isna(highest_price) or highest_price <= 0:
+            return False
+        
+        # 在最高价之后（时间上更近）找最低价
+        after_highest = lookback_df.iloc[:highest_pos]
         
         if after_highest.empty:
             return False
