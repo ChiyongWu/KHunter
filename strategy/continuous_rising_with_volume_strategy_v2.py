@@ -175,17 +175,20 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                 continue
 
             # 【条件2】检查倍量阳线后是否有连续缩量K线（2-4天）
-            # 获取倍量阳线的成交量
+            # 获取倍量阳线的成交量和开盘价
             key_day_volume = df.iloc[key_day_idx]['volume']
+            key_day_open = df.iloc[key_day_idx]['open']
 
             # 在倍量阳线之后寻找连续缩量K线
             # 从倍量阳线后的第一根K线开始检查
             found_shrink_sequence = False
+            valid_shrink_days = 0
             
             # 检查倍量阳线后面的所有K线，寻找连续缩量序列
             for start_offset in range(1, min(10, key_day_idx)):  # 最多向后检查10根K线
                 # 从这个位置开始检查连续缩量
                 valid_shrink_days = 0
+                support_broken = False
                 
                 for shrink_offset in range(start_offset, start_offset + self.max_adjust_days):
                     shrink_day_idx = key_day_idx - shrink_offset
@@ -199,14 +202,20 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                     if shrink_volume >= key_day_volume:
                         break
                     
+                    # 检查是否跌破关键日开盘价（支撑位）
+                    shrink_low = df.iloc[shrink_day_idx]['low']
+                    if shrink_low < key_day_open:
+                        support_broken = True
+                        break
+                    
                     valid_shrink_days += 1
                 
-                # 如果找到足够的连续缩量天数，则满足条件
-                if valid_shrink_days >= self.min_adjust_days:
+                # 如果找到足够的连续缩量天数且未跌破支撑位，则满足条件
+                if valid_shrink_days >= self.min_adjust_days and not support_broken:
                     found_shrink_sequence = True
                     break
             
-            # 检查是否满足连续缩量天数要求（至少2天）
+            # 检查是否满足连续缩量天数要求（至少2天）且未跌破支撑位
             if found_shrink_sequence:
                 # 找到倍量阳线的日期
                 key_date = df.iloc[key_day_idx]['date']
