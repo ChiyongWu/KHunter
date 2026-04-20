@@ -179,17 +179,19 @@ class MultiGoldenCrossStrategy(BaseStrategy):
         
         return criteria
     
-    def select_stocks(self, df, stock_name='') -> list:
+    def select_stocks(self, df, stock_name='', df_with_indicators=None) -> list:
         """
         选股逻辑 - 识别多金叉共振信号 - 优化版本
         
         优化点：
         1. 快速预检查，提前过滤不符合条件的股票
         2. 减少不必要的计算
+        3. 支持传入预计算的指标数据
         
         参数说明：
         - lookback_days: 回溯天数，用于寻找金叉信号。设置为10时检查最近10天内的金叉
         - resonance_days: 共振时间窗口，三个金叉信号的最大时间差。设置为3时表示三个金叉相隔不到3天
+        - df_with_indicators: 可选，预计算的指标数据，如果提供则不再调用calculate_indicators
         """
         if df.empty or len(df) < self.params['lookback_days']:
             return []
@@ -203,8 +205,10 @@ class MultiGoldenCrossStrategy(BaseStrategy):
                     if stock_name.startswith('*ST') or stock_name.startswith('ST') or '退' in stock_name:
                         return []
         
-        # 计算技术指标
-        df_with_indicators = self.calculate_indicators(df)
+        # 计算技术指标（如果未提供预计算数据）
+        if df_with_indicators is None:
+            df_with_indicators = self.calculate_indicators(df)
+        
         if df_with_indicators.empty:
             return []
         
@@ -288,7 +292,6 @@ class MultiGoldenCrossStrategy(BaseStrategy):
             'DEA': round(latest['DEA'], 4),
             'MACD': round(latest['MACD'], 4),
             'volume_ratio': round(latest['volume_ratio'], 2),
-            'market_cap': round(latest['market_cap'] / 1e8, 2),
             'short_term_trend': round(latest['short_term_trend'], 2),
             'bull_bear_line': round(latest['bull_bear_line'], 2),
             'reasons': ['均线金叉', 'KDJ金叉', 'MACD金叉', '多指标共振']
