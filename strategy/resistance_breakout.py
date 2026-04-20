@@ -38,7 +38,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
             # 突破日条件
             'min_change_pct': 0.08,           # 突破日最小涨幅（默认8%）
-            'volume_ratio': 2.0,              # 成交量倍数（默认2.0）
+            'volume_ratio': 1.8,              # 成交量倍数（默认1.8）
             'volume_ma_period': 5,            # 成交量均值周期（默认5天）
 
             # 搜索参数

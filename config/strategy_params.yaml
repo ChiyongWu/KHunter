@@ -473,7 +473,7 @@ strategies:
       min_change_pct: 0.08
       min_market_cap: 20
       volume_ma_period: 5
-      volume_ratio: 2.0
+      volume_ratio: 1.8
   StrongWashWeakToStrongStrategy:
     support_method: key_close
     color: '#3b82f6'
