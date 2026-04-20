@@ -272,49 +272,54 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'has_volume_shrinkage': has_volume_shrinkage
         }
 
-    def _check_reversal(self, df):
+    def _check_reversal(self, df, limit_up_close=None):
         """
         检查是否出现再次启动信号
         
-        改进逻辑：最近三个交易日低点逐步抬高 AND 高点逐步抬高
-        这表明股票处于上升通道，是真正的反转信号
+        改进逻辑：
+        1. 最近两个交易日低点逐步抬高 AND 高点逐步抬高（股票处于上升通道）
+        2. 最近一个交易日收盘价不高于涨停日收盘价
         
         :param df: 含指标的DataFrame（倒序，最新在index=0）
+        :param limit_up_close: 涨停日收盘价
         :return: 是否出现反转信号
         """
-        # 需要至少3个交易日的数据
-        if len(df) < 3:
+        # 需要至少2个交易日的数据
+        if len(df) < 2:
             return False
         
-        # 获取最近3个交易日的数据（倒序，所以是index 0, 1, 2）
+        # 获取最近2个交易日的数据（倒序，所以是index 0, 1）
         # index 0: 最新一天
         # index 1: 前一天
-        # index 2: 前两天
         
         day0_low = df.iloc[0]['low']
         day0_high = df.iloc[0]['high']
+        day0_close = df.iloc[0]['close']
         
         day1_low = df.iloc[1]['low']
         day1_high = df.iloc[1]['high']
         
-        day2_low = df.iloc[2]['low']
-        day2_high = df.iloc[2]['high']
-        
-        # 条件1：低点逐步抬高
-        # 即：最新一天的低点 > 前一天的低点 > 前两天的低点
-        higher_lows = (day0_low > day1_low) and (day1_low > day2_low)
+        # 条件1：最近两个交易日低点逐步抬高
+        # 即：最新一天的低点 > 前一天的低点
+        higher_lows = day0_low > day1_low
         
         if not higher_lows:
             return False
         
-        # 条件2：高点逐步抬高
-        # 即：最新一天的高点 > 前一天的高点 > 前两天的高点
-        higher_highs = (day0_high > day1_high) and (day1_high > day2_high)
+        # 条件2：最近两个交易日高点逐步抬高
+        # 即：最新一天的高点 > 前一天的高点
+        higher_highs = day0_high > day1_high
         
         if not higher_highs:
             return False
         
-        # 两个条件都满足，表示出现反转信号（股票处于上升通道）
+        # 条件3：最近一个交易日收盘价不高于涨停日收盘价
+        # 这确保了股票还没有完全恢复到涨停价格
+        if limit_up_close is not None:
+            if day0_close > limit_up_close:
+                return False
+        
+        # 所有条件都满足，表示出现反转信号（股票处于上升通道，但还未完全恢复）
         return True
     
     def get_selection_criteria(self):
@@ -342,7 +347,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         criteria.append(f"3. 成交量萎缩：回调期间至少一日成交量 <= 涨停日成交量的{volume_shrinkage_ratio:.0f}%")
         
         # 条件4：再次启动
-        criteria.append(f"4. 再次启动：最近三个交易日低点逐步抬高，高点逐步抬高（股票处于上升通道）")
+        criteria.append(f"4. 再次启动：最近两个交易日低点逐步抬高，高点逐步抬高（股票处于上升通道），最近一个交易日收盘价不高于涨停日收盘价")
         
         return criteria
 
@@ -407,8 +412,11 @@ class LimitUpPullbackStrategy(BaseStrategy):
             for lu_info in limit_ups:
                 pullback_info = self._check_pullback(df_with_indicators, lu_info)
                 if pullback_info:
+                    # 获取涨停日收盘价
+                    limit_up_close = lu_info[2]
+                    
                     # 检查反转信号
-                    if self._check_reversal(df_with_indicators):
+                    if self._check_reversal(df_with_indicators, limit_up_close):
                         # 获取最新数据
                         latest = df_with_indicators.iloc[0]
                         
