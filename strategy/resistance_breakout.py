@@ -229,8 +229,10 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
     def _validate_data(self, df) -> bool:
         """数据验证：检查数据完整性和长度"""
-        if df is None or df.empty:
+        # 先调用基类的通用验证（包括检查已退市股票）
+        if not super()._validate_data(df):
             return False
+        
         # 需要足够的数据来计算所有指标
         min_days = max(
             self.params['lookback_days'],
@@ -238,11 +240,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         ) + self.params['max_search_days']
         if len(df) < min_days:
             return False
-        # 检查必要字段
-        required = ['date', 'open', 'high', 'low', 'close', 'volume']
-        for field in required:
-            if field not in df.columns:
-                return False
+        
         return True
 
     def _find_breakout_day(self, df):

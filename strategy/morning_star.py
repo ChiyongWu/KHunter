@@ -86,15 +86,16 @@ class MorningStarStrategy(BaseStrategy):
         criteria = []
         
         # 条件1：第一根K线（长阴线）
-        criteria.append(f"第一根K线（长阴线）")
+        criteria.append(f"1. 第一根K线（长阴线）：收盘价 < 开盘价，实体长度 > 0.01，表示下跌趋势")
         
         # 条件2：第二根K线（小实体）
         small_body_ratio = self.params['small_body_ratio'] * 100
-        criteria.append(f"第二根K线（小实体，实体长度 <= 第一根K线实体的{small_body_ratio:.0f}%）")
+        criteria.append(f"2. 第二根K线（小实体）：实体长度 <= 第一根K线实体的{small_body_ratio:.0f}%，可以是阳线或阴线，表示市场犹豫")
         
         # 条件3：第三根K线（长阳线）
         long_candle_ratio = self.params['long_candle_ratio'] * 100
-        criteria.append(f"第三根K线（长阳线，涨幅 > 5%，突破开盘价，成交量 >= 1.5倍）")
+        volume_ratio = self.params['volume_ratio']
+        criteria.append(f"3. 第三根K线（长阳线）：收盘价 > 开盘价，实体长度 > 第一根K线实体的{long_candle_ratio:.0f}%，涨幅 > 5%，收盘价突破第一根K线开盘价，成交量 >= 第二根K线成交量的{volume_ratio:.1f}倍，表示反转上升")
         
         return criteria
     

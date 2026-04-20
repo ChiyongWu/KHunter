@@ -30,6 +30,43 @@ class BaseStrategy(ABC):
         # 默认实现：不进行快速过滤
         return True
     
+    def _validate_data(self, df) -> bool:
+        """
+        通用数据验证：检查数据完整性、长度和是否为已退市股票
+        
+        :param df: 股票数据DataFrame（倒序，最新在前）
+        :return: True表示数据有效，False表示数据无效
+        """
+        if df is None or df.empty:
+            return False
+        
+        # 检查最小数据长度
+        if len(df) < 20:
+            return False
+        
+        # 检查必要字段
+        required_fields = ['date', 'open', 'high', 'low', 'close', 'volume']
+        for field in required_fields:
+            if field not in df.columns:
+                return False
+        
+        # 检查是否为已退市股票：最新数据日期距今超过5年
+        # df是倒序的，最新数据在第一行
+        try:
+            from datetime import datetime
+            latest_date_str = str(df.iloc[0]['date']).split()[0]  # 只取日期部分
+            latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
+            current_date = datetime.now()
+            days_diff = (current_date - latest_date).days
+            # 如果最新数据超过5年前，认为是已退市股票
+            if days_diff > 365 * 5:
+                return False
+        except Exception:
+            pass
+        
+        return True
+    
+    
     @abstractmethod
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
@@ -61,18 +98,18 @@ class BaseStrategy(ABC):
         标准化的选股执行过程
         
         执行流程：
-            1. 数据验证
+            1. 数据验证（包括检查已退市股票）
             2. 快速过滤
             3. 计算指标
             4-N. 选股条件检查
         
-        :param df: 股票数据DataFrame（正序，从旧到新）
+        :param df: 股票数据DataFrame（倒序，最新在前）
         :param stock_code: 股票代码
         :param stock_name: 股票名称
         :return: 选股信号列表
         """
-        # 第1步：数据验证
-        if df is None or df.empty or len(df) < 20:
+        # 第1步：数据验证（包括检查已退市股票）
+        if not self._validate_data(df):
             return []
         
         # 第2步：快速过滤（由子类实现）
