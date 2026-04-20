@@ -30,7 +30,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
             # 涨停确认参数
             'limit_up_lookback_days': 10,        # 涨停回溯天数
             'limit_up_threshold': 0.095,         # 涨停阈值（9.5%）
-            'volume_ratio_threshold': 1.5,       # 成交量比阈值
+            'volume_ratio_threshold': 1.8,       # 成交量比阈值
             # 回调企稳参数
             'pullback_days_min': 1,             # 最小回调天数
             'pullback_days_max': 7,             # 最大回调天数
@@ -147,11 +147,27 @@ class LimitUpPullbackStrategy(BaseStrategy):
         if not limit_up_mask.any():
             return []
         
-        # 计算成交量比（当前成交量 / 前一日成交量）- 向量化操作
+        # 计算成交量比（当前成交量 / 前5日均量）
         volumes = check_df['volume'].values
-        # 前一日成交量（由于数据倒序，shift(-1)相当于前一日）
-        prev_volumes = np.roll(volumes, -1)
-        volume_ratios = np.where(prev_volumes > 0, volumes / prev_volumes, 0)
+        
+        # 计算前5日均量（由于数据倒序，需要向后看）
+        volume_ratios = []
+        for i in range(len(volumes)):
+            # 前5日是 i+1 到 i+5（数据倒序）
+            if i + 5 < len(df):
+                prev_5_volumes = df.iloc[i+1:i+6]['volume'].values
+                prev_5_mean = prev_5_volumes.mean() if len(prev_5_volumes) > 0 else 0
+            else:
+                # 如果不足5日，用现有的
+                prev_5_volumes = df.iloc[i+1:].iloc[:5]['volume'].values
+                prev_5_mean = prev_5_volumes.mean() if len(prev_5_volumes) > 0 else 0
+            
+            if prev_5_mean > 0:
+                volume_ratios.append(volumes[i] / prev_5_mean)
+            else:
+                volume_ratios.append(0)
+        
+        volume_ratios = np.array(volume_ratios)
         
         # 找出成交量放大的涨停板
         volume_ok = volume_ratios >= self.params['volume_ratio_threshold']
@@ -329,7 +345,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         limit_up_lookback_days = self.params['limit_up_lookback_days']
         limit_up_threshold = self.params['limit_up_threshold'] * 100
         volume_ratio_threshold = self.params['volume_ratio_threshold']
-        criteria.append(f"1. 涨停确认：最近{limit_up_lookback_days}个交易日内出现涨停板（涨幅>={limit_up_threshold:.1f}%），且成交量是前1日的{volume_ratio_threshold:.1f}倍以上")
+        criteria.append(f"1. 涨停确认：最近{limit_up_lookback_days}个交易日内出现涨停板（涨幅>={limit_up_threshold:.1f}%），且成交量是前5日均量的{volume_ratio_threshold:.1f}倍以上")
         
         # 条件2：回调企稳
         pullback_days_min = self.params['pullback_days_min']
