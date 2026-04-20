@@ -320,9 +320,7 @@ class BacktestEngine:
             logger.error(f"回测失败: {str(e)}")
             raise
     
-    # ==================== 支撑位计算辅助方法 ====================
-    
-    def _extract_key_date(self, signal: Dict) -> Optional[datetime.date]:
+    def _get_stock_name(self, code: str) -> str:
         """从选股信号中提取关键日期
         
         Args:
@@ -609,6 +607,43 @@ class BacktestEngine:
             logger.debug(f"获取股票名称失败 {code}: {str(e)}")
         return "未知"
     
+    def _generate_stock_detail_url(self, code: str) -> str:
+        """生成股票详情链接
+        
+        支持多个数据源的链接格式：
+        - 新浪财经: http://finance.sina.com.cn/realstock/company/sh000001/nc.shtml
+        - 腾讯证券: https://stockhtm.finance.qq.com/sstock/ggcx/000001.shtml
+        - 东方财富: https://quote.eastmoney.com/sh000001.html
+        - 同花顺: http://stockpage.10jqka.cn/000001/
+        
+        Args:
+            code: 股票代码（6位数字，如 000001）
+            
+        Returns:
+            股票详情链接 URL
+        """
+        try:
+            # 判断股票交易所
+            if code.startswith('6'):
+                # 上海交易所 (SH)
+                exchange_prefix = 'sh'
+            elif code.startswith('0') or code.startswith('3'):
+                # 深圳交易所 (SZ)
+                exchange_prefix = 'sz'
+            else:
+                # 默认使用深圳交易所
+                exchange_prefix = 'sz'
+            
+            # 生成东方财富链接（推荐使用，功能完整）
+            detail_url = f"https://quote.eastmoney.com/{exchange_prefix}{code}.html"
+            
+            return detail_url
+            
+        except Exception as e:
+            logger.debug(f"生成股票详情链接失败 {code}: {str(e)}")
+            # 返回默认链接
+            return f"https://quote.eastmoney.com/sz{code}.html"
+    
     def _preload_stock_data(self, start_date: str, end_date: str, strategy_name: str = None) -> int:
         """预加载所有股票数据到内存（性能优化）
         
@@ -769,10 +804,16 @@ class BacktestEngine:
                     # 处理选股结果
                     if signal_list:
                         for signal in signal_list:
+                            # 生成股票详情链接
+                            # 支持多个数据源的链接格式
+                            stock_detail_url = self._generate_stock_detail_url(code)
+                            
                             stock_info = {
                                 'stock_code': code,
                                 'stock_name': name,
-                                'signal': signal
+                                'signal': signal,
+                                'detail_url': stock_detail_url,  # 添加详情链接
+                                'detail_link': f"[{code}]({stock_detail_url})"  # Markdown 格式链接
                             }
                             standardized_stocks.append(stock_info)
                             
