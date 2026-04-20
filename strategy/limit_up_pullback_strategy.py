@@ -5,17 +5,17 @@ from strategy.base_strategy import BaseStrategy
 
 class LimitUpPullbackStrategy(BaseStrategy):
     """
-    涨停回马枪策略 - 优化版本
+    涨停回马枪策略 - 简化版本
     
     策略逻辑：
     1. 寻找最近出现的涨停板
     2. 涨停后出现合理回调（不破涨停日开盘价）
-    3. 回调后出现反转信号（KDJ金叉、MACD金叉）
-    4. 成交量萎缩后再次放大
+    3. 回调期间出现成交量萎缩
+    4. 最近三个交易日低点逐步抬高，高点逐步抬高（股票处于上升通道）
     
     优化点：
     1. 快速预检查，提前过滤无涨停板的股票
-    2. 减少不必要的指标计算
+    2. 去除复杂指标计算（KDJ、MACD），只基于价格和成交量
     3. 向量化操作替代循环
     """
 
@@ -37,9 +37,6 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'pullback_range_min': 0.00,         # 最小回调幅度（0%）
             'pullback_range_max': 0.15,         # 最大回调幅度（15%）
             'volume_shrinkage_ratio': 0.5,      # 成交量萎缩比例
-            # 再次启动参数
-            'kdj_gold_cross_threshold': 20,     # KDJ金叉阈值
-            'macd_gold_cross_days': 3,          # MACD金叉确认天数
         }
 
         # 合并用户参数 - params 中的值覆盖默认值
@@ -83,13 +80,13 @@ class LimitUpPullbackStrategy(BaseStrategy):
 
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
-        计算技术指标（MA、KDJ、MACD、成交量均线） - 优化版本
+        计算技术指标（MA、成交量均线） - 简化版本
         
         优化策略：
         1. 一次性排序数据（从倒序转为正序）
         2. 在正序数据上计算所有指标
         3. 一次性恢复原始顺序
-        这样避免了KDJ、MACD、MA函数内部的重复排序
+        4. 去除KDJ和MACD计算，只保留必要的指标
         
         注意：调用此方法前应先进行快速预检查，确保股票有涨停板
         
@@ -121,19 +118,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         result['ma10'] = result['close'].rolling(window=10, min_periods=1).mean()
         result['ma20'] = result['close'].rolling(window=20, min_periods=1).mean()
         
-        # 2. 计算KDJ指标（在正序数据上直接计算）
-        kdj_result = self._calculate_kdj_optimized(result)
-        result['K'] = kdj_result['K']
-        result['D'] = kdj_result['D']
-        result['J'] = kdj_result['J']
-        
-        # 3. 计算MACD指标（在正序数据上直接计算）
-        macd_result = self._calculate_macd_optimized(result)
-        result['macd'] = macd_result['macd']
-        result['macd_signal'] = macd_result['macd_signal']
-        result['macd_hist'] = macd_result['macd_hist']
-        
-        # 4. 计算成交量均线
+        # 2. 计算成交量均线
         result['volume_ma5'] = result['volume'].rolling(window=5, min_periods=1).mean()
         result['volume_ma10'] = result['volume'].rolling(window=10, min_periods=1).mean()
         
@@ -143,83 +128,6 @@ class LimitUpPullbackStrategy(BaseStrategy):
         
         result.index = df.index
         return result
-    
-    def _calculate_kdj_optimized(self, df_calc):
-        """
-        KDJ指标计算 - 优化版本（假设输入数据已是正序）
-        
-        :param df_calc: 正序排列的DataFrame
-        :return: 包含K、D、J列的DataFrame
-        """
-        n = 9
-        m1 = 3
-        m2 = 3
-        
-        # 计算RSV
-        low_min = df_calc['low'].rolling(window=n, min_periods=1).min()
-        high_max = df_calc['high'].rolling(window=n, min_periods=1).max()
-        
-        range_val = high_max - low_min
-        rsv = pd.Series(index=df_calc.index, dtype=float)
-        
-        # RSV计算，前n-1个周期不足时用50填充
-        for i in range(len(df_calc)):
-            if i < n - 1 or range_val.iloc[i] == 0:
-                rsv.iloc[i] = 50.0
-            else:
-                rsv.iloc[i] = (df_calc['close'].iloc[i] - low_min.iloc[i]) / range_val.iloc[i] * 100
-        
-        # SMA计算 - 通达信风格
-        k = pd.Series(index=df_calc.index, dtype=float)
-        d = pd.Series(index=df_calc.index, dtype=float)
-        
-        # 初始化第一日K、D值为50
-        k.iloc[0] = 50.0
-        d.iloc[0] = 50.0
-        
-        # 递归计算
-        for i in range(1, len(df_calc)):
-            k.iloc[i] = (rsv.iloc[i] * 1 + k.iloc[i-1] * (m1 - 1)) / m1
-            d.iloc[i] = (k.iloc[i] * 1 + d.iloc[i-1] * (m2 - 1)) / m2
-        
-        # 计算J值
-        j = 3 * k - 2 * d
-        
-        return pd.DataFrame({
-            'K': k,
-            'D': d,
-            'J': j
-        })
-    
-    def _calculate_macd_optimized(self, df_calc):
-        """
-        MACD指标计算 - 优化版本（假设输入数据已是正序）
-        
-        :param df_calc: 正序排列的DataFrame
-        :return: 包含macd、macd_signal、macd_hist列的DataFrame
-        """
-        fastperiod = 12
-        slowperiod = 26
-        signalperiod = 9
-        
-        # 计算快速和慢速EMA
-        ema_fast = df_calc['close'].ewm(span=fastperiod, adjust=False, min_periods=1).mean()
-        ema_slow = df_calc['close'].ewm(span=slowperiod, adjust=False, min_periods=1).mean()
-        
-        # 计算DIF（MACD线）
-        dif = ema_fast - ema_slow
-        
-        # 计算DEA（信号线）
-        dea = dif.ewm(span=signalperiod, adjust=False, min_periods=1).mean()
-        
-        # 计算MACD柱状图
-        macd = 2 * (dif - dea)
-        
-        return pd.DataFrame({
-            'macd': dif,
-            'macd_signal': dea,
-            'macd_hist': macd
-        })
 
     def _find_limit_up(self, df):
         """
