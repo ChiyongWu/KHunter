@@ -113,9 +113,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         # 条件3：回踩支撑
         criteria.append(f"3. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
         
-        # 条件4：趋势配合
-        criteria.append(f"4. 趋势配合：短期趋势向上")
-        
         return criteria
 
     def quick_filter(self, df) -> bool:
@@ -217,10 +214,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
         # 检查条件2：突破后回踩检查（从突破日到今天不跌破突破日开盘价）
         if not self._check_pullback(df, breakout_pos):
-            return []
-
-        # 检查条件3：趋势配合
-        if not self._check_trend(df):
             return []
 
         # 生成选股信号
