@@ -49,8 +49,8 @@ class MultiGoldenCrossStrategy(BaseStrategy):
             'macd_signal': 9,                  # MACD信号线EMA周期
             
             # 共振参数
-            'resonance_days': 3,               # 共振时间窗口（天）
-            'lookback_days': 10                # 回溯天数
+            'resonance_days': 1,               # 共振时间窗口（天）
+            'lookback_days': 3                 # 回溯天数
         }
         
         # 合并用户参数 - params 中的值覆盖默认值
