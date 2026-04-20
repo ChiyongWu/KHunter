@@ -228,9 +228,13 @@ class WBottomStrategy(BaseStrategy):
                 if between_df.empty:
                     continue
 
-                # 找到中间最高价
-                h_pos_in_between = between_df['high'].idxmax()
-                h_price = between_df['high'].loc[h_pos_in_between]
+                # 找到中间最高价（使用 idxmax 获取标签索引，然后转换为位置索引）
+                h_label_idx = between_df['high'].idxmax()
+                h_price = between_df['high'].loc[h_label_idx]
+                
+                # 将标签索引转换为原 DataFrame 中的位置索引
+                # h_label_idx 是 between_df 中的标签，需要找到它在原 df 中的位置
+                h_pos_in_original = df.index.get_loc(h_label_idx)
 
                 # 验证 H > L1 且 H > L2
                 if h_price <= l1_price or h_price <= l2_price:
@@ -244,7 +248,7 @@ class WBottomStrategy(BaseStrategy):
                 # 为了简化，我们认为只要 H > L1 且 H > L2 就满足条件
 
                 # 返回第一个满足条件的W底形态
-                return (l1_idx, l1_price, h_pos_in_between, h_price, l2_idx, l2_price)
+                return (l1_idx, l1_price, h_pos_in_original, h_price, l2_idx, l2_price)
             except Exception:
                 continue
 
@@ -254,47 +258,39 @@ class WBottomStrategy(BaseStrategy):
         """
         检测颈线突破（只检查价格，突破1%即可）
         
-        在 L2 之后的交易日中检测收盘价是否突破颈线。
-        倒序数据中 L2 之后的交易日位置 < l2_idx。
+        在最近5天内检测是否有收盘价突破颈线的大阳线。
+        倒序数据中最近5天是 iloc[0:5]。
         
         :param df: 含指标的DataFrame（倒序）
-        :param l2_idx: L2 的位置（iloc）
+        :param l2_idx: L2 的位置（iloc）（未使用，保持接口一致）
         :param neckline: 颈线价格（H的价格）
         :return: 突破日的位置（iloc），或 None
         """
-        # 获取参数
-        max_break_days = self.params.get('max_break_days', 10)
-
         # 突破价格阈值：颈线 × 1.01（突破1%）
         break_price = neckline * 1.01
 
-        # 在 L2 之后（位置 < l2_idx）的交易日中检测
-        # 限制搜索范围
-        search_start = max(0, l2_idx - max_break_days)
-        search_df = df.iloc[search_start:l2_idx]
-        
-        if search_df.empty:
+        # 在最近5天内检测
+        if df is None or len(df) < 5:
             return None
         
-        # 检查收盘价是否 >= 颈线 × 1.01
-        close_condition = search_df['close'] >= break_price
+        recent_df = df.head(5)
         
-        # 找到满足条件的交易日
-        valid_breaks = search_df[close_condition]
+        # 检查是否有收盘价 >= 颈线 × 1.01 的交易日
+        for idx in range(len(recent_df)):
+            try:
+                close = recent_df['close'].iloc[idx]
+                
+                # 检查数据有效性
+                if pd.isna(close) or close <= 0:
+                    continue
+                
+                # 检查是否突破颈线
+                if close >= break_price:
+                    # 返回这一天在原 DataFrame 中的位置
+                    return idx
+            except Exception:
+                continue
         
-        if not valid_breaks.empty:
-            # 返回最早满足条件的突破日的位置（倒序数据中位置最小的是最早的）
-            first_break_iloc = valid_breaks.index.min()
-            # 如果 first_break_iloc 是标签，需要转换为位置
-            if isinstance(first_break_iloc, int) and first_break_iloc < len(df):
-                return first_break_iloc
-            else:
-                # 如果是标签，需要找到对应的位置
-                try:
-                    return df.index.get_loc(first_break_iloc)
-                except Exception:
-                    return None
-
         # 无有效突破
         return None
 
@@ -302,11 +298,13 @@ class WBottomStrategy(BaseStrategy):
         """
         检查放量确认条件：5日内出现大阳线超过5%，且成交量是前5日均量的1.5倍以上
         
+        同时检查该日是否突破颈线（用于条件3）
+        
         :param df: 含指标的DataFrame（倒序）
-        :return: True表示通过，False表示未通过
+        :return: 如果通过，返回满足条件的日期索引；否则返回 None
         """
         if df is None or len(df) < 5:
-            return False
+            return None
         
         # 获取最近5天的数据
         recent_df = df.head(5)
@@ -334,11 +332,13 @@ class WBottomStrategy(BaseStrategy):
                 
                 # 检查涨幅 > 5% 且成交量 >= 前5日均量 × 1.5
                 if pct_change > 0.05 and volume >= volume_ma * expand_ratio:
-                    return True
+                    # 返回满足条件的日期索引（而不是布尔值）
+                    return idx
             except Exception:
                 continue
         
-        return False
+        # 无满足条件的日期
+        return None
 
     def _check_trend_reversal(self, df):
         """
@@ -576,8 +576,9 @@ class WBottomStrategy(BaseStrategy):
                 return []
 
             # 条件1：放量确认 - 5日内出现大阳线超过5%，且成交量是前5日均量的1.5倍以上
-            volume_ok = self._check_volume_break(df_with_indicators)
-            if not volume_ok:
+            # 返回满足条件的日期索引
+            volume_break_idx = self._check_volume_break(df_with_indicators)
+            if volume_break_idx is None:
                 return []
 
             # 条件2：W形态过滤 - 识别W底形态
@@ -594,9 +595,17 @@ class WBottomStrategy(BaseStrategy):
             # 颈线 = 两个低点之间的最高点
             neckline = h_price
 
-            # 条件3：颈线突破确认 - 价格突破颈线（突破101%），且成交量是前5日均量的1.5倍以上
-            break_idx = self._check_neckline_break(df_with_indicators, l2_idx, neckline)
-            if break_idx is None:
+            # 条件3：颈线突破确认 - 检查放量确认日是否也突破了颈线
+            # 只考虑同一日的情况：放量确认日的收盘价 >= 颈线 × 1.01
+            break_price = neckline * 1.01
+            try:
+                close_price = df_with_indicators['close'].iloc[volume_break_idx]
+                if close_price < break_price:
+                    # 放量确认日没有突破颈线
+                    return []
+                # 使用放量确认日作为突破日
+                break_idx = volume_break_idx
+            except Exception:
                 return []
 
             # 条件4：趋势确认 - 10日均线在30日均线之上
