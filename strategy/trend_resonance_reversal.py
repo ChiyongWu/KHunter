@@ -31,7 +31,7 @@ class TrendResonanceReversalStrategy(BaseStrategy):
     """趋势共振反转策略 - 多指标共振底部反转"""
     
     def __init__(self, params=None):
-        # 默认参数
+        # 默认参数 - 与 config/strategy_params.yaml 中的配置保持一致
         default_params = {
             # RSI参数
             'rsi_period': 14,           # RSI计算周期
@@ -49,10 +49,9 @@ class TrendResonanceReversalStrategy(BaseStrategy):
             
             # 共振时间参数
             'signal_days': 3,           # 信号共振时间窗口（天）
-            'lookback_days': 5,         # 回溯天数
         }
         
-        # 合并用户参数
+        # 合并用户参数 - params 中的值覆盖默认值
         if params:
             default_params.update(params)
         
@@ -157,7 +156,7 @@ class TrendResonanceReversalStrategy(BaseStrategy):
                 if (df['rsi'].iloc[i] >= rsi_breakout and 
                     df['rsi'].iloc[i+1] < rsi_breakout):
                     # 检查是否曾经超卖
-                    lookback = min(self.params['lookback_days'], len(df) - i - 1)
+                    lookback = min(signal_days * 2, len(df) - i - 1)
                     if df['rsi'].iloc[i+1:i+1+lookback].min() <= rsi_oversold:
                         rsi_breakout_day = i
                         break  # 找到最近的RSI突破信号

@@ -96,6 +96,9 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         :param stock_name: 股票名称
         :return: 选股信号
         """
+        # 首先计算指标
+        df = self.calculate_indicators(df)
+        
         # 确保数据足够
         if len(df) < self.key_day_offset_max + self.max_adjust_days + 5:
             return []

@@ -32,7 +32,7 @@ class MultiGoldenCrossStrategy(BaseStrategy):
     """多金叉共振策略 - 识别均线金叉、KDJ金叉、MACD金叉的共振信号"""
     
     def __init__(self, params=None):
-        # 默认参数配置
+        # 默认参数配置 - 与 config/strategy_params.yaml 中的配置保持一致
         default_params = {
             # 均线参数
             'ma_short_period': 5,              # 短期均线周期
@@ -50,10 +50,10 @@ class MultiGoldenCrossStrategy(BaseStrategy):
             
             # 共振参数
             'resonance_days': 3,               # 共振时间窗口（天）
-            'lookback_days': 5                  # 回溯天数
+            'lookback_days': 10                # 回溯天数
         }
         
-        # 合并用户参数
+        # 合并用户参数 - params 中的值覆盖默认值
         if params:
             default_params.update(params)
         

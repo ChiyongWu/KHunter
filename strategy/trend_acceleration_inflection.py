@@ -151,7 +151,7 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
             result['market_cap'] = (result['close'] * 2e8) / 1e8
         else:
             # 填充缺失的市值，确保单位是亿元
-            result['market_cap'] = result['market_cap'].fillna((result['close'] * 2e8) / 1e8)
+            result['market_cap'] = result['market_cap'].fillna((result['close'] * 2e8) / 1e8).infer_objects(copy=False)
             # 确保市值单位是亿元（如果数据中是元的话）
             if result['market_cap'].max() > 10000:
                 result['market_cap'] = result['market_cap'] / 1e8

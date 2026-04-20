@@ -442,12 +442,12 @@ class LimitUpPullbackStrategy(BaseStrategy):
             limit_up_threshold = self.params['limit_up_threshold']
             
             # 只取需要的列，提高速度
-            # 注意：数据已经是倒序排列（最新在index=0）
+            # 注意：数据库返回的数据是正序的（从旧到新），所以使用 pct_change(1) 计算相对于前一行的变化
             check_df = df[['close']].head(lookback_days + 1)
             
             # 向量化计算涨跌幅
-            # 使用pct_change(-1)计算相对于下一行（更旧日期）的变化
-            pct_change = check_df['close'].pct_change(-1)
+            # 使用pct_change(1)计算相对于前一行（更新日期）的变化
+            pct_change = check_df['close'].pct_change(1)
             
             # 如果没有涨停板，直接返回空列表
             # 注意：pct_change[-1]是NaN，所以从[:-1]检查（排除最后一行）
