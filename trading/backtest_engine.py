@@ -610,39 +610,25 @@ class BacktestEngine:
     def _generate_stock_detail_url(self, code: str) -> str:
         """生成股票详情链接
         
-        支持多个数据源的链接格式：
-        - 新浪财经: http://finance.sina.com.cn/realstock/company/sh000001/nc.shtml
-        - 腾讯证券: https://stockhtm.finance.qq.com/sstock/ggcx/000001.shtml
-        - 东方财富: https://quote.eastmoney.com/sh000001.html
-        - 同花顺: http://stockpage.10jqka.cn/000001/
+        使用与选股结果页面一致的链接格式：
+        - 调用 viewStockDetail(code) 函数
+        - 该函数会加载 /api/stock/{code} 接口获取股票详情
         
         Args:
             code: 股票代码（6位数字，如 000001）
             
         Returns:
-            股票详情链接 URL
+            JavaScript 函数调用字符串
         """
         try:
-            # 判断股票交易所
-            if code.startswith('6'):
-                # 上海交易所 (SH)
-                exchange_prefix = 'sh'
-            elif code.startswith('0') or code.startswith('3'):
-                # 深圳交易所 (SZ)
-                exchange_prefix = 'sz'
-            else:
-                # 默认使用深圳交易所
-                exchange_prefix = 'sz'
-            
-            # 生成东方财富链接（推荐使用，功能完整）
-            detail_url = f"https://quote.eastmoney.com/{exchange_prefix}{code}.html"
-            
-            return detail_url
+            # 返回与选股结果页面一致的链接格式
+            # 使用 javascript: 协议和 viewStockDetail 函数
+            # 格式：javascript:viewStockDetail('000001')
+            return f"javascript:viewStockDetail('{code}')" 
             
         except Exception as e:
             logger.debug(f"生成股票详情链接失败 {code}: {str(e)}")
-            # 返回默认链接
-            return f"https://quote.eastmoney.com/sz{code}.html"
+            return f"javascript:viewStockDetail('{code}')"
     
     def _preload_stock_data(self, start_date: str, end_date: str, strategy_name: str = None) -> int:
         """预加载所有股票数据到内存（性能优化）
@@ -1099,6 +1085,9 @@ class BacktestEngine:
         Returns:
             买入记录
         """
+        # 生成股票详情链接
+        stock_detail_url = self._generate_stock_detail_url(stock_code)
+        
         return {
             'stock_code': stock_code,
             'stock_name': stock_name,
@@ -1114,7 +1103,8 @@ class BacktestEngine:
             'return_rate': None,
             'profit_loss': None,
             'hold_days': None,
-            'support_level': support_level
+            'support_level': support_level,
+            'detail_url': stock_detail_url  # 添加股票详情链接
         }
     
     def _process_sell(self, positions: List[Dict], current_date: datetime.date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
@@ -1203,7 +1193,8 @@ class BacktestEngine:
                     'return_rate': return_rate,
                     'profit_loss': profit_loss,
                     'hold_days': hold_days,
-                    'support_level': position['support_level']
+                    'support_level': position['support_level'],
+                    'detail_url': self._generate_stock_detail_url(position['stock_code'])  # 添加股票详情链接
                 }
                 
                 sell_records.append(sell_record)

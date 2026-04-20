@@ -541,7 +541,7 @@ function displayBacktestTrades(trades) {
                                 <tbody>
                                     ${trades.map(trade => `
                                         <tr>
-                                            <td>${trade.stock_code || ''}</td>
+                                            <td><a href="${trade.detail_url || 'javascript:void(0)'}" onclick="viewStockDetail('${trade.stock_code}'); return false;" class="stock-link" style="color: #2563eb; text-decoration: none; cursor: pointer; font-weight: 600;">${trade.stock_code}</a></td>
                                             <td>${trade.stock_name || ''}</td>
                                             <td>${trade.buy_date || ''}</td>
                                             <td>${trade.buy_price || 0}</td>
@@ -866,7 +866,7 @@ function displayBacktestTradesInModal(trades) {
                                 <tbody>
                                     ${trades.map(trade => `
                                         <tr>
-                                            <td>${trade.stock_code}</td>
+                                            <td><a href="${trade.detail_url || 'javascript:void(0)'}" onclick="viewStockDetail('${trade.stock_code}'); return false;" class="stock-link" style="color: #2563eb; text-decoration: none; cursor: pointer; font-weight: 600;">${trade.stock_code}</a></td>
                                             <td>${trade.stock_name}</td>
                                             <td>${trade.buy_date}</td>
                                             <td>${trade.buy_price}</td>
@@ -1240,6 +1240,7 @@ function displayBacktestTradesOnConfigPage(trades) {
                 const sellDate = trade.sell_date || '-';
                 const holdDays = trade.hold_days || '-';
                 const returnRate = trade.return_rate;
+                const detailUrl = trade.detail_url || 'javascript:void(0)';
                 
                 // 确定收益率的颜色
                 let returnRateClass = '';
@@ -1249,9 +1250,14 @@ function displayBacktestTradesOnConfigPage(trades) {
                     returnRateText = returnRate.toFixed(2) + '%';
                 }
                 
+                // 生成股票代码链接
+                const stockCodeLink = stockCode !== '-' 
+                    ? `<a href="${detailUrl}" onclick="viewStockDetail('${stockCode}'); return false;" class="stock-link" style="color: #2563eb; text-decoration: none; cursor: pointer; font-weight: 600;">${stockCode}</a>`
+                    : stockCode;
+                
                 return `
                     <tr>
-                        <td>${stockCode}</td>
+                        <td>${stockCodeLink}</td>
                         <td>${stockName}</td>
                         <td>${buyDate}</td>
                         <td>${sellDate}</td>
