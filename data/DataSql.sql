@@ -779,3 +779,44 @@ CREATE INDEX IF NOT EXISTS idx_khunter_strategy ON khunter(strategy_name);
 -- idx_khunter_strategy: 策略名称索引，用于快速查询特定策略的买点记录
 CREATE INDEX IF NOT EXISTS idx_khunter_score ON khunter(hunting_date, score);
 -- idx_khunter_score: 狩猎日期和评分的组合索引，用于按评分排序查询
+
+-- ============================================
+-- 交易计划表
+-- ============================================
+CREATE TABLE IF NOT EXISTS trading_plan (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,                    -- 主键ID，自增
+    plan_date TEXT NOT NULL,                                  -- 交易计划日期，格式YYYY-MM-DD，必填
+    hunting_date TEXT NOT NULL,                               -- 狩猎日期，格式YYYY-MM-DD，必填
+    stock_code TEXT NOT NULL,                                 -- 股票代码，6位数字，必填
+    stock_name TEXT NOT NULL,                                 -- 股票名称，必填
+    
+    -- 买入计划
+    buy_lower_price REAL,                                     -- 买入价格下限，可选
+    buy_upper_price REAL,                                     -- 买入价格上限，可选
+    position_ratio REAL,                                      -- 仓位比例（%），可选
+    
+    -- 支撑位与买点
+    support_level REAL,                                       -- 支撑位价格，可选
+    
+    -- 止损策略
+    stop_loss_price REAL,                                     -- 止损价格，可选
+    
+    -- 止盈策略
+    take_profit_price REAL,                                   -- 止盈价格，可选
+    
+    -- 退出策略
+    hold_days INTEGER,                                        -- 建议持有天数，可选
+    
+    -- 备注
+    remark TEXT,                                              -- 备注说明，可选
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),       -- 创建时间，必填，默认当前时间
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))        -- 更新时间，必填，默认当前时间
+);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_trading_plan_date ON trading_plan(plan_date);
+-- idx_trading_plan_date: 交易计划日期索引，用于按日期查询计划
+CREATE INDEX IF NOT EXISTS idx_trading_plan_hunting_date ON trading_plan(hunting_date);
+-- idx_trading_plan_hunting_date: 狩猎日期索引，用于按狩猎日期查询关联计划
+CREATE INDEX IF NOT EXISTS idx_trading_plan_stock ON trading_plan(stock_code, plan_date);
+-- idx_trading_plan_stock: 股票代码和计划日期的组合索引，用于查找特定股票的计划

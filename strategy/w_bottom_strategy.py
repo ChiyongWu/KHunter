@@ -296,9 +296,9 @@ class WBottomStrategy(BaseStrategy):
 
     def _check_volume_break(self, df):
         """
-        检查放量确认条件：5日内出现大阳线超过5%，且成交量是前5日均量的1.5倍以上
+        检查放量确认条件：5日内出现涨幅超过5%的交易日，且成交量是前5日均量的1.5倍以上
         
-        同时检查该日是否突破颈线（用于条件3）
+        涨幅 = (当日收盘价 - 前一日收盘价) / 前一日收盘价
         
         :param df: 含指标的DataFrame（倒序）
         :return: 如果通过，返回满足条件的日期索引；否则返回 None
@@ -309,30 +309,33 @@ class WBottomStrategy(BaseStrategy):
         # 获取最近5天的数据
         recent_df = df.head(5)
         
-        # 检查是否有涨幅 > 5% 的阳线，且成交量 >= 前5日均量 × 1.5
+        # 检查是否有涨幅 > 5% 的交易日，且成交量 >= 前5日均量 × 1.5
         expand_ratio = self.params['volume_expand_ratio']
         
         for idx in range(len(recent_df)):
             try:
                 close = recent_df['close'].iloc[idx]
-                open_price = recent_df['open'].iloc[idx]
                 volume = recent_df['volume'].iloc[idx]
                 volume_ma = recent_df['volume_ma'].iloc[idx]
                 
                 # 检查数据有效性
-                if pd.isna(close) or pd.isna(open_price) or close <= 0 or open_price <= 0:
+                if pd.isna(close) or close <= 0:
                     continue
                 
-                # 检查是否是阳线（收盘价 > 开盘价）
-                if close <= open_price:
+                # 获取前一日收盘价（倒序数据中前一日是 idx+1）
+                if idx + 1 >= len(recent_df):
                     continue
                 
-                # 计算涨幅
-                pct_change = (close - open_price) / open_price
+                prev_close = recent_df['close'].iloc[idx + 1]
+                if pd.isna(prev_close) or prev_close <= 0:
+                    continue
+                
+                # 计算涨幅：(当日收盘价 - 前一日收盘价) / 前一日收盘价
+                pct_change = (close - prev_close) / prev_close
                 
                 # 检查涨幅 > 5% 且成交量 >= 前5日均量 × 1.5
                 if pct_change > 0.05 and volume >= volume_ma * expand_ratio:
-                    # 返回满足条件的日期索引（而不是布尔值）
+                    # 返回满足条件的日期索引
                     return idx
             except Exception:
                 continue

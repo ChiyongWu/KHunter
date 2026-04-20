@@ -1,7 +1,7 @@
 """
 回测API路由 - 提供RESTful接口
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from trading.backtest_dao import BacktestDAO
 from trading.backtest_engine import BacktestEngine
 from utils.db_manager import DBManager
@@ -1154,5 +1154,147 @@ def khunter_track():
         return jsonify({
             'success': False,
             'message': f'跟踪失败：{str(e)}',
+            'data': None
+        }), 500
+
+
+# ==================== 交易计划相关接口 ====================
+
+from trading.trading_plan_generator import TradingPlanGenerator
+from trading.trading_plan_dao import TradingPlanDAO
+
+trading_plan_dao = TradingPlanDAO(db_manager)
+trading_plan_generator = TradingPlanGenerator(db_manager, khunter_dao, trading_plan_dao)
+
+
+@khunter_bp.route('/generate_plan', methods=['POST'])
+def generate_trading_plan():
+    """
+    生成交易计划接口
+
+    请求体:
+        {
+            "hunting_date": "2024-04-15"
+        }
+
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plan_date": "2024-04-16",
+                "hunting_date": "2024-04-15",
+                "total_count": 8,
+                "plans": [...]
+            }
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        hunting_date = data.get('hunting_date')
+
+        if not hunting_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少必填参数: hunting_date',
+                'data': None
+            }), 400
+
+        result = trading_plan_generator.generate(hunting_date)
+        return jsonify({
+            'success': True,
+            'message': '交易计划生成成功',
+            'data': result
+        }), 200
+
+    except Exception as e:
+        logger.error(f"生成交易计划失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'生成交易计划失败：{str(e)}',
+            'data': None
+        }), 500
+
+
+@khunter_bp.route('/export_plan', methods=['POST'])
+def export_trading_plan():
+    """
+    导出交易计划Excel接口
+
+    请求体:
+        {
+            "hunting_date": "2024-04-15"
+        }
+
+    返回:
+        Excel文件下载
+    """
+    try:
+        data = request.get_json() or {}
+        hunting_date = data.get('hunting_date')
+
+        if not hunting_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少必填参数: hunting_date',
+                'data': None
+            }), 400
+
+        plans = trading_plan_dao.query_by_hunting_date(hunting_date)
+        if not plans:
+            return jsonify({
+                'success': False,
+                'message': '没有找到对应的交易计划',
+                'data': None
+            }), 404
+
+        from io import BytesIO
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "交易计划"
+
+        headers = ['序号', '股票代码', '股票名称', '支撑位', '买入价格区间', '仓位(%)', '止损', '止盈', '持有日期']
+        header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        for idx, plan in enumerate(plans, 1):
+            ws.cell(row=idx+1, column=1, value=idx)
+            ws.cell(row=idx+1, column=2, value=plan.get('stock_code', ''))
+            ws.cell(row=idx+1, column=3, value=plan.get('stock_name', ''))
+            ws.cell(row=idx+1, column=4, value=plan.get('support_level', 0))
+            ws.cell(row=idx+1, column=5, value=f"{plan.get('buy_lower_price', 0)}-{plan.get('buy_upper_price', 0)}")
+            ws.cell(row=idx+1, column=6, value=plan.get('position_ratio', 0))
+            ws.cell(row=idx+1, column=7, value=plan.get('stop_loss_price', 0))
+            ws.cell(row=idx+1, column=8, value=plan.get('take_profit_price', 0))
+            ws.cell(row=idx+1, column=9, value=f"{plan.get('hold_days', 0)}天")
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        plan_date = plans[0].get('plan_date', '') if plans else ''
+        filename = f"交易计划_{plan_date.replace('-', '')}.xlsx"
+
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename
+        )
+
+    except Exception as e:
+        logger.error(f"导出交易计划失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'导出交易计划失败：{str(e)}',
             'data': None
         }), 500
