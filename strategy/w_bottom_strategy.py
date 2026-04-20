@@ -187,8 +187,11 @@ class WBottomStrategy(BaseStrategy):
         """
         从局部低点中筛选W底形态（L1, H, L2）
         
-        遍历相邻低点对，验证价格差异和中间高点，
-        返回第一个满足条件的W底形态。
+        只考虑最近的两个低点对（最新的两个低点）。
+        如果最近的两个低点满足条件，返回该W底形态；
+        否则返回None。
+        
+        这确保我们只选择最近形成的W底形态，而不是历史上的任何W底。
         
         关键验证：确认颈线位置（H的价格应该在L1和L2之间）
         
@@ -202,57 +205,55 @@ class WBottomStrategy(BaseStrategy):
         if len(local_lows) < 2:
             return None
 
-        # 遍历所有相邻低点对（倒序数据中索引大的更早）
-        for i in range(len(local_lows) - 1):
-            # L2 是较新的低点（索引较小），L1 是较早的低点（索引较大）
-            l2_idx, l2_price, l2_date = local_lows[i]
-            l1_idx, l1_price, l1_date = local_lows[i + 1]
+        # 只考虑最近的两个低点（最新的两个）
+        # local_lows 是按从新到旧排序的，所以最近的两个是 local_lows[0] 和 local_lows[1]
+        l2_idx, l2_price, l2_date = local_lows[0]  # 最新的低点
+        l1_idx, l1_price, l1_date = local_lows[1]  # 次新的低点
 
-            # 验证价格差异 <= bottom_diff_threshold
-            if l1_price == 0:
-                continue
-            price_diff = abs(l2_price - l1_price) / l1_price
-            if price_diff > threshold:
-                continue
+        # 验证价格差异 <= bottom_diff_threshold
+        if l1_price == 0:
+            return None
+        price_diff = abs(l2_price - l1_price) / l1_price
+        if price_diff > threshold:
+            # 最近的两个低点不符合条件，返回None
+            return None
 
-            # 在 L1 和 L2 之间查找最高价作为 H
-            # 倒序数据：L1 索引 > L2 索引，中间区间为 (l2_idx, l1_idx)
-            between_start = l2_idx + 1
-            between_end = l1_idx
-            if between_start >= between_end:
-                continue
+        # 在 L1 和 L2 之间查找最高价作为 H
+        # 倒序数据：L1 索引 > L2 索引，中间区间为 (l2_idx, l1_idx)
+        between_start = l2_idx + 1
+        between_end = l1_idx
+        if between_start >= between_end:
+            return None
 
-            # 获取中间区间的数据（使用 iloc 避免索引问题）
-            try:
-                between_df = df.iloc[between_start:between_end]
-                if between_df.empty:
-                    continue
+        # 获取中间区间的数据（使用 iloc 避免索引问题）
+        try:
+            between_df = df.iloc[between_start:between_end]
+            if between_df.empty:
+                return None
 
-                # 找到中间最高价（使用 idxmax 获取标签索引，然后转换为位置索引）
-                h_label_idx = between_df['high'].idxmax()
-                h_price = between_df['high'].loc[h_label_idx]
-                
-                # 将标签索引转换为原 DataFrame 中的位置索引
-                # h_label_idx 是 between_df 中的标签，需要找到它在原 df 中的位置
-                h_pos_in_original = df.index.get_loc(h_label_idx)
+            # 找到中间最高价（使用 idxmax 获取标签索引，然后转换为位置索引）
+            h_label_idx = between_df['high'].idxmax()
+            h_price = between_df['high'].loc[h_label_idx]
+            
+            # 将标签索引转换为原 DataFrame 中的位置索引
+            # h_label_idx 是 between_df 中的标签，需要找到它在原 df 中的位置
+            h_pos_in_original = df.index.get_loc(h_label_idx)
 
-                # 验证 H > L1 且 H > L2
-                if h_price <= l1_price or h_price <= l2_price:
-                    continue
+            # 验证 H > L1 且 H > L2
+            if h_price <= l1_price or h_price <= l2_price:
+                return None
 
-                # 关键验证：确认颈线位置（H的价格应该在L1和L2之间）
-                # 这里的"之间"是指H的价格应该高于L1和L2
-                # 实际上上面已经验证了 H > L1 且 H > L2，所以这个条件已经满足
-                # 但我们还需要验证H不是异常高点（例如，H不应该远高于L1和L2）
-                # 这个验证可以通过检查H是否在合理范围内来实现
-                # 为了简化，我们认为只要 H > L1 且 H > L2 就满足条件
+            # 关键验证：确认颈线位置（H的价格应该在L1和L2之间）
+            # 这里的"之间"是指H的价格应该高于L1和L2
+            # 实际上上面已经验证了 H > L1 且 H > L2，所以这个条件已经满足
+            # 但我们还需要验证H不是异常高点（例如，H不应该远高于L1和L2）
+            # 这个验证可以通过检查H是否在合理范围内来实现
+            # 为了简化，我们认为只要 H > L1 且 H > L2 就满足条件
 
-                # 返回第一个满足条件的W底形态
-                return (l1_idx, l1_price, h_pos_in_original, h_price, l2_idx, l2_price)
-            except Exception:
-                continue
-
-        return None
+            # 返回满足条件的W底形态
+            return (l1_idx, l1_price, h_pos_in_original, h_price, l2_idx, l2_price)
+        except Exception:
+            return None
 
     def _check_neckline_break(self, df, l2_idx, neckline):
         """
