@@ -190,6 +190,12 @@ class LimitUpPullbackStrategy(BaseStrategy):
         """
         检查涨停后是否出现合理回调 - 向量化优化版本
         
+        回调企稳条件：
+        1. 涨停后出现回调1-7天
+        2. 回调幅度0%-15%
+        3. 收盘价不破涨停日开盘价
+        4. 回调期间，收盘价应低于涨停日收盘价
+        
         优化点：
         1. 使用向量化操作计算最高价和最低价
         2. 避免循环操作
@@ -233,8 +239,16 @@ class LimitUpPullbackStrategy(BaseStrategy):
         if pullback_range < pullback_range_min or pullback_range > pullback_range_max:
             return None
 
-        # 检查是否不破涨停日开盘价
-        if lowest_price < lu_open:
+        # 检查是否不破涨停日开盘价（收盘价不破开盘价）
+        # 检查回调期间所有收盘价是否都不低于涨停日开盘价
+        pullback_closes = pullback_df['close'].values
+        if np.any(pullback_closes < lu_open):
+            return None
+
+        # 新增条件：回调期间，收盘价应低于涨停日收盘价
+        # 检查回调期间是否至少有一个收盘价低于涨停日收盘价
+        has_lower_close = np.any(pullback_closes < lu_close)
+        if not has_lower_close:
             return None
 
         # 向量化检查成交量萎缩
@@ -254,6 +268,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'lowest_price': lowest_price,
             'highest_price': highest_price,
             'limit_up_open': lu_open,
+            'limit_up_close': lu_close,
             'has_volume_shrinkage': has_volume_shrinkage
         }
 
@@ -320,7 +335,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         pullback_days_max = self.params['pullback_days_max']
         pullback_range_min = self.params['pullback_range_min'] * 100
         pullback_range_max = self.params['pullback_range_max'] * 100
-        criteria.append(f"2. 回调企稳：涨停后{pullback_days_min}-{pullback_days_max}个交易日内出现回调，回调幅度{pullback_range_min:.0f}%-{pullback_range_max:.0f}%，且不破涨停日开盘价")
+        criteria.append(f"2. 回调企稳：涨停后{pullback_days_min}-{pullback_days_max}个交易日内出现回调，回调幅度{pullback_range_min:.0f}%-{pullback_range_max:.0f}%，收盘价不破涨停日开盘价，回调期间收盘价应低于涨停日收盘价")
         
         # 条件3：成交量萎缩
         volume_shrinkage_ratio = self.params['volume_shrinkage_ratio'] * 100
