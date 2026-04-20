@@ -193,13 +193,17 @@ class WBottomStrategy(BaseStrategy):
         
         这确保我们只选择最近形成的W底形态，而不是历史上的任何W底。
         
-        关键验证：确认颈线位置（H的价格应该在L1和L2之间）
+        关键验证：
+        1. 两个低点价格差异 <= 3%
+        2. 两个低点间隔 >= 10 个交易日
+        3. 颈线位置（H的价格应该在L1和L2之间）
         
         :param local_lows: 局部低点列表 [(index, price, date), ...]
         :param df: 含指标的DataFrame（倒序）
         :return: (l1_idx, l1_price, h_idx, h_price, l2_idx, l2_price) 或 None
         """
         threshold = self.params['bottom_diff_threshold']
+        min_gap = self.params['min_gap']
 
         # 至少需要两个低点才能构成W底
         if len(local_lows) < 2:
@@ -209,6 +213,13 @@ class WBottomStrategy(BaseStrategy):
         # local_lows 是按从新到旧排序的，所以最近的两个是 local_lows[0] 和 local_lows[1]
         l2_idx, l2_price, l2_date = local_lows[0]  # 最新的低点
         l1_idx, l1_price, l1_date = local_lows[1]  # 次新的低点
+
+        # 验证两个低点间隔 >= min_gap（10个交易日）
+        # 倒序数据中位置差即为交易日间隔
+        gap = abs(l1_idx - l2_idx)
+        if gap < min_gap:
+            # 间隔不足，返回None
+            return None
 
         # 验证价格差异 <= bottom_diff_threshold
         if l1_price == 0:
