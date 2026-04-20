@@ -202,9 +202,9 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                     if shrink_volume >= key_day_volume:
                         break
                     
-                    # 检查是否跌破关键日开盘价（支撑位）
-                    shrink_low = df.iloc[shrink_day_idx]['low']
-                    if shrink_low < key_day_open:
+                    # 检查是否跌破关键日开盘价（支撑位）- 使用收盘价检查
+                    shrink_close = df.iloc[shrink_day_idx]['close']
+                    if shrink_close < key_day_open:
                         support_broken = True
                         break
                     
@@ -255,6 +255,6 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         # 条件3：缩量调整
         min_adjust_days = self.params.get('min_adjust_days', 2)
         max_adjust_days = self.params.get('max_adjust_days', 4)
-        criteria.append(f"3. 缩量调整：倍量阳线后有{min_adjust_days}-{max_adjust_days}天缩量调整（成交量小于倍量阳线）")
+        criteria.append(f"3. 缩量调整：倍量阳线后有{min_adjust_days}-{max_adjust_days}天缩量调整（成交量小于倍量阳线），缩量调整期间不跌破关键日的开盘价")
         
         return criteria
