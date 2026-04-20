@@ -98,20 +98,20 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         """
         criteria = []
         
-        # 条件1：阻力位识别
-        lookback_days = self.params['lookback_days']
-        breakout_ratio = self.params['breakout_ratio'] * 100
-        criteria.append(f"1. 阻力位识别：前{lookback_days}日最高价作为阻力位，突破日收盘价达到阻力位的{100+breakout_ratio:.0f}%以上")
-        
-        # 条件2：放量长阳突破
+        # 条件1：放量长阳日
         min_change_pct = self.params['min_change_pct'] * 100
         volume_ratio = self.params['volume_ratio']
         volume_ma_period = self.params['volume_ma_period']
         max_search_days = self.params['max_search_days']
-        criteria.append(f"2. 放量长阳突破：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
+        criteria.append(f"1. 放量长阳日：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
+        
+        # 条件2：阻力位突破
+        lookback_days = self.params['lookback_days']
+        breakout_ratio = self.params['breakout_ratio'] * 100
+        criteria.append(f"2. 阻力位突破：长阳日收盘价突破该日前{lookback_days}日最高价的{100+breakout_ratio:.0f}%以上")
         
         # 条件3：回踩支撑
-        criteria.append(f"3. 回踩支撑：从突破日到今天，所有天的最低价不跌破突破日开盘价")
+        criteria.append(f"3. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
         
         # 条件4：趋势配合
         criteria.append(f"4. 趋势配合：短期趋势向上")
@@ -248,11 +248,11 @@ class ResistanceBreakoutStrategy(BaseStrategy):
     def _find_breakout_day(self, df):
         """
         在最近max_search_days天内搜索放量长阳突破日。
-        突破条件（同时满足）：
-        1. 收盘价 >= 该天之前lookback_days日最高价 × (1+breakout_ratio)
-        2. 当日涨幅 >= min_change_pct（放量长阳）
-        3. 当日放量 >= 前N日均量 × volume_ratio
-        突破日距今（含突破日当天）不超过max_search_days天。
+        
+        逻辑：
+        1. 先找长阳日：涨幅 >= min_change_pct 且 成交量 >= 前N日均量 × volume_ratio
+        2. 再检查突破：该长阳日收盘价 >= 该天之前lookback_days日最高价 × (1+breakout_ratio)
+        
         返回突破日在df中的绝对索引位置，未找到返回None。
         """
         lookback = self.params['lookback_days']
@@ -271,7 +271,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         for idx in range(latest_candidate, earliest_candidate - 1, -1):
             day_close = df['close'].iloc[idx]
 
-            # 条件1：涨幅 >= min_change_pct（相对前一日收盘价）
+            # 条件1：涨幅 >= min_change_pct（相对前一日收盘价）- 找长阳日
             if idx < 1:
                 continue
             prev_close = df['close'].iloc[idx - 1]
@@ -281,7 +281,16 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if change_pct < min_chg:
                 continue
 
-            # 条件2：收盘价达到阻力位附近
+            # 条件2：放量（长阳日成交量 >= 前N日均量 × volume_ratio）
+            vol_start = idx - vol_period
+            if vol_start < 0:
+                continue
+            day_vol = df['volume'].iloc[idx]
+            vol_ma = df['volume'].iloc[vol_start:idx].mean()
+            if vol_ma <= 0 or day_vol < vol_ma * vol_ratio:
+                continue
+
+            # 条件3：检查是否突破该长阳日前lookback_days日的最高价
             res_start = idx - lookback
             if res_start < 0:
                 continue
@@ -289,15 +298,6 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if resistance <= 0:
                 continue
             if day_close < resistance * (1 + ratio):
-                continue
-
-            # 条件3：放量（突破日成交量 >= 前N日均量 × volume_ratio）
-            vol_start = idx - vol_period
-            if vol_start < 0:
-                continue
-            day_vol = df['volume'].iloc[idx]
-            vol_ma = df['volume'].iloc[vol_start:idx].mean()
-            if vol_ma <= 0 or day_vol < vol_ma * vol_ratio:
                 continue
 
             # 三个条件都满足，找到突破日
