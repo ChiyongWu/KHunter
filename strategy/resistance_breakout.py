@@ -39,10 +39,10 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             # 突破日条件
             'min_change_pct': 0.08,           # 突破日最小涨幅（默认8%）
             'volume_ratio': 2.0,              # 成交量倍数（默认2.0）
-            'volume_ma_period': 10,           # 成交量均值周期（默认10天）
+            'volume_ma_period': 5,            # 成交量均值周期（默认5天）
 
             # 搜索参数
-            'max_search_days': 10,            # 最大搜索天数（在最近N天内搜索突破日）
+            'max_search_days': 5,             # 最大搜索天数（在最近N天内搜索突破日）
         }
 
         # 合并用户参数

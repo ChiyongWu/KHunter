@@ -417,7 +417,7 @@ strategies:
         min: 100
         type: int
       max_search_days:
-        default: 10
+        default: 5
         description: 最大搜索天数，在最近N天内搜索突破日
         display_name: 搜索天数
         group: 突破参数
@@ -441,7 +441,7 @@ strategies:
         min: 10
         type: int
       volume_ma_period:
-        default: 10
+        default: 5
         description: 成交量均值周期，用于计算成交量倍数
         display_name: 成交量周期
         group: 成交量参数
@@ -469,10 +469,10 @@ strategies:
       breakout_ratio: -0.02
       lookback_days: 60
       max_market_cap: 1000
-      max_search_days: 10
+      max_search_days: 5
       min_change_pct: 0.08
       min_market_cap: 20
-      volume_ma_period: 10
+      volume_ma_period: 5
       volume_ratio: 2.0
   StrongWashWeakToStrongStrategy:
     support_method: key_close
