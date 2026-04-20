@@ -43,9 +43,33 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         # 调用父类初始化
         super().__init__("涨停横盘策略", default_params)
 
+    def quick_filter(self, df):
+        """
+        快速过滤：检查是否有涨停板
+        
+        只基于价格，不涉及成交量或其他指标
+        
+        :param df: 股票数据DataFrame（降序，最新在前）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        lookback_days = self.params['limit_up_lookback_days']
+        limit_up_threshold = self.params['limit_up_threshold']
+        
+        # 只取需要的列，提高速度
+        if len(df) < lookback_days + 1:
+            return False
+        
+        check_df = df[['close']].head(lookback_days + 1)
+        
+        # 向量化计算涨跌幅
+        pct_change = check_df['close'].pct_change(-1)
+        
+        # 如果有涨停板，返回True
+        return (pct_change >= limit_up_threshold).any()
+
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
-        计算技术指标（MA、KDJ、MACD、成交量均线）
+        计算技术指标（成交量均线）
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: 计算了指标的DataFrame
@@ -61,31 +85,6 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         reversed_df = df.iloc[::-1].reset_index(drop=True)
         reversed_df['volume_5'] = reversed_df['volume'].rolling(window=5, min_periods=1).mean()
         df['volume_5'] = reversed_df['volume_5'].iloc[::-1].values
-
-        # 计算KDJ指标
-        high = df['high']
-        low = df['low']
-        close = df['close']
-
-        # 计算RSV值
-        n = 9
-        rsv = ((close - low.rolling(window=n).min()) / (high.rolling(window=n).max() - low.rolling(window=n).min())) * 100
-
-        # 计算K、D、J值
-        df['kdj_k'] = rsv.ewm(alpha=1/3, adjust=False).mean()
-        df['kdj_d'] = df['kdj_k'].ewm(alpha=1/3, adjust=False).mean()
-        df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
-
-        # 计算MACD指标
-        exp1 = close.ewm(span=12, adjust=False).mean()
-        exp2 = close.ewm(span=26, adjust=False).mean()
-        df['macd_dif'] = exp1 - exp2
-        df['macd_dea'] = df['macd_dif'].ewm(span=9, adjust=False).mean()
-        df['macd_hist'] = 2 * (df['macd_dif'] - df['macd_dea'])
-
-        # 计算5日和10日均线
-        df['ma5'] = df['close'].rolling(window=5, min_periods=1).mean()
-        df['ma10'] = df['close'].rolling(window=10, min_periods=1).mean()
 
         return df
 
@@ -194,21 +193,12 @@ class LimitUpSidewaysStrategy(BaseStrategy):
             return None
 
         # 检查成交量是否放大
-        if df.iloc[current_idx]['volume'] < df.iloc[prev_idx]['volume'] * self.params['volume_increase_ratio']:
-            return None
-
-        # 检查KDJ或MACD金叉（满足其一即可）
-        kdj_gold_cross = df.iloc[current_idx]['kdj_j'] > df.iloc[current_idx]['kdj_d']
-        macd_gold_cross = df.iloc[current_idx]['macd_dif'] > df.iloc[current_idx]['macd_dea']
-
-        if not (kdj_gold_cross or macd_gold_cross):
+        if df.iloc[current_idx]['volume'] < df.iloc[prev_idx]['volume'] * self.params.get('volume_increase_ratio', 1.3):
             return None
 
         return {
             'volume_increase': df.iloc[current_idx]['volume'] / df.iloc[prev_idx]['volume'],
-            'price_change': (df.iloc[current_idx]['close'] - df.iloc[prev_idx]['close']) / df.iloc[prev_idx]['close'],
-            'kdj_j': df.iloc[current_idx]['kdj_j'],
-            'macd_hist': df.iloc[current_idx]['macd_hist']
+            'price_change': (df.iloc[current_idx]['close'] - df.iloc[prev_idx]['close']) / df.iloc[prev_idx]['close']
         }
     
     def get_selection_criteria(self):
@@ -237,13 +227,6 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         
         # 条件4：支撑确认
         criteria.append(f"4. 支撑确认：横盘期间收盘价不低于涨停日收盘价")
-        
-        # 条件5：反转信号
-        criteria.append(f"5. 反转信号：KDJ金叉或MACD金叉")
-        
-        # 条件6：成交量放大
-        volume_increase_ratio = self.params.get('volume_increase_ratio', 1.3) * 100
-        criteria.append(f"6. 成交量放大：最近交易日成交量较前一交易日放大>={volume_increase_ratio:.0f}%")
         
         return criteria
 
@@ -276,17 +259,7 @@ class LimitUpSidewaysStrategy(BaseStrategy):
                 return None
 
         # 快速预检查：检查是否有涨停板
-        lookback_days = self.params['limit_up_lookback_days']
-        limit_up_threshold = self.params['limit_up_threshold']
-        
-        # 只取需要的列，提高速度
-        check_df = df[['close']].head(lookback_days + 1)
-        
-        # 向量化计算涨跌幅
-        pct_change = check_df['close'].pct_change(-1)
-        
-        # 如果没有涨停板，直接返回None
-        if not (pct_change >= limit_up_threshold).any():
+        if not self.quick_filter(df):
             return None
 
         # 计算技术指标（只有有涨停板的股票才会到达这里）
