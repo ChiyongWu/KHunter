@@ -109,6 +109,8 @@ class StrongWashWeakToStrongStrategy(BaseStrategy):
     def quick_filter(self, df) -> bool:
         """
         快速过滤：最近6个交易日内是否出现涨幅≥8%的大阳线
+        
+        只涉及价格过滤，不涉及技术指标计算
         df 是倒序数据（最新在前）
         """
         if df is None or df.empty or len(df) < 6:
@@ -117,12 +119,16 @@ class StrongWashWeakToStrongStrategy(BaseStrategy):
         # 检查最近6个交易日内是否有涨幅≥8%的大阳线
         for i in range(min(6, len(df))):
             row = df.iloc[i]
+            
             # 计算涨幅
-            if row['open'] > 0:
-                change = (row['close'] - row['open']) / row['open']
-                # 检查是否为阳线且涨幅≥8%
-                if row['close'] > row['open'] and change >= self.params['big_candle_threshold']:
-                    return True
+            if row['open'] <= 0:
+                continue
+            
+            change = (row['close'] - row['open']) / row['open']
+            
+            # 检查是否为大阳线（涨幅≥8%）
+            if row['close'] > row['open'] and change >= self.params['big_candle_threshold']:
+                return True
         
         return False
     
@@ -145,7 +151,7 @@ class StrongWashWeakToStrongStrategy(BaseStrategy):
             if stock_name.startswith('*ST') or stock_name.startswith('ST') or '退' in stock_name:
                 return []
         
-        # 快速过滤：检查最近6个交易日内是否有涨幅≥8%的大阳线
+        # 快速过滤
         if not self.quick_filter(df):
             return []
         
