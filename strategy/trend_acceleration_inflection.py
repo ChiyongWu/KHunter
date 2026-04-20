@@ -179,30 +179,70 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
         """
         criteria = []
         
-        # 条件1：上升趋势
-        uptrend_lookback_days = self.params['uptrend_lookback_days']
-        criteria.append(f"1. 上升趋势：最近{uptrend_lookback_days}个交易日处于上升趋势（线性回归斜率>0，p值<0.01，R²>0.5）")
-        
-        # 条件2：放量长阳线
+        # 快速过滤：涨幅检查
         price_increase_threshold = self.params['price_increase_threshold'] * 100
+        surge_lookback_days = self.params['surge_lookback_days']
+        criteria.append(f"快速过滤：最近{surge_lookback_days}个交易日内出现涨幅≥{price_increase_threshold:.0f}%")
+        
+        # 条件1：放量过滤
         volume_ratio_threshold = self.params['volume_ratio_threshold']
         volume_ma_period = self.params['volume_ma_period']
-        surge_lookback_days = self.params['surge_lookback_days']
-        criteria.append(f"2. 放量长阳线：最近{surge_lookback_days}个交易日内出现涨停或涨幅超过{price_increase_threshold:.0f}%，且成交量是前{volume_ma_period}日均量的{volume_ratio_threshold:.1f}倍以上")
+        criteria.append(f"1. 放量过滤：成交量≥前{volume_ma_period}日均量的{volume_ratio_threshold:.1f}倍")
         
-        # 条件3：距离条件
+        # 条件2：趋势判断
+        uptrend_lookback_days = self.params['uptrend_lookback_days']
+        criteria.append(f"2. 趋势判断：最近{uptrend_lookback_days}个交易日处于上升趋势（线性回归斜率>0，p值<0.01，R²>0.5）")
+        
+        # 条件3：涨幅判断
         distance_threshold = self.params['distance_threshold'] * 100
         lowest_point_lookback_days = self.params['lowest_point_lookback_days']
-        criteria.append(f"3. 距离条件：长阳线起涨点距离最近{lowest_point_lookback_days}个交易日内的最低点涨幅不超过{distance_threshold:.0f}%")
+        criteria.append(f"3. 涨幅判断：长阳线起涨点距离最近{lowest_point_lookback_days}个交易日内的最低点涨幅≤{distance_threshold:.0f}%")
         
-        # 条件4：回调支撑条件
-        criteria.append(f"4. 回调支撑：放量长阳后，所有回调日的最低价不低于长阳线开盘价")
+        # 条件4：支撑判断
+        criteria.append(f"4. 支撑判断：放量长阳后，所有回调日的最低价≥长阳线开盘价")
         
         return criteria
+    
+    def quick_filter(self, df):
+        """
+        快速过滤 - 检查最近5个交易日内是否出现涨停或涨幅超过8%
+        
+        目的：提前过滤不符合条件的股票，避免不必要的指标计算
+        原则：只基于价格，不涉及复杂指标
+        
+        :param df: 股票数据DataFrame（倒序，最新在前）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        if df is None or df.empty or len(df) < 6:
+            return False
+        
+        try:
+            # 获取最近5个交易日的数据
+            surge_days = self.params['surge_lookback_days']
+            recent_df = df.head(surge_days + 1)
+            
+            # 向量化计算涨跌幅（使用-1计算相对于下一行，即更旧日期的变化）
+            price_increases = recent_df['close'].pct_change(-1)
+            
+            # 检查是否有涨幅≥8%的交易日（涨停或大幅上涨）
+            price_threshold = self.params['price_increase_threshold']
+            if (price_increases >= price_threshold).any():
+                return True
+            
+            return False
+        except Exception:
+            return False
     
     def select_stocks(self, df, stock_name='') -> list:
         """
         选股逻辑 - 识别趋势加速拐点
+        
+        调整后的选股流程：
+        1. 快速过滤 - 检查涨幅（最近5日内涨幅≥8%）
+        2. 条件1 - 放量过滤（成交量≥2倍5日均量）
+        3. 条件2 - 趋势判断（上升趋势）
+        4. 条件3 - 涨幅判断（距离最低点≤15%）
+        5. 条件4 - 支撑判断（回调支撑）
         
         返回选股信号列表，每个元素为字典包含信号详情
         """
@@ -220,36 +260,18 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
             if stock_name.startswith('ST') or stock_name.startswith('*ST'):
                 return []
         
-        # 快速预检查：检查是否有放量长阳线
-        # 1. 计算最近10个交易日的涨跌幅
+        # 快速过滤：检查最近5个交易日内是否出现涨幅≥8%
         surge_days = self.params['surge_lookback_days']
-        recent_df = df.head(surge_days + 1)  # 包括当前一天和前10天
+        recent_df = df.head(surge_days + 1)
         
-        # 向量化计算涨跌幅（使用-1计算相对于下一行，即更旧日期的变化）
+        # 向量化计算涨跌幅
         price_increases = recent_df['close'].pct_change(-1)
-        
-        # 检查是否有涨幅≥8%的交易日
         price_threshold = self.params['price_increase_threshold']
+        
         if not (price_increases >= price_threshold).any():
             return []
         
-        # 2. 检查成交量是否放大
-        # 计算5日均量（与calculate_indicators保持一致）
-        # 需要按时间正序排列计算，再恢复倒序
-        volume_ma_period = self.params['volume_ma_period']
-        recent_df_sorted = recent_df.sort_values('date', ascending=True).reset_index(drop=True)
-        recent_df_sorted['volume_ma'] = recent_df_sorted['volume'].shift(1).rolling(
-            window=volume_ma_period, min_periods=1
-        ).mean()
-        recent_df = recent_df_sorted.sort_values('date', ascending=False).reset_index(drop=True)
-        volume_ratio = recent_df['volume'] / recent_df['volume_ma']
-        
-        # 检查是否有成交量≥2倍均量的交易日
-        volume_threshold = self.params['volume_ratio_threshold']
-        if not (volume_ratio >= volume_threshold).any():
-            return []
-        
-        # 计算技术指标（只有通过快速预检查的股票才会到达这里）
+        # 计算技术指标
         df_with_indicators = self.calculate_indicators(df)
         if df_with_indicators.empty:
             return []
@@ -262,21 +284,20 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
         
-        # 检查四个条件
-        # 条件1：上升趋势（道氏理论）
-        if not self._check_uptrend(df_with_indicators):
-            return []
-        
-        # 条件2：放量长阳线
+        # 条件1：放量过滤 - 检查是否有成交量≥2倍5日均量的交易日
         surge_index = self._check_volume_surge(df_with_indicators)
         if surge_index is None:
             return []
         
-        # 条件3：距离条件
+        # 条件2：趋势判断 - 检查上升趋势
+        if not self._check_uptrend(df_with_indicators):
+            return []
+        
+        # 条件3：涨幅判断 - 检查距离最低点≤15%
         if not self._check_distance(df_with_indicators, surge_index):
             return []
         
-        # 条件4：回调支撑
+        # 条件4：支撑判断 - 检查回调支撑
         if not self._check_pullback_support(df_with_indicators, surge_index):
             return []
         
@@ -338,7 +359,7 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
             signal_info = {
                 'key_date': key_date_str,
                 'key_date_type': '放量长阳日',
-                'reasons': ['近20日上升趋势', '近10日放量长阳线', '距离最低点<15%', '回调有支撑']
+                'reasons': ['放量过滤', '上升趋势', '距离最低点<15%', '回调有支撑']
             }
             
             return [signal_info]
@@ -389,52 +410,29 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
     
     def _check_volume_surge(self, df):
         """
-        检查条件2：放量大涨
+        检查条件1：放量过滤
         
         判断逻辑：
-        - 在最近10个交易日内寻找放量大涨
-        - 放量大涨定义：
-          1. 存在一天涨幅 > 8% 或涨停（>= 9.5%）
-          2. 存在一天成交量 >= 2倍5日均量
-          3. 大涨那天收盘价 > 开盘价
-          4. 大涨和放量可以不在同一天
+        - 在最近5个交易日内寻找成交量 >= 2倍5日均量的交易日
+        - 注意：涨幅检查已在快速过滤中完成，这里只检查放量
         
-        返回满足条件的大涨日索引，如果没有则返回 None
+        返回满足条件的放量日索引，如果没有则返回 None
         """
-        if df.empty or len(df) < 11:
+        if df.empty or len(df) < 6:
             return None
         
         surge_days = self.params['surge_lookback_days']
-        price_threshold = self.params['price_increase_threshold']
         volume_threshold = self.params['volume_ratio_threshold']
         
-        # 获取最近10个交易日的数据（包括当前一天）
+        # 获取最近5个交易日的数据（包括当前一天）
         recent_df = df.head(surge_days + 1)
         
-        # 第一步：检查是否存在放量 - 使用向量化操作优化
+        # 检查是否存在放量 - 成交量 >= 2倍5日均量
         volume_ratios = recent_df['volume'] / recent_df['volume_ma']
         volume_mask = volume_ratios >= volume_threshold
-        has_volume_surge = volume_mask.any()
         
-        # 如果没有放量，直接返回 None
-        if not has_volume_surge:
-            return None
-        
-        # 第二步：寻找大涨日（涨幅 > 8% 且收盘价 > 开盘价）- 使用向量化操作优化
-        # 向量化计算涨幅（数据是倒序的，最新在前）
-        price_increases = (recent_df['close'] - recent_df['close'].shift(-1)) / recent_df['close'].shift(-1)
-        
-        # 创建满足条件的掩码
-        limit_up_mask = price_increases >= 0.095  # 涨停 >= 9.5%
-        high_increase_mask = price_increases > price_threshold
-        yang_line_mask = recent_df['close'] > recent_df['open']
-        
-        # 找到同时满足所有条件的索引
-        surge_mask = limit_up_mask | high_increase_mask
-        surge_mask = surge_mask & yang_line_mask
-        
-        # 获取满足条件的索引位置（排除最后一个，因为shift(-1)会产生NaN）
-        valid_indices = [i for i in range(len(recent_df) - 1) if surge_mask.iloc[i]]
+        # 获取满足条件的索引位置
+        valid_indices = [i for i in range(len(recent_df)) if volume_mask.iloc[i]]
         
         if valid_indices:
             return valid_indices[0]  # 返回第一个满足条件的索引
