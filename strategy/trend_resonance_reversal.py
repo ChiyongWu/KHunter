@@ -1,21 +1,11 @@
 """
 趋势共振反转策略 - 多指标共振底部反转
 
-指标定义：
-1. RSI突破信号：RSI(14)从超卖区域（30以下）突破至中性区域（50以上）
-   - 表示股价从超卖状态转为中性偏强
-
-2. 均线金叉信号：5日均线向上穿越20日均线
-   - 表示短期趋势转强
-
-3. MACD金叉信号：DIF线上穿DEA线
-   - 表示动能转强
-
 选股条件：
-- RSI从30以下突破至50以上
-- 5日均线上穿20日均线
-- DIF线上穿DEA线
-- 三个信号在3个交易日内发生（时间共振）
+1. RSI从30以下突破至50以上（最近3天内）
+2. 随后出现5日均线上穿20日均线
+3. 随后出现DIF线上穿DEA线
+4. 所有信号在3个交易日内发生（时间共振）
 """
 import pandas as pd
 import numpy as np
@@ -31,27 +21,19 @@ class TrendResonanceReversalStrategy(BaseStrategy):
     """趋势共振反转策略 - 多指标共振底部反转"""
     
     def __init__(self, params=None):
-        # 默认参数 - 与 config/strategy_params.yaml 中的配置保持一致
+        # 默认参数
         default_params = {
-            # RSI参数
             'rsi_period': 14,           # RSI计算周期
             'rsi_oversold': 30,         # RSI超卖阈值
             'rsi_breakout': 50,         # RSI突破阈值
-            
-            # 均线参数
             'short_ma_period': 5,       # 短期均线周期
             'long_ma_period': 20,       # 长期均线周期
-            
-            # MACD参数
             'macd_fast': 12,            # MACD快线周期
             'macd_slow': 26,            # MACD慢线周期
             'macd_signal': 9,           # MACD信号线周期
-            
-            # 共振时间参数
             'signal_days': 3,           # 信号共振时间窗口（天）
         }
         
-        # 合并用户参数 - params 中的值覆盖默认值
         if params:
             default_params.update(params)
         
@@ -62,12 +44,18 @@ class TrendResonanceReversalStrategy(BaseStrategy):
         计算趋势共振反转策略所需的指标
         
         参数：
-            df: 股票日线数据DataFrame
+            df: 股票日线数据DataFrame（可能是倒序或正序）
         
         返回：
-            添加了指标的DataFrame
+            添加了指标的DataFrame（正序，最新在最后）
         """
         result = df.copy()
+        
+        # 检测数据顺序
+        is_descending = False
+        if len(result) > 1 and result['date'].iloc[0] > result['date'].iloc[1]:
+            is_descending = True
+            result = result.iloc[::-1].reset_index(drop=True)
         
         # 计算RSI指标
         rsi_df = RSI(result, period=self.params['rsi_period'])
@@ -86,6 +74,7 @@ class TrendResonanceReversalStrategy(BaseStrategy):
         result['macd_dea'] = macd_df['macd_signal']   # DEA线
         result['macd_hist'] = macd_df['macd_hist']    # MACD柱状图
         
+        # 始终返回正序数据（最新在最后）
         return result
     
     def get_selection_criteria(self):
@@ -109,15 +98,20 @@ class TrendResonanceReversalStrategy(BaseStrategy):
         # 条件3：MACD金叉
         criteria.append(f"3. MACD金叉：DIF线上穿DEA线")
         
-        # 条件4：时间共振
-        signal_days = self.params['signal_days']
-        criteria.append(f"4. 时间共振：三个信号在最近{signal_days}个交易日内发生")
+        # 条件4：顺序要求
+        criteria.append(f"4. 顺序要求：RSI信号先出现，随后出现均线金叉和MACD金叉")
         
         return criteria
     
     def select_stocks(self, df, stock_name='') -> list:
         """
         选股逻辑 - 识别趋势共振反转信号
+        
+        条件：
+        1. RSI 从 30 以下突破至 50 以上（最近 3 天内）
+        2. 随后出现 5日均线上穿20日均线
+        3. 随后出现 DIF线上穿DEA线
+        4. 所有信号在 3 个交易日内发生
         
         参数：
             df: 股票日线数据DataFrame
@@ -130,7 +124,7 @@ class TrendResonanceReversalStrategy(BaseStrategy):
             return []
         
         try:
-            # 计算指标
+            # 计算指标（返回正序数据，最新在最后）
             df = self.calculate_indicators(df)
             
             # 获取参数
@@ -145,86 +139,77 @@ class TrendResonanceReversalStrategy(BaseStrategy):
             # 初始化信号标记
             signals = []
             
-            # 第一步：在最近signal_days天内寻找RSI突破信号
-            # 数据是倒序的（最新在前），所以从索引0开始
-            rsi_search_range = min(signal_days, len(df) - 1)
+            # 第一步：在最近 signal_days 天内寻找 RSI 突破信号
+            # 数据是正序的（最新在最后），所以从最后向前搜索
             rsi_breakout_day = None
             
-            for i in range(rsi_search_range):
-                # 当前RSI >= 突破阈值，且前一日RSI < 突破阈值
-                # 且在之前几天内RSI曾经低于超卖阈值
-                if (df['rsi'].iloc[i] >= rsi_breakout and 
-                    df['rsi'].iloc[i+1] < rsi_breakout):
-                    # 检查是否曾经超卖
-                    lookback = min(signal_days * 2, len(df) - i - 1)
-                    if df['rsi'].iloc[i+1:i+1+lookback].min() <= rsi_oversold:
-                        rsi_breakout_day = i
-                        break  # 找到最近的RSI突破信号
+            # 搜索范围：最后 signal_days 天
+            search_start = max(0, len(df) - signal_days - 1)
             
-            # 如果没有找到RSI突破信号，直接返回
+            for i in range(len(df) - 1, search_start, -1):
+                # 当前 RSI >= 突破阈值，且前一日 RSI < 突破阈值
+                if (df['rsi'].iloc[i] >= rsi_breakout and 
+                    df['rsi'].iloc[i-1] < rsi_breakout):
+                    # 检查是否曾经超卖
+                    lookback = min(signal_days * 2, i)
+                    if df['rsi'].iloc[max(0, i-lookback):i].min() <= rsi_oversold:
+                        rsi_breakout_day = i
+                        break  # 找到最近的 RSI 突破信号
+            
+            # 如果没有找到 RSI 突破信号，直接返回
             if rsi_breakout_day is None:
                 return []
             
-            # 第二步：在RSI突破信号的前后signal_days天内寻找均线金叉和MACD金叉
-            # 扩大搜索范围到signal_days的两倍
-            search_range = min(signal_days * 2 + 1, len(df) - 1)
-            
+            # 第二步：在 RSI 突破之后寻找均线金叉和 MACD 金叉
+            # 搜索范围：从 RSI 突破日开始向后搜索，直到 RSI 突破日之后 signal_days 天
             ma_cross_day = None
             macd_cross_day = None
             
-            for i in range(search_range):
+            search_end = min(len(df), rsi_breakout_day + signal_days + 1)
+            
+            for i in range(rsi_breakout_day, search_end):
                 # 均线金叉信号检测
-                if ma_cross_day is None and i + 1 < len(df):
+                if ma_cross_day is None and i > 0:
                     # 当前短期均线 > 长期均线，且前一日短期均线 <= 长期均线
                     if (df['ma_short'].iloc[i] > df['ma_long'].iloc[i] and 
-                        df['ma_short'].iloc[i+1] <= df['ma_long'].iloc[i+1]):
+                        df['ma_short'].iloc[i-1] <= df['ma_long'].iloc[i-1]):
                         ma_cross_day = i
                 
-                # MACD金叉信号检测
-                if macd_cross_day is None and i + 1 < len(df):
-                    # 当前DIF > DEA，且前一日DIF <= DEA
+                # MACD 金叉信号检测
+                if macd_cross_day is None and i > 0:
+                    # 当前 DIF > DEA，且前一日 DIF <= DEA
                     if (df['macd_dif'].iloc[i] > df['macd_dea'].iloc[i] and 
-                        df['macd_dif'].iloc[i+1] <= df['macd_dea'].iloc[i+1]):
+                        df['macd_dif'].iloc[i-1] <= df['macd_dea'].iloc[i-1]):
                         macd_cross_day = i
                 
                 # 如果两个信号都找到了，提前退出
                 if ma_cross_day is not None and macd_cross_day is not None:
                     break
             
-            # 第三步：检查三个信号是否在signal_days天内发生
-            signal_days_list = [d for d in [rsi_breakout_day, ma_cross_day, macd_cross_day] if d is not None]
-            
-            if len(signal_days_list) == 3:
-                # 三个信号都存在，检查时间间隔
-                max_day = max(signal_days_list)
-                min_day = min(signal_days_list)
+            # 第三步：检查是否找到了均线金叉和 MACD 金叉
+            if ma_cross_day is not None and macd_cross_day is not None:
+                # 关键日期：RSI 突破日
+                key_date = df['date'].iloc[rsi_breakout_day]
+                key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
                 
-                if max_day - min_day <= signal_days:
-                    # 时间共振满足条件
-                    # 关键日期：RSI突破日
-                    key_date = df['date'].iloc[rsi_breakout_day]
-                    
-                    # 格式化关键日期，只保留日期部分
-                    key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
-                    
-                    signal = {
-                        'stock_code': df['code'].iloc[0] if 'code' in df.columns else stock_name,
-                        'stock_name': stock_name,
-                        'date': df['date'].iloc[rsi_breakout_day],
-                        'key_date': key_date_str,
-                        'key_date_type': 'RSI突破日',
-                        'rsi_breakout_day': df['date'].iloc[rsi_breakout_day],
-                        'ma_cross_day': df['date'].iloc[ma_cross_day],
-                        'macd_cross_day': df['date'].iloc[macd_cross_day],
-                        'rsi_value': df['rsi'].iloc[rsi_breakout_day],
-                        'ma_short': df['ma_short'].iloc[ma_cross_day],
-                        'ma_long': df['ma_long'].iloc[ma_cross_day],
-                        'macd_dif': df['macd_dif'].iloc[macd_cross_day],
-                        'macd_dea': df['macd_dea'].iloc[macd_cross_day],
-                        'close': df['close'].iloc[rsi_breakout_day],
-                        'reason': f'RSI突破({df["rsi"].iloc[rsi_breakout_day]:.1f}), 均线金叉, MACD金叉'
-                    }
-                    signals.append(signal)
+                signal = {
+                    'stock_code': df['code'].iloc[0] if 'code' in df.columns else stock_name,
+                    'stock_name': stock_name,
+                    'date': df['date'].iloc[rsi_breakout_day],
+                    'key_date': key_date_str,
+                    'key_date_type': 'RSI突破日',
+                    'rsi_breakout_day': df['date'].iloc[rsi_breakout_day],
+                    'ma_cross_day': df['date'].iloc[ma_cross_day],
+                    'macd_cross_day': df['date'].iloc[macd_cross_day],
+                    'rsi_value': df['rsi'].iloc[rsi_breakout_day],
+                    'ma_short': df['ma_short'].iloc[ma_cross_day],
+                    'ma_long': df['ma_long'].iloc[ma_cross_day],
+                    'macd_dif': df['macd_dif'].iloc[macd_cross_day],
+                    'macd_dea': df['macd_dea'].iloc[macd_cross_day],
+                    'close': df['close'].iloc[rsi_breakout_day],
+                    'reason': f'RSI突破({df["rsi"].iloc[rsi_breakout_day]:.1f}), 均线金叉, MACD金叉'
+                }
+                signals.append(signal)
             
             return signals
             
