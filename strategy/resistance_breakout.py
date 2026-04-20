@@ -3,16 +3,14 @@
 
 策略原理：
 1. 阻力位识别：计算前60日最高价作为阻力位
-2. 放量长阳突破：在最近10天内搜索涨幅>8%且放量的突破日
+2. 放量长阳突破：在最近5天内搜索涨幅>8%且放量的突破日
 3. 回踩支撑：从突破日到今天，不跌破突破日开盘价
-4. 趋势配合：确认短期趋势是否向上
 
 选股条件：
 - 突破日收盘价 >= 前60日最高价 × 0.98（达到阻力位98%即可）
 - 突破日涨幅 >= 8%（放量长阳）
-- 突破日成交量 >= 前10日均量 × 2.0
+- 突破日成交量 >= 前5日均量 × 1.8
 - 从突破日到今天，所有天最低价不跌破突破日开盘价
-- 短期趋势向上
 """
 import pandas as pd
 import numpy as np
@@ -22,7 +20,6 @@ from pathlib import Path
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
-from utils.technical import REF, MA
 
 
 class ResistanceBreakoutStrategy(BaseStrategy):
@@ -30,41 +27,31 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
     def __init__(self, params=None):
         """初始化策略参数"""
-        # 默认参数配置
         default_params = {
-            # 阻力位参数
-            'lookback_days': 60,              # 回溯天数（默认60天）
-            'breakout_ratio': -0.02,          # 突破阈值（-0.02表示达到阻力位98%即可）
-
-            # 突破日条件
-            'min_change_pct': 0.08,           # 突破日最小涨幅（默认8%）
-            'volume_ratio': 1.8,              # 成交量倍数（默认1.8）
-            'volume_ma_period': 5,            # 成交量均值周期（默认5天）
-
-            # 搜索参数
-            'max_search_days': 5,             # 最大搜索天数（在最近N天内搜索突破日）
+            'lookback_days': 60,              # 回溯天数
+            'breakout_ratio': -0.02,          # 突破阈值（-0.02表示98%）
+            'min_change_pct': 0.08,           # 最小涨幅（8%）
+            'volume_ratio': 1.8,              # 成交量倍数
+            'volume_ma_period': 5,            # 成交量均值周期
+            'max_search_days': 5,             # 最大搜索天数
         }
 
-        # 合并用户参数
         if params:
             default_params.update(params)
 
         super().__init__("阻力位突破策略", default_params)
 
     def calculate_indicators(self, df) -> pd.DataFrame:
-        """
-        计算阻力位突破策略所需的指标
-        包括：阻力位、成交量均线、趋势线等
-        """
+        """计算指标"""
         result = df.copy()
 
-        # 数据可能是倒序排列（最新的在前），需要转为正序计算指标
+        # 数据可能是倒序排列，需要转为正序计算指标
         is_descending = False
         if len(result) > 1 and result['date'].iloc[0] > result['date'].iloc[1]:
             is_descending = True
             result = result.iloc[::-1].reset_index(drop=True)
 
-        # 计算阻力位（前N日最高价，含当天，用于指标展示）
+        # 计算阻力位（前N日最高价）
         lookback_days = self.params['lookback_days']
         result['resistance_level'] = result['high'].rolling(window=lookback_days).max()
 
@@ -75,144 +62,92 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         # 计算成交量比
         result['volume_ratio'] = result['volume'] / result['volume_ma']
 
-        # 计算突破幅度（基于rolling阻力位，用于指标展示）
-        result['breakout_ratio'] = (
-            (result['close'] - result['resistance_level']) / result['resistance_level']
-        )
-
-        # 计算趋势线（复用知行趋势线组件）
-        from utils.technical import calculate_zhixing_trend
-        trend_df = calculate_zhixing_trend(
-            result, m1=14, m2=28, m3=57, m4=114
-        )
-        result['short_term_trend'] = trend_df['short_term_trend']
-        result['bull_bear_line'] = trend_df['bull_bear_line']
-
-        # 始终返回正序数据（最新在后），方便后续搜索和索引
+        # 始终返回正序数据
         return result
     
     def get_selection_criteria(self):
-        """
-        获取选股条件描述
-        :return: 选股条件描述列表
-        """
+        """获取选股条件描述"""
         criteria = []
-        
-        # 条件1：放量长阳日
         min_change_pct = self.params['min_change_pct'] * 100
         volume_ratio = self.params['volume_ratio']
         volume_ma_period = self.params['volume_ma_period']
         max_search_days = self.params['max_search_days']
-        criteria.append(f"1. 放量长阳日：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
-        
-        # 条件2：阻力位突破
         lookback_days = self.params['lookback_days']
         breakout_ratio = self.params['breakout_ratio'] * 100
-        criteria.append(f"2. 阻力位突破：长阳日收盘价突破该日前{lookback_days}日最高价的{100+breakout_ratio:.0f}%以上")
         
-        # 条件3：回踩支撑
+        criteria.append(f"1. 放量长阳日：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
+        criteria.append(f"2. 阻力位突破：长阳日收盘价突破该日前{lookback_days}日最高价的{100+breakout_ratio:.0f}%以上")
         criteria.append(f"3. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
         
         return criteria
 
     def quick_filter(self, df) -> bool:
-        """
-        快速过滤 - 检查是否有放量长阳线
-        
-        目的：提前过滤不符合条件的股票，避免不必要的指标计算
-        条件：最近N个交易日内出现涨幅≥8%的交易日
-        
-        :param df: 股票数据DataFrame（倒序，最新在前）
-        :return: True表示通过快速过滤，False表示未通过
-        """
+        """快速过滤"""
         if df is None or df.empty or len(df) < 5:
             return False
         
-        # 获取最近max_search_days天的数据
         max_search_days = self.params['max_search_days']
+        # df 是倒序的（最新在前），所以使用 head() 获取最近的数据
         recent_df = df.head(max_search_days + 1)
         
-        # 计算涨跌幅（使用-1计算相对于下一行的变化）
+        # 计算涨跌幅（倒序数据，所以使用 pct_change(-1)）
         pct_change = recent_df['close'].pct_change(-1)
-        
-        # 检查是否有涨幅≥min_change_pct的交易日
         min_change_pct = self.params['min_change_pct']
-        has_big_rise = (pct_change >= min_change_pct).any()
         
-        return bool(has_big_rise)
+        return bool((pct_change >= min_change_pct).any())
 
     def select_stocks(self, df, stock_name='') -> list:
-        """
-        选股逻辑 - 识别阻力位突破信号
-
-        核心流程：
-        1. 数据验证和过滤
-        2. 快速预检查：检查是否有放量长阳线（已在quick_filter中做）
-        3. 计算指标
-        4. 在最近一段时间内搜索突破日
-        5. 验证突破日的成交量、站稳、回踩、趋势条件
-        """
-        # 数据验证
-        if not self._validate_data(df):
+        """选股逻辑"""
+        # 数据检查
+        if df is None or df.empty or len(df) < 70:
             return []
 
-        # 过滤退市/异常股票
-        if stock_name:
-            invalid_keywords = ['退', '未知', '退市', '已退']
-            if any(kw in stock_name for kw in invalid_keywords):
+        # 检查数据是否过时（最新数据距今超过5年）
+        try:
+            from datetime import datetime
+            latest_date_str = str(df.iloc[-1]['date']).split()[0]  # 只取日期部分
+            latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
+            current_date = datetime.now()
+            days_diff = (current_date - latest_date).days
+            # 如果最新数据超过5年前，认为是已退市股票
+            if days_diff > 365 * 5:
                 return []
-            # 过滤 ST/*ST 股票
-            if stock_name.startswith('ST') or stock_name.startswith('*ST'):
-                return []
+        except Exception:
+            pass
 
         # 快速预检查：检查是否有放量长阳线
-        # 1. 计算最近N个交易日的涨跌幅
         max_search_days = self.params['max_search_days']
-        recent_df = df.head(max_search_days + 1)
+        # df 是正序的（最新在最后），所以使用 tail() 获取最近的数据
+        recent_df = df.tail(max_search_days + 1)
         
-        # 向量化计算涨跌幅（使用-1计算相对于下一行，即更旧日期的变化）
-        pct_change = recent_df['close'].pct_change(-1)
-        
-        # 检查是否有涨幅≥8%的交易日
+        # 计算涨跌幅
+        pct_change = recent_df['close'].pct_change()
         min_change_pct = self.params['min_change_pct']
         if not (pct_change >= min_change_pct).any():
             return []
         
-        # 2. 检查成交量是否放大
-        # 计算N日均量（注意：数据是倒序的，需要反转后计算再反转回来）
+        # 检查成交量是否放大
         volume_ma_period = self.params['volume_ma_period']
-        
-        # 反转数据为正序（旧到新），计算均线，再反转回倒序
-        # 使用.copy()避免SettingWithCopyWarning
         recent_df_copy = recent_df.copy()
-        reversed_df = recent_df_copy.iloc[::-1].reset_index(drop=True)
-        reversed_df['volume_ma'] = reversed_df['volume'].rolling(window=volume_ma_period, min_periods=1).mean()
-        recent_df_copy['volume_ma'] = reversed_df['volume_ma'].iloc[::-1].values
+        # recent_df 已经是正序的，直接计算均线
+        recent_df_copy['volume_ma'] = recent_df_copy['volume'].rolling(window=volume_ma_period, min_periods=1).mean()
         
-        # 计算成交量比
         volume_ratio = recent_df_copy['volume'] / recent_df_copy['volume_ma']
-        
-        # 检查是否有成交量≥2倍均量的交易日
         volume_ratio_threshold = self.params['volume_ratio']
         if not (volume_ratio >= volume_ratio_threshold).any():
             return []
 
-        # 计算指标（只有通过快速预检查的股票才会到达这里）
-        df = self.calculate_indicators(df)
-
         # 获取最新数据
         latest = df.iloc[-1]
-
-        # 检查最新一天是否有有效交易
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
 
-        # 核心：搜索放量长阳突破日（已包含涨幅和放量检查）
+        # 搜索放量长阳突破日
         breakout_pos = self._find_breakout_day(df)
         if breakout_pos is None:
             return []
 
-        # 检查条件2：突破后回踩检查（从突破日到今天不跌破突破日开盘价）
+        # 检查回踩支撑
         if not self._check_pullback(df, breakout_pos):
             return []
 
@@ -220,32 +155,8 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         signal = self._generate_signal(df, latest, breakout_pos)
         return [signal]
 
-    def _validate_data(self, df) -> bool:
-        """数据验证：检查数据完整性和长度"""
-        # 先调用基类的通用验证（包括检查已退市股票）
-        if not super()._validate_data(df):
-            return False
-        
-        # 需要足够的数据来计算所有指标
-        min_days = max(
-            self.params['lookback_days'],
-            self.params['volume_ma_period'], 30, 20
-        ) + self.params['max_search_days']
-        if len(df) < min_days:
-            return False
-        
-        return True
-
     def _find_breakout_day(self, df):
-        """
-        在最近max_search_days天内搜索放量长阳突破日。
-        
-        逻辑：
-        1. 先找长阳日：涨幅 >= min_change_pct 且 成交量 >= 前N日均量 × volume_ratio
-        2. 再检查突破：该长阳日收盘价 >= 该天之前lookback_days日最高价 × (1+breakout_ratio)
-        
-        返回突破日在df中的绝对索引位置，未找到返回None。
-        """
+        """搜索放量长阳突破日"""
         lookback = self.params['lookback_days']
         ratio = self.params['breakout_ratio']
         min_chg = self.params['min_change_pct']
@@ -258,11 +169,11 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         latest_candidate = n - 1
         earliest_candidate = max(lookback, n - max_search)
 
-        # 从最近的候选日往前搜索（优先找最近的突破）
+        # 从最近的候选日往前搜索
         for idx in range(latest_candidate, earliest_candidate - 1, -1):
             day_close = df['close'].iloc[idx]
 
-            # 条件1：涨幅 >= min_change_pct（相对前一日收盘价）- 找长阳日
+            # 条件1：涨幅 >= min_change_pct
             if idx < 1:
                 continue
             prev_close = df['close'].iloc[idx - 1]
@@ -272,7 +183,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if change_pct < min_chg:
                 continue
 
-            # 条件2：放量（长阳日成交量 >= 前N日均量 × volume_ratio）
+            # 条件2：放量
             vol_start = idx - vol_period
             if vol_start < 0:
                 continue
@@ -281,7 +192,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if vol_ma <= 0 or day_vol < vol_ma * vol_ratio:
                 continue
 
-            # 条件3：检查是否突破该长阳日前lookback_days日的最高价
+            # 条件3：突破阻力位
             res_start = idx - lookback
             if res_start < 0:
                 continue
@@ -291,25 +202,21 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if day_close < resistance * (1 + ratio):
                 continue
 
-            # 三个条件都满足，找到突破日
+            # 找到突破日
             return idx
 
         return None
 
     def _check_pullback(self, df, breakout_pos) -> bool:
-        """
-        检查回踩：从突破日次日到今天（最后一天），所有天的最低价都不跌破突破日开盘价。
-        突破日开盘价是多空博弈的起点，跌破说明突破力度不够。
-        如果突破日就是今天（最后一天），则无需检查回踩，直接通过。
-        """
+        """检查回踩支撑"""
         n = len(df)
 
-        # 突破日开盘价作为回踩支撑位
+        # 突破日开盘价作为支撑位
         breakout_open = df['open'].iloc[breakout_pos]
         if breakout_open <= 0 or pd.isna(breakout_open):
             return False
 
-        # 如果突破日就是最后一天，没有后续数据需要检查
+        # 如果突破日就是最后一天，无需检查回踩
         if breakout_pos >= n - 1:
             return True
 
@@ -322,33 +229,10 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         # 最低价不能跌破突破日开盘价
         return bool(min_low >= breakout_open)
 
-    def _check_trend(self, df) -> bool:
-        """
-        检查趋势配合（复用知行趋势线组件）。
-        满足任一即可：
-        1. 短期趋势线在多空线上方
-        2. 短期趋势线方向向上（当前 > 前一天）
-        """
-        if len(df) < 3:
-            return False
-        # 获取最新趋势数据
-        cur = df['short_term_trend'].iloc[-1]
-        prev = df['short_term_trend'].iloc[-2]
-        bb = df['bull_bear_line'].iloc[-1]
-        # 数据有效性检查
-        if pd.isna(cur) or pd.isna(prev) or pd.isna(bb):
-            return False
-        # 条件1：趋势线在多空线上方
-        above = cur > bb
-        # 条件2：趋势线方向向上
-        rising = cur > prev
-        return bool(above or rising)
-
     def _generate_signal(self, df, latest, breakout_pos) -> dict:
-        """
-        生成选股信号，基于实际找到的突破日位置。
-        """
+        """生成选股信号"""
         lookback = self.params['lookback_days']
+        
         # 计算突破日的阻力位
         res_start = breakout_pos - lookback
         resistance = df['high'].iloc[res_start:breakout_pos].max()
@@ -357,21 +241,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         # 生成选股原因
         reasons = self._generate_reasons(df, breakout_pos)
 
-        # 处理NaN值
-        vr = latest['volume_ratio']
-        if pd.isna(vr):
-            vr = 0
-        st = latest['short_term_trend']
-        if pd.isna(st):
-            st = 0
-        bb = latest['bull_bear_line']
-        if pd.isna(bb):
-            bb = 0
-        vm = latest['volume_ma']
-        if pd.isna(vm):
-            vm = 0
-
-        # 突破幅度（基于突破日）
+        # 突破幅度
         br = (breakout_day['close'] - resistance) / resistance
 
         # 突破后经过的天数
@@ -379,30 +249,25 @@ class ResistanceBreakoutStrategy(BaseStrategy):
 
         # 关键日期：突破日
         key_date = breakout_day['date']
-        
-        # 格式化日期
         if hasattr(key_date, 'strftime'):
             key_date_str = key_date.strftime('%Y-%m-%d')
         else:
             key_date_str = str(key_date)[:10]
         
-        # 构建选股信号 - 统一格式
+        # 构建选股信号
         signal_info = {
             'key_date': key_date_str,
             'key_date_type': '阻力位突破日',
             'price': float(latest['close']),
             'resistance': float(resistance),
             'breakout_ratio': float(br),
-            'volume_ratio': float(vr),
             'days_since_breakout': int(days_since),
             'reasons': reasons
         }
         return signal_info
 
     def _generate_reasons(self, df, breakout_pos) -> list:
-        """
-        生成选股原因列表，基于实际突破日位置。
-        """
+        """生成选股原因列表"""
         reasons = []
         lookback = self.params['lookback_days']
         vol_period = self.params['volume_ma_period']
@@ -412,7 +277,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         resistance = df['high'].iloc[res_start:breakout_pos].max()
         bd = df.iloc[breakout_pos]
 
-        # 原因1：放量长阳突破阻力位（涨幅 = 相对前一日收盘价的涨幅）
+        # 原因1：放量长阳突破阻力位
         bd_idx = breakout_pos
         if bd_idx >= 1:
             prev_close = df['close'].iloc[bd_idx - 1]
@@ -431,30 +296,15 @@ class ResistanceBreakoutStrategy(BaseStrategy):
                 vr = bd['volume'] / vma
                 reasons.append(f"突破日成交量放大{vr:.1f}倍")
 
-        # 原因3：回踩不破突破日开盘价（从突破日到今天）
+        # 原因3：回踩不破突破日开盘价
         days_since = len(df) - 1 - breakout_pos
         bo = bd['open']
         if days_since > 0:
-            # 突破日次日到最后一天的最低价
             rmin = df['low'].iloc[breakout_pos + 1:].min()
             reasons.append(
                 f"突破后{days_since}天回踩最低{rmin:.2f}，未破突破日开盘价{bo:.2f}"
             )
         else:
             reasons.append(f"今日放量长阳突破，开盘价{bo:.2f}")
-
-        # 原因4：趋势向上
-        cur = df['short_term_trend'].iloc[-1]
-        bb = df['bull_bear_line'].iloc[-1]
-        if not pd.isna(cur) and not pd.isna(bb):
-            if cur > bb:
-                reasons.append(
-                    f"短期趋势线{cur:.2f}在多空线{bb:.2f}上方，趋势向上"
-                )
-            else:
-                prev = df['short_term_trend'].iloc[-2]
-                reasons.append(
-                    f"短期趋势线拐头向上（{prev:.2f}→{cur:.2f}）"
-                )
 
         return reasons

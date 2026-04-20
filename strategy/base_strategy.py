@@ -32,7 +32,7 @@ class BaseStrategy(ABC):
     
     def _validate_data(self, df) -> bool:
         """
-        通用数据验证：检查数据完整性、长度和是否为已退市股票
+        通用数据验证：检查数据完整性、长度、是否为已退市股票和ST股票
         
         :param df: 股票数据DataFrame（倒序，最新在前）
         :return: True表示数据有效，False表示数据无效
@@ -66,6 +66,26 @@ class BaseStrategy(ABC):
         
         return True
     
+    def _validate_stock_name(self, stock_name: str) -> bool:
+        """
+        验证股票名称：过滤ST/退市股票
+        
+        :param stock_name: 股票名称
+        :return: True表示股票名称有效，False表示应该被过滤
+        """
+        if not stock_name:
+            return True
+        
+        # 过滤退市/异常股票
+        invalid_keywords = ['退', '未知', '退市', '已退']
+        if any(kw in stock_name for kw in invalid_keywords):
+            return False
+        
+        # 过滤 ST/*ST 股票
+        if stock_name.startswith('ST') or stock_name.startswith('*ST'):
+            return False
+        
+        return True
     
     @abstractmethod
     def calculate_indicators(self, df) -> pd.DataFrame:
