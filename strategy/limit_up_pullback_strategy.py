@@ -353,57 +353,46 @@ class LimitUpPullbackStrategy(BaseStrategy):
         """
         检查是否出现再次启动信号
         
+        改进逻辑：最近三个交易日未创新低，高点逐步抬高
+        这表明股票已经稳定，并开始反弹
+        
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :return: 是否出现反转信号
         """
-        # 检查KDJ金叉
-        kdj_gold_cross = False
-        if 'K' in df.columns and 'D' in df.columns and 'J' in df.columns:
-            # 最新K、D值
-            latest_k = df['K'].iloc[0]
-            latest_d = df['D'].iloc[0]
-            latest_j = df['J'].iloc[0]
-            
-            # 前一天K、D值
-            if len(df) > 1:
-                prev_k = df['K'].iloc[1]
-                prev_d = df['D'].iloc[1]
-            else:
-                prev_k = 0
-                prev_d = 0
-            
-            # KDJ金叉：K上穿D，或J值大于阈值
-            kdj_gold_cross = (latest_k > latest_d and prev_k <= prev_d) or (latest_j > self.params['kdj_gold_cross_threshold'])
-
-        # 检查MACD金叉
-        macd_gold_cross = False
-        if 'macd' in df.columns and 'macd_signal' in df.columns:
-            # 最新MACD值
-            latest_macd = df['macd'].iloc[0]
-            latest_signal = df['macd_signal'].iloc[0]
-            
-            # 前一天MACD值
-            if len(df) > 1:
-                prev_macd = df['macd'].iloc[1]
-                prev_signal = df['macd_signal'].iloc[1]
-            else:
-                prev_macd = 0
-                prev_signal = 0
-            
-            # MACD金叉：macd上穿signal
-            macd_gold_cross = (latest_macd > latest_signal and prev_macd <= prev_signal)
-
-        # 检查成交量是否放大
-        volume_increase = False
-        if 'volume' in df.columns and 'volume_ma5' in df.columns:
-            latest_volume = df['volume'].iloc[0]
-            volume_ma5 = df['volume_ma5'].iloc[0]
-            if volume_ma5 > 0:
-                volume_increase = latest_volume > volume_ma5
-
-        # 至少满足两个条件
-        conditions = [kdj_gold_cross, macd_gold_cross, volume_increase]
-        return sum(conditions) >= 2
+        # 需要至少3个交易日的数据
+        if len(df) < 3:
+            return False
+        
+        # 获取最近3个交易日的数据（倒序，所以是index 0, 1, 2）
+        # index 0: 最新一天
+        # index 1: 前一天
+        # index 2: 前两天
+        
+        day0_low = df.iloc[0]['low']
+        day0_high = df.iloc[0]['high']
+        
+        day1_low = df.iloc[1]['low']
+        day1_high = df.iloc[1]['high']
+        
+        day2_low = df.iloc[2]['low']
+        day2_high = df.iloc[2]['high']
+        
+        # 条件1：最近三个交易日未创新低
+        # 即：最新一天的低点 >= 前一天的低点 >= 前两天的低点
+        no_new_low = (day0_low >= day1_low) and (day1_low >= day2_low)
+        
+        if not no_new_low:
+            return False
+        
+        # 条件2：高点逐步抬高
+        # 即：最新一天的高点 > 前一天的高点 > 前两天的高点
+        higher_highs = (day0_high > day1_high) and (day1_high > day2_high)
+        
+        if not higher_highs:
+            return False
+        
+        # 两个条件都满足，表示出现反转信号
+        return True
     
     def get_selection_criteria(self):
         """
@@ -430,8 +419,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         criteria.append(f"3. 成交量萎缩：回调期间至少一日成交量 <= 涨停日成交量的{volume_shrinkage_ratio:.0f}%")
         
         # 条件4：再次启动
-        kdj_gold_cross_threshold = self.params['kdj_gold_cross_threshold']
-        criteria.append(f"4. 再次启动：KDJ金叉（J值>{kdj_gold_cross_threshold}）或MACD金叉或成交量放大（满足2个即可）")
+        criteria.append(f"4. 再次启动：最近三个交易日未创新低，高点逐步抬高（表示反转信号）")
         
         return criteria
 
