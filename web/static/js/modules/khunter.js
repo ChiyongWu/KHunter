@@ -245,17 +245,26 @@ function exportTradingPlan() {
     })
     .then(response => {
         if (response.ok) {
-            return response.blob();
+            // 获取文件名从响应头
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = '交易计划.xlsx';
+            if (contentDisposition) {
+                const match = contentDisposition.match(/filename="([^"]+)"/);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+            }
+            return response.blob().then(blob => ({ blob, filename }));
         } else {
             throw new Error('导出失败');
         }
     })
-    .then(blob => {
+    .then(({ blob, filename }) => {
         // 4. 创建下载链接
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `交易计划_${new Date().toISOString().split('T')[0]}.xlsx`;
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);

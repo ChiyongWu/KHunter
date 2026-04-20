@@ -80,6 +80,7 @@ class BacktestEngine:
             self.stock_data_cache.clear()
             self.stock_name_cache.clear()
             self.stock_filtered_cache.clear()
+            self.buy_candidate_pool.clear()
             
             # 1. 获取回测日期范围
             start_date = config.get('start_date')
@@ -760,10 +761,10 @@ class BacktestEngine:
                     # 获取股票名称
                     name = self.stock_name_cache.get(code, "未知")
                     
-                    # 直接传原始数据给select_stocks，让策略自行决定是否计算指标
-                    # 多数策略的select_stocks内部已包含预检查和指标计算逻辑
-                    # 避免对所有股票无差别计算指标导致性能瓶颈
-                    signal_list = strategy.select_stocks(df_to_date, name)
+                    # 使用标准的 execute_selection 流程，确保指标被正确计算
+                    # execute_selection 包含：数据验证 -> 快速过滤 -> 计算指标 -> 选股条件检查
+                    # 这样每天的选股结果将根据不同的日期数据而变化
+                    signal_list = strategy.execute_selection(df_to_date, code, name)
                     
                     # 处理选股结果
                     if signal_list:
@@ -792,33 +793,38 @@ class BacktestEngine:
     
     def _score_stocks(self, stocks: List[Dict], strategy_name: str, date: datetime.date) -> List[Dict]:
         """对股票进行评分（回测模式）
-        
+
         使用 BacktestScoreCalculator 进行高效评分：
         - 技术面得分 = Σ(策略权重 × 命中标志)
         - 综合得分 = 技术面×0.35 + 资金面×0.35 + 基本面×0.10 + 板块×0.10 + 事件×0.10
         - 一票否决：M头策略 + 多死叉共振同时命中 → -100分
         - 技术面否决后立即跳过其他维度计算
-        
+
         Args:
             stocks: 股票列表（来自选股结果）
-            strategy_name: 策略名称
+            strategy_name: 策略名称（类名）
             date: 评分日期
-            
+
         Returns:
             带评分的股票列表
         """
         if not stocks:
             return []
-        
+
         date_str = date.strftime('%Y-%m-%d')
-        
+
+        # 获取策略的中文名称（用于评分）
+        strategy = self.strategy_registry.get_strategy(strategy_name)
+        strategy_display_name = strategy.name if strategy else strategy_name
+        logger.info(f"评分使用的策略名称: {strategy_display_name} (类名: {strategy_name})")
+
         # 使用回测专用评分器进行批量评分
         scored_stocks = self.score_calculator.calculate_batch_scores(
             stocks=stocks,
             score_date=date_str,
-            strategy_name=strategy_name
+            strategy_name=strategy_display_name
         )
-        
+
         return scored_stocks
     
     def _calculate_support_level(self, stock: Dict, key_date: datetime.date, method: str) -> float:

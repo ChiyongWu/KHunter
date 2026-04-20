@@ -1287,12 +1287,12 @@ def export_trading_plan():
         plan_date = result.get('plan_date', '')
         filename = f"{plan_date}日交易计划.xlsx"
 
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=filename
-        )
+        # 创建响应对象并手动设置Content-Disposition头
+        from flask import make_response
+        response = make_response(output.getvalue())
+        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
     except Exception as e:
         logger.error(f"导出交易计划失败: {str(e)}")

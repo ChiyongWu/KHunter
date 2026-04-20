@@ -214,11 +214,11 @@ class WBottomStrategy(BaseStrategy):
         l2_idx, l2_price, l2_date = local_lows[0]  # 最新的低点
         l1_idx, l1_price, l1_date = local_lows[1]  # 次新的低点
 
-        # 验证两个低点间隔 >= min_gap（10个交易日）
+        # 验证两个低点间隔 > min_gap（严格大于10个交易日）
         # 倒序数据中位置差即为交易日间隔
         gap = abs(l1_idx - l2_idx)
-        if gap < min_gap:
-            # 间隔不足，返回None
+        if gap <= min_gap:
+            # 间隔不足，返回None（必须严格大于10个交易日）
             return None
 
         # 验证价格差异 <= bottom_diff_threshold
