@@ -64,8 +64,6 @@ class MultiPartyCannonStrategy(BaseStrategy):
             
             # 其他参数
             'lookback_days': 3,                     # 回溯天数（3天）
-            'min_market_cap': 20,                    # 最小总市值（20亿元）
-            'max_market_cap': 1000,                  # 最大总市值（1000亿元）
         }
         
         # 合并用户参数
@@ -77,13 +75,18 @@ class MultiPartyCannonStrategy(BaseStrategy):
     def calculate_indicators(self, df) -> pd.DataFrame:
         """
         计算多方炮策略所需的指标
+        注意：输入数据可能是倒序（最新在前），内部转为正序计算后再转回倒序返回
         """
         result = df.copy()
         
         # 数据质量检查：确保open价格不为0或None
         if result['open'].isnull().any() or (result['open'] == 0).any():
-            # 对于无效数据，返回原始数据
             return result
+        
+        # 检测并转为正序（最旧在前）以便正确计算 rolling 指标
+        is_descending = len(result) > 1 and result['date'].iloc[0] > result['date'].iloc[1]
+        if is_descending:
+            result = result.iloc[::-1].reset_index(drop=True)
         
         # 计算K线实体大小（绝对值）
         result['body_size'] = abs(result['close'] - result['open'])
@@ -91,8 +94,8 @@ class MultiPartyCannonStrategy(BaseStrategy):
         # 计算K线方向（1=阳线，-1=阴线）
         result['candle_direction'] = (result['close'] > result['open']).astype(int) * 2 - 1
         
-        # 计算K线日收益率（相对于前一天收盘价）- 使用统一的函数
-        result['candle_rise'] = calculate_daily_return(result)
+        # 计算K线日收益率（正序数据，前一天是上一行）
+        result['candle_rise'] = result['close'].pct_change()
         
         # 计算成交量均线
         volume_ma_period = self.params['volume_ma_period']
@@ -100,10 +103,14 @@ class MultiPartyCannonStrategy(BaseStrategy):
         
         # 只在需要时计算MACD和KDJ
         if self.params['enable_macd_filter'] or self.params['enable_kdj_filter']:
-            # 计算MACD指标（用于MACD过滤）
-            result = self._calculate_macd(result)
+            # 计算MACD（数据已是正序）
+            ema_12 = result['close'].ewm(span=12, adjust=False).mean()
+            ema_26 = result['close'].ewm(span=26, adjust=False).mean()
+            result['DIF'] = ema_12 - ema_26
+            result['DEA'] = result['DIF'].ewm(span=9, adjust=False).mean()
+            result['MACD'] = result['DIF'] - result['DEA']
             
-            # 计算KDJ指标（用于KDJ过滤）
+            # 计算KDJ指标
             from utils.technical import KDJ
             kdj_df = KDJ(result, n=9, m1=3, m2=3)
             result['K'] = kdj_df['K']
@@ -112,51 +119,26 @@ class MultiPartyCannonStrategy(BaseStrategy):
         
         # 只在需要时计算均线
         if self.params['enable_ma_filter']:
-            # 计算均线（用于均线过滤）
             ma_period = self.params['ma_period']
             result[f'MA{ma_period}'] = result['close'].rolling(window=ma_period).mean()
             
-            # 计算趋势线（与其他策略保持一致）
+            # 计算趋势线
             from utils.technical import calculate_zhixing_trend
             trend_df = calculate_zhixing_trend(
                 result,
-                m1=14,  # MA周期1
-                m2=28,  # MA周期2
-                m3=57,  # MA周期3
-                m4=114  # MA周期4
+                m1=14,
+                m2=28,
+                m3=57,
+                m4=114
             )
             result['short_term_trend'] = trend_df['short_term_trend']
             result['bull_bear_line'] = trend_df['bull_bear_line']
         
-        # 计算市值（如果CSV中有market_cap字段则使用，否则估算）
-        if 'market_cap' not in result.columns:
-            # 估算市值：假设总股本2亿股
-            result['market_cap'] = result['close'] * 2e8
+        # 计算市值字段不在策略中处理，移除
         
-        return result
-    
-    def _calculate_macd(self, df) -> pd.DataFrame:
-        """
-        计算MACD指标
-        """
-        result = df.copy()
-        
-        # 确保数据按时间正序排列（从旧到新）
-        result = result.sort_values('date', ascending=True).reset_index(drop=True)
-        
-        # DIF = 12日EMA - 26日EMA
-        ema_12 = result['close'].ewm(span=12, adjust=False).mean()
-        ema_26 = result['close'].ewm(span=26, adjust=False).mean()
-        result['DIF'] = ema_12 - ema_26
-        
-        # DEA = DIF的9日EMA
-        result['DEA'] = result['DIF'].ewm(span=9, adjust=False).mean()
-        
-        # MACD = DIF - DEA
-        result['MACD'] = result['DIF'] - result['DEA']
-        
-        # 恢复原始顺序（从新到旧）
-        result = result.sort_values('date', ascending=False).reset_index(drop=True)
+        # 转回倒序（最新在前），与输入保持一致
+        if is_descending:
+            result = result.iloc[::-1].reset_index(drop=True)
         
         return result
     
@@ -195,22 +177,28 @@ class MultiPartyCannonStrategy(BaseStrategy):
             ma_period = self.params['ma_period']
             criteria.append(f"5. 趋势过滤：收盘价 > {ma_period}日均线")
         
-        # 条件6：市值过滤
-        min_market_cap = self.params['min_market_cap']
-        max_market_cap = self.params['max_market_cap']
-        criteria.append(f"6. 市值过滤：市值在{min_market_cap}-{max_market_cap}亿元之间")
-        
         return criteria
+
+    def quick_filter(self, df) -> bool:
+        """
+        快速过滤：最新一根K线涨幅 >= 3%（第三根阳线条件的快速预判）
+        df 是倒序数据（最新在前）
+        """
+        if df is None or df.empty or len(df) < 2:
+            return False
+        # 最新收盘价相对前一天的涨幅
+        close_today = df['close'].iloc[0]
+        close_prev  = df['close'].iloc[1]
+        if close_prev <= 0:
+            return False
+        return (close_today - close_prev) / close_prev >= self.params['third_candle_rise']
 
     def select_stocks(self, df, stock_name='') -> list:
         """
         选股逻辑 - 识别多方炮形态
+        注意：输入 df 是倒序数据（最新在前），calculate_indicators 返回也是倒序
         """
-        if df.empty or len(df) < 3:
-            return []
-        
-        # 快速预检查：确保有足够的K线数据
-        if len(df) < 10:  # 至少需要10天数据来计算指标
+        if df.empty or len(df) < 10:
             return []
         
         # 过滤退市/异常股票
@@ -218,101 +206,53 @@ class MultiPartyCannonStrategy(BaseStrategy):
             invalid_keywords = ['退', '未知', '退市', '已退']
             if any(kw in stock_name for kw in invalid_keywords):
                 return []
-            
-            # 过滤 ST/*ST 股票
             if stock_name.startswith('ST') or stock_name.startswith('*ST'):
                 return []
         
-        # 获取最新一天的数据
+        # 数据质量检查
+        if df['open'].isnull().any() or df['close'].isnull().any() or df['volume'].isnull().any():
+            return []
+        
+        # 计算指标（返回倒序数据）
+        df = self.calculate_indicators(df)
+        
+        # 获取最新一天的数据（倒序第一行）
         latest = df.iloc[0]
-        latest_date = latest['date']
         
         # 检查最新一天是否有有效交易
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
         
-        # 数据质量检查：确保关键字段不为空
-        if df['open'].isnull().any() or df['close'].isnull().any() or df['volume'].isnull().any():
-            return []
-        
-        # 市值过滤（提前过滤）
-        if 'market_cap' in df.columns:
-            # 检查market_cap是否有效
-            if pd.isna(latest['market_cap']) or latest['market_cap'] <= 0:
-                return []
-            market_cap = latest['market_cap'] / 1e8  # 转换为亿元
-            if market_cap < self.params['min_market_cap'] or market_cap > self.params['max_market_cap']:
-                return []
-        
-        # 计算指标
-        df = self.calculate_indicators(df)
-        
-        # 市值过滤（如果CSV中没有market_cap字段）
-        if 'market_cap' not in latest.index:
-            # 检查market_cap是否有效
-            if pd.isna(latest['market_cap']) or latest['market_cap'] <= 0:
-                return []
-            market_cap = latest['market_cap'] / 1e8  # 转换为亿元
-            if market_cap < self.params['min_market_cap'] or market_cap > self.params['max_market_cap']:
-                return []
-        else:
-            # 检查market_cap是否有效
-            if pd.isna(latest['market_cap']) or latest['market_cap'] <= 0:
-                return []
-            market_cap = latest['market_cap'] / 1e8  # 转换为亿元
-        
-        # 只检查最近的三根K线
+        # 获取最近的三根K线（倒序：iloc[0]=最新，iloc[1]=前一天，iloc[2]=前两天）
         if len(df) < 3:
             return []
         
-        # 获取最近的三根K线
-        third_candle = df.iloc[0]      # 第三根K线（最新，Day-0）
-        second_candle = df.iloc[1]      # 第二根K线（Day-1）
-        first_candle = df.iloc[2]       # 第一根K线（Day-2）
+        third_candle = df.iloc[0]   # 第三根K线（最新，Day-0）
+        second_candle = df.iloc[1]  # 第二根K线（Day-1）
+        first_candle = df.iloc[2]   # 第一根K线（Day-2）
         
         # 检查是否满足多方炮形态
-        if self._is_multi_party_cannon_pattern(first_candle, second_candle, third_candle):
-            # 计算形态分类
-            category = self._classify_pattern(first_candle, second_candle, third_candle)
-            
-            # 计算成交量放大比例
-            volume_expand_ratio = third_candle['volume'] / first_candle['volume']
-            
-            # 关键日期：第三根K线（确认日）的日期
-            key_date = third_candle['date']
-            
-            # 格式化关键日期，只保留日期部分
-            key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
-            
-            # 构建选股信号
-            signal_info = {
-                'date': latest_date,
-                'close': round(latest['close'], 2),
-                'J': round(latest['J'], 2),
-                'volume_ratio': round(volume_expand_ratio, 2),
-                'market_cap': round(market_cap, 2),
-                'short_term_trend': round(latest['short_term_trend'], 2),
-                'bull_bear_line': round(latest['bull_bear_line'], 2),
-                'key_date': key_date_str,
-                'key_date_type': '多方炮确认日',
-                'reasons': self._generate_reasons(first_candle, second_candle, third_candle),
-                'category': category,
-                'pattern_details': {
-                    'first_candle_date': first_candle['date'],
-                    'first_candle_close': round(first_candle['close'], 2),
-                    'first_candle_rise': round(first_candle['candle_rise'] * 100, 2),
-                    'second_candle_date': second_candle['date'],
-                    'second_candle_close': round(second_candle['close'], 2),
-                    'second_candle_fallback': round(self._calculate_fallback_ratio(first_candle, second_candle) * 100, 2),
-                    'third_candle_date': third_candle['date'],
-                    'third_candle_close': round(third_candle['close'], 2),
-                    'third_candle_rise': round(third_candle['candle_rise'] * 100, 2),
-                    'volume_expand_ratio': round(volume_expand_ratio, 2),
-                }
-            }
-            return [signal_info]
+        if not self._is_multi_party_cannon_pattern(first_candle, second_candle, third_candle):
+            return []
         
-        return []
+        # 计算形态分类和成交量放大比例
+        category = self._classify_pattern(first_candle, second_candle, third_candle)
+        volume_expand_ratio = third_candle['volume'] / first_candle['volume']
+        
+        # 关键日期：第三根K线（确认日）的日期
+        key_date = third_candle['date']
+        key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
+        
+        # 构建选股信号
+        signal_info = {
+            'key_date': key_date_str,
+            'key_date_type': '多方炮确认日',
+            'price': round(float(latest['close']), 2),
+            'volume_ratio': round(float(volume_expand_ratio), 2),
+            'category': category,
+            'reasons': self._generate_reasons(first_candle, second_candle, third_candle),
+        }
+        return [signal_info]
     
     def _detect_patterns_vectorized(self, df) -> list:
         """
@@ -465,33 +405,35 @@ class MultiPartyCannonStrategy(BaseStrategy):
         
         # 第一根K线（Day-2）：必须是阳线且涨幅达标
         first_is_bullish = first_candle['close'] > first_candle['open']
-        first_rise = first_candle['candle_rise']
+        # candle_rise 可能为 NaN（数据边界），用开盘收盘价直接计算
+        first_rise = first_candle.get('candle_rise', None)
+        if first_rise is None or pd.isna(first_rise):
+            first_rise = (first_candle['close'] - first_candle['open']) / first_candle['open'] if first_candle['open'] > 0 else 0
         
         if not first_is_bullish or first_rise < self.params['first_candle_rise']:
             return False
         
         # 第二根K线（Day-1）：必须是阴线
         second_is_bearish = second_candle['close'] < second_candle['open']
-        
         if not second_is_bearish:
             return False
         
         # 第二根K线实体大小检查：必须 <= 第一根阳线实体的50%
-        first_body = first_candle['body_size']
-        second_body = second_candle['body_size']
-        
+        first_body = first_candle.get('body_size', abs(first_candle['close'] - first_candle['open']))
+        second_body = second_candle.get('body_size', abs(second_candle['close'] - second_candle['open']))
         if second_body > first_body * self.params['second_candle_body_ratio']:
             return False
         
         # 第二根K线回调幅度检查：必须 <= 第一根阳线涨幅的50%
         fallback_ratio = self._calculate_fallback_ratio(first_candle, second_candle)
-        
         if fallback_ratio > self.params['second_candle_fallback_ratio']:
             return False
         
         # 第三根K线（Day-0）：必须是阳线且涨幅达标
         third_is_bullish = third_candle['close'] > third_candle['open']
-        third_rise = third_candle['candle_rise']
+        third_rise = third_candle.get('candle_rise', None)
+        if third_rise is None or pd.isna(third_rise):
+            third_rise = (third_candle['close'] - third_candle['open']) / third_candle['open'] if third_candle['open'] > 0 else 0
         
         if not third_is_bullish or third_rise < self.params['third_candle_rise']:
             return False
@@ -590,14 +532,18 @@ class MultiPartyCannonStrategy(BaseStrategy):
         return 'standard'
     
     def _generate_reasons(self, first_candle, second_candle, third_candle) -> str:
-        """
-        生成入选理由
-        """
-        first_rise_pct = round(first_candle['candle_rise'] * 100, 2)
+        """生成入选理由"""
+        first_rise = first_candle.get('candle_rise', None)
+        if first_rise is None or pd.isna(first_rise):
+            first_rise = (first_candle['close'] - first_candle['open']) / first_candle['open'] if first_candle['open'] > 0 else 0
+        
+        third_rise = third_candle.get('candle_rise', None)
+        if third_rise is None or pd.isna(third_rise):
+            third_rise = (third_candle['close'] - third_candle['open']) / third_candle['open'] if third_candle['open'] > 0 else 0
+        
+        first_rise_pct = round(first_rise * 100, 2)
         fallback_pct = round(self._calculate_fallback_ratio(first_candle, second_candle) * 100, 2)
-        third_rise_pct = round(third_candle['candle_rise'] * 100, 2)
+        third_rise_pct = round(third_rise * 100, 2)
         volume_expand_ratio = round(third_candle['volume'] / first_candle['volume'], 2)
         
-        reasons = f"多方炮形态：第一根阳线涨幅{first_rise_pct}%，第二根阴线回调{fallback_pct}%，第三根阳线涨幅{third_rise_pct}%且突破前高，成交量放大{volume_expand_ratio}倍"
-        
-        return reasons
+        return f"多方炮形态：第一根阳线涨幅{first_rise_pct}%，第二根阴线回调{fallback_pct}%，第三根阳线涨幅{third_rise_pct}%且突破前高，成交量放大{volume_expand_ratio}倍"
