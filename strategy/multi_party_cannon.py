@@ -50,7 +50,7 @@ class MultiPartyCannonStrategy(BaseStrategy):
             
             # 成交量参数
             'second_volume_shrink_ratio': 0.8,     # 第二根阴线成交量占第一根阳线成交量的比例（80%）
-            'third_volume_expand_ratio': 1.2,       # 第三根阳线成交量占第一根阳线成交量的比例（120%）
+            'third_volume_expand_ratio': 1.0,       # 第三根阳线成交量占第一根阳线成交量的比例（>100%，即大于第一根）
             'third_volume_ma_ratio': 1.5,          # 第三根阳线成交量占均量的比例（1.5倍）
             'volume_ma_period': 5,                  # 成交量均线周期（5日）
             
@@ -169,7 +169,7 @@ class MultiPartyCannonStrategy(BaseStrategy):
         third_volume_expand_ratio = self.params['third_volume_expand_ratio'] * 100
         third_volume_ma_ratio = self.params['third_volume_ma_ratio']
         volume_ma_period = self.params['volume_ma_period']
-        criteria.append(f"4. 成交量条件：第二根阴线缩量（<=第一根的{second_volume_shrink_ratio:.0f}%），第三根阳线放量（>=第一根的{third_volume_expand_ratio:.0f}%，且>=前{volume_ma_period}日均量的{third_volume_ma_ratio:.1f}倍）")
+        criteria.append(f"4. 成交量条件：第二根阴线缩量（<=第一根的{second_volume_shrink_ratio:.0f}%），第三根阳线放量（>第一根）")
         
         # 条件5：趋势过滤（可选）
         enable_ma_filter = self.params['enable_ma_filter']
@@ -447,8 +447,8 @@ class MultiPartyCannonStrategy(BaseStrategy):
         if second_candle['volume'] > first_candle['volume'] * self.params['second_volume_shrink_ratio']:
             return False
         
-        # 第三根K线放量检查：成交量 >= 第一根阳线成交量的120%
-        if third_candle['volume'] < first_candle['volume'] * self.params['third_volume_expand_ratio']:
+        # 第三根K线放量检查：成交量 >= 第一根阳线成交量的100%（即大于第一根）
+        if third_candle['volume'] <= first_candle['volume']:
             return False
         
         # 趋势过滤条件检查
