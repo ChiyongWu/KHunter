@@ -1327,21 +1327,21 @@
                     <!-- 顶部控制区 -->
                     <div class="khunter-header card">
                         <div class="card-body">
-                            <div class="khunter-controls" style="display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap;">
+                            <div class="khunter-controls" style="display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
                                 <!-- 日期选择 -->
-                                <div class="form-group" style="flex: 0 0 auto; min-width: 180px;">
-                                    <label for="hunting-date">狩猎日期</label>
+                                <div class="form-group" style="display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 250px;">
+                                    <label for="hunting-date" style="white-space: nowrap;">狩猎日期</label>
                                     <input type="date" id="hunting-date" class="form-control">
                                 </div>
                                 
                                 <!-- 跟踪天数 -->
-                                <div class="form-group" style="flex: 0 0 auto; min-width: 150px;">
-                                    <label for="tracking-days">跟踪天数</label>
+                                <div class="form-group" style="display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 200px;">
+                                    <label for="tracking-days" style="white-space: nowrap;">跟踪天数</label>
                                     <input type="number" id="tracking-days" class="form-control" min="1" max="365" value="10">
                                 </div>
                                 
                                 <!-- 操作按钮 -->
-                                <div class="form-group" style="display: flex; gap: 10px; align-items: center; flex: 0 0 auto;">
+                                <div class="form-group" style="display: flex; flex-direction: row; gap: 10px; align-items: center; flex: 0 0 auto;">
                                     <button id="calculate-btn" class="btn btn-primary">
                                         <span class="icon">▶️</span> 计算
                                     </button>
@@ -1424,7 +1424,7 @@
     <div id="stock-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3 id="modal-title">股票详情</h3>
+                <h3 id="stock-detail-modal-title">股票详情</h3>
                 <button class="close-btn" onclick="closeModal()">&times;</button>
             </div>
             <div class="modal-body">
@@ -1665,18 +1665,18 @@
                 <!-- 基本信息 -->
                 <div class="info-section">
                     <h3>基本信息</h3>
-                    <div class="info-grid">
-                        <div class="info-item">
-                            <label>狩猎日期：</label>
-                            <span id="modal-hunting-date"></span>
+                    <div class="info-grid" style="display: flex; gap: 40px; align-items: center; flex-wrap: nowrap;">
+                        <div class="info-item" style="display: flex; flex-direction: row; align-items: center; gap: 10px; white-space: nowrap;">
+                            <label style="white-space: nowrap;">狩猎日期：</label>
+                            <span id="modal-hunting-date" style="white-space: nowrap;"></span>
                         </div>
-                        <div class="info-item">
-                            <label>交易日期：</label>
-                            <span id="modal-plan-date"></span>
+                        <div class="info-item" style="display: flex; flex-direction: row; align-items: center; gap: 10px; white-space: nowrap;">
+                            <label style="white-space: nowrap;">计划交易日期：</label>
+                            <span id="modal-plan-date" style="white-space: nowrap;"></span>
                         </div>
-                        <div class="info-item">
-                            <label>股票数量：</label>
-                            <span id="modal-stock-count"></span>
+                        <div class="info-item" style="display: flex; flex-direction: row; align-items: center; gap: 10px; white-space: nowrap;">
+                            <label style="white-space: nowrap;">股票数量：</label>
+                            <span id="modal-stock-count" style="white-space: nowrap;"></span>
                         </div>
                     </div>
                 </div>

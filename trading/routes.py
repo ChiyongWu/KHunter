@@ -1240,7 +1240,10 @@ def export_trading_plan():
                 'data': None
             }), 400
 
-        plans = trading_plan_dao.query_by_hunting_date(hunting_date)
+        # 直接生成交易计划，不保存到数据库
+        result = trading_plan_generator.generate(hunting_date)
+        plans = result.get('plans', [])
+        
         if not plans:
             return jsonify({
                 'success': False,
@@ -1281,8 +1284,8 @@ def export_trading_plan():
         wb.save(output)
         output.seek(0)
 
-        plan_date = plans[0].get('plan_date', '') if plans else ''
-        filename = f"交易计划_{plan_date.replace('-', '')}.xlsx"
+        plan_date = result.get('plan_date', '')
+        filename = f"{plan_date}日交易计划.xlsx"
 
         return send_file(
             output,

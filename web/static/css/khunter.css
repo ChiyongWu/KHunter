@@ -6,10 +6,10 @@
 }
 
 .khunter-controls {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    display: flex;
     gap: 16px;
     align-items: flex-end;
+    flex-wrap: wrap;
 }
 
 .form-group {
@@ -212,7 +212,7 @@
     background: white;
     border-radius: 12px;
     width: 90%;
-    max-width: 900px;
+    max-width: 1000px;
     max-height: 90vh;
     overflow: auto;
     display: flex;
@@ -355,7 +355,7 @@
 /* 响应式设计 */
 @media (max-width: 1024px) {
     .khunter-controls {
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 12px;
     }
     
     .data-table {

@@ -342,7 +342,7 @@ export async function viewStockDetail(code) {
  */
 export function showStockModal(code, data) {
     const modal = document.getElementById('stock-modal');
-    document.getElementById('modal-title').textContent = `股票详情: ${code}`;
+    document.getElementById('stock-detail-modal-title').textContent = `股票详情: ${code}`;
     
     // 显示K线图表容器
     const chartContainer = document.getElementById('stock-chart-container');
@@ -447,7 +447,7 @@ export async function showAreaStocks(area, limit = 50) {
  */
 export function showStocksModal(title, stocks, date) {
     const modal = document.getElementById('stock-modal');
-    document.getElementById('modal-title').textContent = title;
+    document.getElementById('stock-detail-modal-title').textContent = title;
     
     // 隐藏K线图表容器，只显示股票列表
     const chartContainer = document.getElementById('stock-chart-container');

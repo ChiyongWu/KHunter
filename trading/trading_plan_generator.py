@@ -44,7 +44,6 @@ class TradingPlanGenerator:
         for stock_data in hunting_results:
             plan = self._generate_plan_for_stock(stock_data, plan_date, hunting_date)
             plans.append(plan)
-        self._save_plans(plans)
         return {
             'plan_date': plan_date,
             'hunting_date': hunting_date,
@@ -60,11 +59,12 @@ class TradingPlanGenerator:
             hunting_date: 狩猎日期
 
         返回：
-            str: 下一交易日日期
+            str: 下一交易日日期，格式 YYYY-M-D
         """
         hunting_dt = datetime.strptime(hunting_date, '%Y-%m-%d')
         next_dt = hunting_dt + timedelta(days=1)
-        return next_dt.strftime('%Y-%m-%d')
+        # 使用不带前导零的格式
+        return f"{next_dt.year}-{next_dt.month}-{next_dt.day}"
 
     def _get_hunting_results(self, hunting_date: str) -> List[Dict[str, Any]]:
         """
