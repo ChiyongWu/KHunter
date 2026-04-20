@@ -1327,26 +1327,29 @@
                     <!-- 顶部控制区 -->
                     <div class="khunter-header card">
                         <div class="card-body">
-                            <div class="khunter-controls">
+                            <div class="khunter-controls" style="display: flex; gap: 20px; align-items: flex-end; flex-wrap: wrap;">
                                 <!-- 日期选择 -->
-                                <div class="form-group">
+                                <div class="form-group" style="flex: 0 0 auto; min-width: 180px;">
                                     <label for="hunting-date">狩猎日期</label>
                                     <input type="date" id="hunting-date" class="form-control">
                                 </div>
                                 
                                 <!-- 跟踪天数 -->
-                                <div class="form-group">
+                                <div class="form-group" style="flex: 0 0 auto; min-width: 150px;">
                                     <label for="tracking-days">跟踪天数</label>
                                     <input type="number" id="tracking-days" class="form-control" min="1" max="365" value="10">
                                 </div>
                                 
                                 <!-- 操作按钮 -->
-                                <div class="form-group" style="display: flex; gap: 10px; align-items: flex-end;">
+                                <div class="form-group" style="display: flex; gap: 10px; align-items: flex-end; flex: 0 0 auto;">
                                     <button id="calculate-btn" class="btn btn-primary">
                                         <span class="icon">▶️</span> 计算
                                     </button>
                                     <button id="save-btn" class="btn btn-success" style="display: none;">
                                         <span class="icon">💾</span> 保存
+                                    </button>
+                                    <button id="generate-plan-btn" class="btn btn-info" style="display: none;">
+                                        <span class="icon">📋</span> 生成交易计划
                                     </button>
                                     
                                     <!-- 加载指示器 -->
@@ -1648,6 +1651,82 @@
                     <p class="loading">加载中...</p>
                 </div>
             </div>
+        </div>
+    </div>
+    
+    <!-- 交易计划生成模式窗口 -->
+    <div id="plan-modal" class="modal" style="display: none;">
+        <div class="modal-content" style="max-width: 900px; width: 90%;">
+            <div class="modal-header">
+                <h2 id="modal-title">📋 交易计划</h2>
+                <button id="close-modal" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- 基本信息 -->
+                <div class="info-section">
+                    <h3>基本信息</h3>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <label>狩猎日期：</label>
+                            <span id="modal-hunting-date"></span>
+                        </div>
+                        <div class="info-item">
+                            <label>交易日期：</label>
+                            <span id="modal-plan-date"></span>
+                        </div>
+                        <div class="info-item">
+                            <label>股票数量：</label>
+                            <span id="modal-stock-count"></span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 交易计划预览 -->
+                <div class="plan-preview-section">
+                    <h3>交易计划预览</h3>
+                    <div class="table-container">
+                        <table id="plan-table" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>序号</th>
+                                    <th>代码</th>
+                                    <th>名称</th>
+                                    <th>支撑位</th>
+                                    <th>买入价格区间</th>
+                                    <th>仓位</th>
+                                    <th>止损</th>
+                                    <th>止盈</th>
+                                    <th>持有日期</th>
+                                </tr>
+                            </thead>
+                            <tbody id="plan-tbody">
+                                <tr><td colspan="9" class="placeholder">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- 风险提示 -->
+                <div class="risk-section">
+                    <h3>风险提示</h3>
+                    <div class="risk-content">
+                        <p>⚠️ 交易计划仅供参考，不构成投资建议</p>
+                        <p>⚠️ 实际交易需根据市场情况灵活调整</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-plan" class="btn btn-secondary">取消</button>
+                <button id="confirm-plan" class="btn btn-primary">确认生成并导出Excel</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 加载指示器 -->
+    <div id="global-loading" class="loading-overlay" style="display: none;">
+        <div class="loading-content">
+            <span class="spinner"></span>
+            <span>处理中...</span>
         </div>
     </div>
 </body>

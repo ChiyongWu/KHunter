@@ -22,6 +22,7 @@ function initPage() {
     // 3. 绑定事件监听器
     document.getElementById('calculate-btn').addEventListener('click', calculate);
     document.getElementById('save-btn').addEventListener('click', saveResults);
+    document.getElementById('generate-plan-btn').addEventListener('click', generateTradingPlan);
     
     // 4. 绑定模态窗口关闭事件
     document.getElementById('stock-detail-modal').addEventListener('click', function(e) {
@@ -36,7 +37,18 @@ function initPage() {
         }
     });
     
-    // 5. 绑定表格行点击事件（事件委托）
+    // 5. 绑定交易计划模态窗口关闭事件
+    document.getElementById('plan-modal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            closePlanModal();
+        }
+    });
+    
+    document.getElementById('close-modal').addEventListener('click', closePlanModal);
+    document.getElementById('cancel-plan').addEventListener('click', closePlanModal);
+    document.getElementById('confirm-plan').addEventListener('click', exportTradingPlan);
+    
+    // 6. 绑定表格行点击事件（事件委托）
     document.getElementById('results-tbody').addEventListener('click', handleTableClick);
 }
 
@@ -119,6 +131,167 @@ function calculate() {
 }
 
 /**
+ * 生成交易计划
+ */
+function generateTradingPlan() {
+    // 1. 获取参数
+    const huntingDate = document.getElementById('hunting-date').value;
+    
+    // 2. 验证参数
+    if (!huntingDate) {
+        showAlert('请选择狩猎日期', 'error');
+        return;
+    }
+    
+    // 3. 显示加载状态
+    showGlobalLoading();
+    
+    // 4. 调用 API
+    fetch('/api/khunter/generate_plan', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            hunting_date: huntingDate
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        // 5. 处理响应
+        if (data.success) {
+            // 显示交易计划模态窗口
+            showPlanModal(data.data);
+        } else {
+            showAlert(data.message || '生成交易计划失败', 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showAlert('网络错误，请稍后重试', 'error');
+    })
+    .finally(() => {
+        // 6. 隐藏加载状态
+        hideGlobalLoading();
+    });
+}
+
+/**
+ * 显示交易计划模态窗口
+ */
+function showPlanModal(planData) {
+    // 1. 更新模态窗口标题
+    document.getElementById('modal-title').textContent = `📋 ${planData.plan_date}日交易计划`;
+    
+    // 2. 更新基本信息
+    document.getElementById('modal-hunting-date').textContent = planData.hunting_date;
+    document.getElementById('modal-plan-date').textContent = planData.plan_date;
+    document.getElementById('modal-stock-count').textContent = `${planData.total_count} 只`;
+    
+    // 3. 更新表格数据
+    const tbody = document.getElementById('plan-tbody');
+    tbody.innerHTML = '';
+    
+    if (planData.plans && planData.plans.length > 0) {
+        planData.plans.forEach((plan, index) => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${plan.stock_code}</td>
+                <td>${plan.stock_name}</td>
+                <td>${plan.support_level.toFixed(2)}</td>
+                <td>${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
+                <td>${plan.position_ratio}%</td>
+                <td>${plan.stop_loss_price.toFixed(2)}</td>
+                <td>${plan.take_profit_price.toFixed(2)}</td>
+                <td>${plan.hold_days}天</td>
+            `;
+            tbody.appendChild(row);
+        });
+    } else {
+        tbody.innerHTML = '<tr><td colspan="9" class="placeholder">暂无交易计划数据</td></tr>';
+    }
+    
+    // 4. 显示模态窗口
+    document.getElementById('plan-modal').style.display = 'block';
+}
+
+/**
+ * 关闭交易计划模态窗口
+ */
+function closePlanModal() {
+    document.getElementById('plan-modal').style.display = 'none';
+}
+
+/**
+ * 导出交易计划为Excel
+ */
+function exportTradingPlan() {
+    // 1. 获取参数
+    const huntingDate = document.getElementById('hunting-date').value;
+    
+    // 2. 显示加载状态
+    showGlobalLoading();
+    
+    // 3. 调用导出 API
+    fetch('/api/khunter/export_plan', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            hunting_date: huntingDate
+        })
+    })
+    .then(response => {
+        if (response.ok) {
+            return response.blob();
+        } else {
+            throw new Error('导出失败');
+        }
+    })
+    .then(blob => {
+        // 4. 创建下载链接
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `交易计划_${new Date().toISOString().split('T')[0]}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        
+        // 5. 关闭模态窗口
+        closePlanModal();
+        
+        // 6. 显示成功提示
+        showAlert('交易计划导出成功', 'success');
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showAlert('导出失败，请稍后重试', 'error');
+    })
+    .finally(() => {
+        // 7. 隐藏加载状态
+        hideGlobalLoading();
+    });
+}
+
+/**
+ * 显示全局加载指示器
+ */
+function showGlobalLoading() {
+    document.getElementById('global-loading').style.display = 'flex';
+}
+
+/**
+ * 隐藏全局加载指示器
+ */
+function hideGlobalLoading() {
+    document.getElementById('global-loading').style.display = 'none';
+}
+
+/**
  * 绑定表格数据
  */
 function bindTableData(results) {
@@ -171,6 +344,12 @@ function updateStats(data) {
     const summary = `共 ${data.total_count} 只股票，耗时 ${data.calculation_time.toFixed(2)}s`;
     document.getElementById('result-summary').textContent = summary;
     
+    // 5. 显示生成交易计划按钮
+    if (data.total_count > 0) {
+        document.getElementById('generate-plan-btn').style.display = 'inline-flex';
+    } else {
+        document.getElementById('generate-plan-btn').style.display = 'none';
+    }
 
 }
 
@@ -570,3 +749,6 @@ window.closeScoreDetailModal = closeScoreDetailModal;
 window.trackKHunter = trackKHunter;
 window.initKHunterTrackPage = initKHunterTrackPage;
 window.setupKHunterTrackingEvents = setupKHunterTrackingEvents;
+window.generateTradingPlan = generateTradingPlan;
+window.closePlanModal = closePlanModal;
+window.exportTradingPlan = exportTradingPlan;
