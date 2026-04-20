@@ -118,13 +118,39 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         
         return criteria
 
+    def quick_filter(self, df) -> bool:
+        """
+        快速过滤 - 检查是否有放量长阳线
+        
+        目的：提前过滤不符合条件的股票，避免不必要的指标计算
+        条件：最近N个交易日内出现涨幅≥8%的交易日
+        
+        :param df: 股票数据DataFrame（倒序，最新在前）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        if df is None or df.empty or len(df) < 5:
+            return False
+        
+        # 获取最近max_search_days天的数据
+        max_search_days = self.params['max_search_days']
+        recent_df = df.head(max_search_days + 1)
+        
+        # 计算涨跌幅（使用-1计算相对于下一行的变化）
+        pct_change = recent_df['close'].pct_change(-1)
+        
+        # 检查是否有涨幅≥min_change_pct的交易日
+        min_change_pct = self.params['min_change_pct']
+        has_big_rise = (pct_change >= min_change_pct).any()
+        
+        return bool(has_big_rise)
+
     def select_stocks(self, df, stock_name='') -> list:
         """
         选股逻辑 - 识别阻力位突破信号
 
         核心流程：
         1. 数据验证和过滤
-        2. 快速预检查：检查是否有放量长阳线
+        2. 快速预检查：检查是否有放量长阳线（已在quick_filter中做）
         3. 计算指标
         4. 在最近一段时间内搜索突破日
         5. 验证突破日的成交量、站稳、回踩、趋势条件
@@ -143,9 +169,9 @@ class ResistanceBreakoutStrategy(BaseStrategy):
                 return []
 
         # 快速预检查：检查是否有放量长阳线
-        # 1. 计算最近10个交易日的涨跌幅
+        # 1. 计算最近N个交易日的涨跌幅
         max_search_days = self.params['max_search_days']
-        recent_df = df.head(max_search_days + 1)  # 包括当前一天和前10天
+        recent_df = df.head(max_search_days + 1)
         
         # 向量化计算涨跌幅（使用-1计算相对于下一行，即更旧日期的变化）
         pct_change = recent_df['close'].pct_change(-1)
@@ -156,7 +182,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             return []
         
         # 2. 检查成交量是否放大
-        # 计算10日均量（注意：数据是倒序的，需要反转后计算再反转回来）
+        # 计算N日均量（注意：数据是倒序的，需要反转后计算再反转回来）
         volume_ma_period = self.params['volume_ma_period']
         
         # 反转数据为正序（旧到新），计算均线，再反转回倒序
