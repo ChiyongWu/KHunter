@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from strategy.base_strategy import BaseStrategy
 
@@ -74,51 +75,79 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: 计算了指标的DataFrame
         """
-        # 复制数据，避免修改原数据
-        df = df.copy()
-
-        # 计算涨跌幅度
-        df['change'] = df['close'].pct_change(periods=-1)
-
+        # 检测数据顺序
+        try:
+            is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+        except (IndexError, KeyError):
+            is_descending = False
+        
+        # 统一转换为正序计算（从早到晚）
+        if is_descending:
+            df_calc = df.iloc[::-1].copy().reset_index(drop=True)
+        else:
+            df_calc = df.copy().reset_index(drop=True)
+        
+        # 在正序数据上计算所有指标
+        result = df_calc.copy()
+        
+        # 标记涨停（向量化操作）
+        result['pct_change'] = result['close'].pct_change()
+        result['is_limit_up'] = result['pct_change'] >= self.params['limit_up_threshold']
+        result = result.drop('pct_change', axis=1)
+        
         # 计算成交量均线
-        # 数据是倒序的，需要先反转后计算再反转回来
-        reversed_df = df.iloc[::-1].reset_index(drop=True)
-        reversed_df['volume_5'] = reversed_df['volume'].rolling(window=5, min_periods=1).mean()
-        df['volume_5'] = reversed_df['volume_5'].iloc[::-1].values
-
-        return df
+        result['volume_5'] = result['volume'].rolling(window=5, min_periods=1).mean()
+        
+        # 恢复原始顺序
+        if is_descending:
+            result = result.iloc[::-1].reset_index(drop=True)
+        
+        result.index = df.index
+        return result
 
     def _find_limit_up(self, df):
         """
-        寻找最近的涨停板
+        寻找最近的涨停板 - 检查成交量比
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: 涨停板信息字典，包含日期和收盘价
         """
-        # 遍历最近N个交易日
-        for i in range(min(self.params['limit_up_lookback_days'], len(df) - 6)):
-            # 计算当日涨幅
-            change = (df.iloc[i]['close'] - df.iloc[i+1]['close']) / df.iloc[i+1]['close']
-
-            # 检查是否达到涨停阈值
-            if change >= self.params['limit_up_threshold']:
-                # 计算成交量比：涨停日成交量 / 涨停前5日平均成交量
-                # i+1到i+5是涨停前5天（数据倒序）
-                pre_volume_mean = df.iloc[i+1:i+6]['volume'].mean()
-                if pre_volume_mean == 0:
-                    continue
-                volume_ratio = df.iloc[i]['volume'] / pre_volume_mean
-
-                # 检查成交量是否满足要求
-                if volume_ratio >= self.params['volume_ratio_threshold']:
-                    return {
-                        'date': df.iloc[i]['date'],
-                        'close': df.iloc[i]['close'],
-                        'volume': df.iloc[i]['volume'],
-                        'index': i
-                    }
-
-        return None
+        lookback_days = self.params['limit_up_lookback_days']
+        
+        # 只检查最近的lookback_days个交易日
+        check_df = df.head(lookback_days)
+        
+        # 使用向量化操作找出所有涨停板
+        limit_up_mask = check_df['is_limit_up'].values
+        
+        if not limit_up_mask.any():
+            return None
+        
+        # 计算成交量比（当前成交量 / 前一日成交量）- 向量化操作
+        volumes = check_df['volume'].values
+        # 前一日成交量（由于数据倒序，shift(-1)相当于前一日）
+        prev_volumes = np.roll(volumes, -1)
+        volume_ratios = np.where(prev_volumes > 0, volumes / prev_volumes, 0)
+        
+        # 找出成交量放大的涨停板
+        volume_ok = volume_ratios >= self.params['volume_ratio_threshold']
+        
+        # 找出同时满足涨停和成交量放大的位置
+        valid_mask = limit_up_mask & volume_ok
+        valid_positions = np.where(valid_mask)[0]
+        
+        if len(valid_positions) == 0:
+            return None
+        
+        # 取最近的涨停板（最小的index）
+        pos = valid_positions[0]
+        
+        return {
+            'date': check_df.iloc[pos]['date'],
+            'close': check_df.iloc[pos]['close'],
+            'volume': check_df.iloc[pos]['volume'],
+            'index': pos
+        }
 
     def _check_sideways(self, df, limit_up_info):
         """
@@ -212,7 +241,7 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         limit_up_lookback_days = self.params['limit_up_lookback_days']
         limit_up_threshold = self.params['limit_up_threshold'] * 100
         volume_ratio_threshold = self.params['volume_ratio_threshold']
-        criteria.append(f"1. 涨停确认：最近{limit_up_lookback_days}个交易日内出现涨停板（涨幅>={limit_up_threshold:.1f}%），且成交量是前5日均量的{volume_ratio_threshold:.1f}倍以上")
+        criteria.append(f"1. 涨停确认：最近{limit_up_lookback_days}个交易日内出现涨停板（涨幅>={limit_up_threshold:.1f}%），且成交量是前1日的{volume_ratio_threshold:.1f}倍以上")
         
         # 条件2：横盘整理
         sideways_days_min = self.params['sideways_days_min']

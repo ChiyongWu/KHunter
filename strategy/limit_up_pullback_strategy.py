@@ -131,11 +131,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
 
     def _find_limit_up(self, df):
         """
-        寻找最近的涨停板 - 向量化优化版本
-        
-        优化点：
-        1. 使用向量化操作找出涨停板
-        2. 使用numpy数组操作，避免循环
+        寻找最近的涨停板 - 检查成交量比
         
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :return: 涨停板信息列表，每个元素为 (index, date, close, open, volume)
@@ -168,7 +164,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
         if len(valid_positions) == 0:
             return []
         
-        # 构建涨停板信息列表 - 使用向量化操作
+        # 构建涨停板信息列表
         limit_ups = []
         dates = check_df['date'].values
         closes = check_df['close'].values
