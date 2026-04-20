@@ -311,6 +311,7 @@ class WBottomStrategy(BaseStrategy):
         检查放量确认条件：5日内出现涨幅超过5%的交易日，且成交量是前5日均量的1.5倍以上
         
         涨幅 = (当日收盘价 - 前一日收盘价) / 前一日收盘价
+        注意：不需要是阳线，只需要涨幅 > 5%（可以是假阴线）
         
         :param df: 含指标的DataFrame（倒序）
         :return: 如果通过，返回满足条件的日期索引；否则返回 None
@@ -346,6 +347,7 @@ class WBottomStrategy(BaseStrategy):
                 pct_change = (close - prev_close) / prev_close
                 
                 # 检查涨幅 > 5% 且成交量 >= 前5日均量 × 1.5
+                # 注意：不需要是阳线，只需要涨幅 > 5%
                 if pct_change > 0.05 and volume >= volume_ma * expand_ratio:
                     # 返回满足条件的日期索引
                     return idx
@@ -463,11 +465,11 @@ class WBottomStrategy(BaseStrategy):
         criteria = []
         
         # 快速过滤
-        criteria.append(f"0. 快速过滤：最近5天内是否有涨幅超过5%的阳线")
+        criteria.append(f"0. 快速过滤：最近5天内是否有涨幅超过5%的交易日")
         
         # 条件1：放量确认
         expand_ratio = self.params['volume_expand_ratio']
-        criteria.append(f"1. 放量确认：5日内出现大阳线超过5%，且成交量是前5日均量的{expand_ratio}倍以上")
+        criteria.append(f"1. 放量确认：5日内出现涨幅超过5%的交易日，且成交量是前5日均量的{expand_ratio}倍以上")
         
         # 条件2：W形态过滤
         pattern_days = self.params['pattern_days']
@@ -496,7 +498,7 @@ class WBottomStrategy(BaseStrategy):
         快速预检查：提前过滤不符合条件的股票
         
         检查内容：
-        最近5天内是否有涨幅超过5%的阳线（对应颈线突破条件）
+        最近5天内是否有涨幅超过5%的交易日（不需要是阳线）
         
         :param df: 股票数据DataFrame（倒序）
         :return: True表示通过预检查，False表示不通过
@@ -505,38 +507,40 @@ class WBottomStrategy(BaseStrategy):
             return False
         
         # 获取最近5天的数据（倒序，所以head(5)是最近5天）
-        # 注意：这里使用硬编码的 5，不使用 max_break_days 参数
         recent_df = df.head(5)
         
         if len(recent_df) < 2:
             return False
         
-        # 检查是否有涨幅 > 5% 的阳线
-        found_big_yang = False
+        # 检查是否有涨幅 > 5% 的交易日（不需要是阳线）
+        found_big_rise = False
         for idx in range(len(recent_df)):
             try:
                 close = recent_df['close'].iloc[idx]
-                open_price = recent_df['open'].iloc[idx]
                 
                 # 检查数据有效性
-                if pd.isna(close) or pd.isna(open_price) or close <= 0 or open_price <= 0:
+                if pd.isna(close) or close <= 0:
                     continue
                 
-                # 检查是否是阳线（收盘价 > 开盘价）
-                if close <= open_price:
+                # 获取前一日收盘价（倒序数据中前一日是 idx+1）
+                if idx + 1 >= len(recent_df):
                     continue
                 
-                # 计算涨幅
-                pct_change = (close - open_price) / open_price
+                prev_close = recent_df['close'].iloc[idx + 1]
+                if pd.isna(prev_close) or prev_close <= 0:
+                    continue
                 
-                # 如果涨幅 > 5%，通过预检查
+                # 计算涨幅：(当日收盘价 - 前一日收盘价) / 前一日收盘价
+                pct_change = (close - prev_close) / prev_close
+                
+                # 如果涨幅 > 5%，通过预检查（不需要是阳线）
                 if pct_change > 0.05:
-                    found_big_yang = True
+                    found_big_rise = True
                     break
-            except Exception as e:
+            except Exception:
                 continue
         
-        return found_big_yang
+        return found_big_rise
 
     def quick_filter(self, df):
         """
