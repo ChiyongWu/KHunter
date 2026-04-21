@@ -436,6 +436,8 @@ function showModal(title, content) {
         <div id="modal-content">${content}</div>
     `;
     
+        <div id="modal-content">${content}</div>
+    `);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
     
