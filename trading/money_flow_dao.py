@@ -197,6 +197,21 @@ class MoneyFlowDAO:
                 if df.empty:
                     continue
 
+                # 获取股票有数据的日期集合
+                stock_dates = set(df['trade_date'].astype(str).tolist())
+
+                # 检查是否所有交易日都有数据（停牌日视为不满足连续条件）
+                if len(stock_dates) < len(trade_dates):
+                    logger.debug(f"{ts_code}: 只有{len(stock_dates)}天数据，缺少{len(trade_dates) - len(stock_dates)}天，不满足连续条件")
+                    continue
+
+                # 检查所有有数据的交易日是否都是净流入
+                inflow_dates = set(df[df['net_amount'] > 0]['trade_date'].astype(str).tolist())
+                if len(inflow_dates) < len(trade_dates):
+                    missing = set(trade_dates) - inflow_dates
+                    logger.debug(f"{ts_code}: 有{len(missing)}个交易日净流入<=0: {missing}")
+                    continue
+
                 # 计算10日累计净流入和大单净流入
                 net_amount_10d = df['net_amount'].sum()
                 buy_lg_amount_10d = df['buy_lg_amount'].sum()
@@ -209,17 +224,8 @@ class MoneyFlowDAO:
                 latest_pct_change = latest_row.iloc[0]['pct_change']
                 name = latest_row.iloc[0]['name']
 
-                # 计算真实连续天数：从最新日期往前追溯
-                continuous_days = 0
-                expected_dates = set(trade_dates)  # 交易日集合
-                df_sorted = df.sort_values('trade_date', ascending=False)
-                for _, row in df_sorted.iterrows():
-                    trade_dt = str(row['trade_date'])
-                    if trade_dt not in expected_dates:
-                        continue
-                    if row['net_amount'] <= 0:
-                        break
-                    continuous_days += 1
+                # 真实连续天数等于交易日数量（已通过上述检查）
+                continuous_days = len(trade_dates)
 
                 # 检查日均净流入是否满足要求
                 if min_net_amount > 0 and avg_net_amount < min_net_amount:
