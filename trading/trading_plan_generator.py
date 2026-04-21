@@ -38,8 +38,8 @@ class TradingPlanGenerator:
         返回：
             Dict: 包含 plan_date, hunting_date, total_count, plans, temperature_info
         """
-        # 获取实际狩猎日期（计划日期的前一天）
-        hunting_date = self._get_prev_trading_date(plan_date)
+        # 获取实际狩猎日期（如果当天有K线则用当天，否则用前一天）
+        hunting_date = self._get_hunting_date(plan_date)
         
         # 获取温度信息（使用计划日期）
         temperature_info = self._get_market_temperature(plan_date)
@@ -178,20 +178,43 @@ class TradingPlanGenerator:
         else:
             return (0, 0.0)  # 禁止买入
 
-    def _get_prev_trading_date(self, plan_date: str) -> str:
+    def _get_hunting_date(self, plan_date: str) -> str:
         """
-        获取前一交易日日期（简单实现：计划日期-1天）
+        获取实际狩猎日期
+        如果选择的日期有K线数据则用当天，否则用前一天
 
         参数：
-            plan_date: 计划执行日期
+            plan_date: 用户选择的日期
 
         返回：
-            str: 前一交易日日期，格式 YYYY-MM-DD（带前导零）
+            str: 实际狩猎日期，格式 YYYY-MM-DD
         """
+        # 检查当天是否有K线数据
+        if self._has_kline_data(plan_date):
+            return plan_date
+        
+        # 没有K线数据，使用前一天
         plan_dt = datetime.strptime(plan_date, '%Y-%m-%d')
         prev_dt = plan_dt - timedelta(days=1)
-        # 使用带前导零的格式，与数据库一致
         return f"{prev_dt.year}-{prev_dt.month:02d}-{prev_dt.day:02d}"
+    
+    def _has_kline_data(self, date_str: str) -> bool:
+        """
+        检查指定日期是否有K线数据
+
+        参数：
+            date_str: 日期字符串
+
+        返回：
+            bool: 是否有K线数据
+        """
+        try:
+            sql = "SELECT COUNT(*) as count FROM stock_kline WHERE date = ?"
+            result = self.db_manager.query_one(sql, (date_str,))
+            return result and result.get('count', 0) > 0
+        except Exception as e:
+            logger.warning(f"检查K线数据失败: {e}")
+            return False
 
     def _get_hunting_results(self, hunting_date: str) -> List[Dict[str, Any]]:
         """
