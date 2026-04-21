@@ -137,7 +137,7 @@ function renderMoneyFlowResults(results, params) {
             <tr>
                 <td>${index + 1}</td>
                 <td>${stock.ts_code}</td>
-                <td><a href="javascript:void(0)" onclick="viewStockDetail('${stock.ts_code}')" class="stock-link">${stock.name}</a></td>
+                <td><a href="javascript:void(0)" onclick="viewStockDetail('${stock.ts_code.split('.')[0]}')" class="stock-link">${stock.name}</a></td>
                 <td><span class="tag">${stock.continuous_days}天</span></td>
                 <td style="color: #dc2626; font-weight: 600;">${netAmount}</td>
                 <td style="color: #ea580c;">${lgAmount}</td>

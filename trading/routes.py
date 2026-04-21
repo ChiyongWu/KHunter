@@ -1318,13 +1318,17 @@ def export_trading_plan():
         output.seek(0)
 
         plan_date = result.get('plan_date', '')
-        filename = f"{plan_date}日交易计划.xlsx"
+        # 使用ASCII兼容的文件名，避免HTTP头编码问题
+        filename = f"trading_plan_{plan_date}.xlsx"
 
         # 创建响应对象并手动设置Content-Disposition头
         from flask import make_response
+        from urllib.parse import quote
         response = make_response(output.getvalue())
         response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        # 对中文文件名进行URL编码
+        encoded_filename = quote(filename)
+        response.headers['Content-Disposition'] = f'attachment; filename="{encoded_filename}"'
         return response
 
     except Exception as e:
