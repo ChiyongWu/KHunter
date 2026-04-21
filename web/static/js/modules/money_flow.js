@@ -144,11 +144,6 @@ function renderMoneyFlowResults(results, params) {
                 <td style="color: #ea580c;">${lgAmount}</td>
                 <td>${avgAmount}</td>
                 <td style="color: ${pctColor}; font-weight: 600;">${pctChange > 0 ? '+' : ''}${pctChange.toFixed(2)}%</td>
-                <td>
-                    <button class="btn btn-secondary" onclick="viewStockDetail('${stock.ts_code}')" style="padding: 4px 8px; font-size: 11px;">
-                        查看详情
-                    </button>
-                </td>
             </tr>
         `;
     });
