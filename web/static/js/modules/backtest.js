@@ -132,6 +132,8 @@ async function saveBacktestParams() {
         const stopLossInput = document.getElementById('params-stop-loss');
         const takeProfitInput = document.getElementById('params-take-profit');
         const maxHoldDaysInput = document.getElementById('params-max-hold-days');
+        const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
+        const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
         
         const params = {
             config_name: '默认配置',
@@ -141,7 +143,10 @@ async function saveBacktestParams() {
             take_profit: parseFloat(takeProfitInput?.value) * 100, // 转换为百分比
             initial_capital: parseFloat(initialCapitalInput?.value) || 1000000,
             buy_amount: parseFloat(buyAmountInput?.value) || 100000,
-            max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5
+            max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5,
+            // 温度约束参数
+            enable_temp_limit: parseInt(enableTempLimitSelect?.value) || 1,
+            temp_limit_mode: tempLimitModeSelect?.value || 'both'
         };
         
         // 调用后端API保存配置
@@ -193,6 +198,8 @@ async function loadBacktestParams() {
             const stopLossInput = document.getElementById('params-stop-loss');
             const takeProfitInput = document.getElementById('params-take-profit');
             const maxHoldDaysInput = document.getElementById('params-max-hold-days');
+            const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
+            const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
             
             if (initialCapitalInput) initialCapitalInput.value = params.initial_capital || 1000000;
             if (scoreThresholdInput) scoreThresholdInput.value = params.score_threshold || 60;
@@ -201,6 +208,9 @@ async function loadBacktestParams() {
             if (stopLossInput) stopLossInput.value = (params.stop_loss || -5) / 100; // 转换为小数
             if (takeProfitInput) takeProfitInput.value = (params.take_profit || 15) / 100; // 转换为小数
             if (maxHoldDaysInput) maxHoldDaysInput.value = params.hold_period || 10;
+            // 温度约束参数
+            if (enableTempLimitSelect) enableTempLimitSelect.value = params.enable_temp_limit !== undefined ? params.enable_temp_limit : 1;
+            if (tempLimitModeSelect) tempLimitModeSelect.value = params.temp_limit_mode || 'both';
         }
     } catch (error) {
         console.error('加载回测配置失败:', error);

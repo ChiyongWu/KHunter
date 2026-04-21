@@ -751,7 +751,43 @@
                                     <input type="number" id="params-max-hold-days" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" min="1" max="30" step="1" value="10" aria-label="最大持有天数">
                                 </div>
                             </div>
-                            <button type="button" id="save-backtest-params-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px;" aria-label="保存回测配置">保存配置</button>
+                            
+                            <!-- 温度约束配置 -->
+                            <div style="margin-top: 20px; padding: 16px; background: #f9fafb; border-radius: 6px; border: 1px solid #e5e7eb;">
+                                <h4 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: #374151; display: flex; align-items: center; gap: 8px;">
+                                    🌡️ 市场温度约束
+                                </h4>
+                                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
+                                    <div>
+                                        <label for="params-enable-temp-limit" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">启用温度约束</label>
+                                        <select id="params-enable-temp-limit" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" aria-label="启用温度约束">
+                                            <option value="1">启用</option>
+                                            <option value="0">禁用</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="params-temp-limit-mode" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">约束模式</label>
+                                        <select id="params-temp-limit-mode" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" aria-label="约束模式">
+                                            <option value="both">同时约束数量和仓位</option>
+                                            <option value="count">仅约束买入数量</option>
+                                            <option value="position">仅约束仓位</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 12px; font-size: 12px; color: #6b7280;">
+                                    <p style="margin: 0 0 4px 0;"><strong>温度约束规则说明：</strong></p>
+                                    <ul style="margin: 0; padding-left: 18px;">
+                                        <li>活跃(≥80°)：不限买入/满仓</li>
+                                        <li>正常(65-79°)：最多5只/80%仓位</li>
+                                        <li>偏冷(50-64°)：最多3只/50%仓位</li>
+                                        <li>寒冷(30-49°)：最多1只/25%仓位</li>
+                                        <li>冰封(15-29°)：0-1只/10%仓位</li>
+                                        <li>极端(&lt;15°)：禁止买入/0%仓位</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            
+                            <button type="button" id="save-backtest-params-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px; margin-top: 16px;" aria-label="保存回测配置">保存配置</button>
                         </div>
                     </div>
                 </div>
