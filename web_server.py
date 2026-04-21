@@ -2679,7 +2679,7 @@ def calculate_market_temperature():
             trade_date = date.today().strftime('%Y%m%d')
         
         # 调用温度计算器
-        from utils.market_temperature import MarketTemperature
+        from utils.market_temperature import MarketTemperature, DataNotAvailableError
         mt = MarketTemperature()
         result = mt.calculate(trade_date, use_cache=use_cache)
         
@@ -2687,11 +2687,20 @@ def calculate_market_temperature():
             'success': True,
             'data': clean_data_for_json(result)
         })
+    except DataNotAvailableError as e:
+        # 数据不可用（非交易日或API无数据）
+        logger.info(f"市场温度数据不可用: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'error_type': 'data_not_available'
+        })
     except Exception as e:
         logger.error(f"计算市场温度失败: {str(e)}")
         return jsonify({
             'success': False,
-            'message': str(e)
+            'message': str(e),
+            'error_type': 'unknown_error'
         })
 
 
@@ -2777,13 +2786,13 @@ def get_market_temperature_trend():
 @app.route('/api/market-temperature/position-ratio', methods=['GET'])
 def get_market_temperature_position_ratio():
     """
-    获取指定日期的仓位系数
+    获取指定日期的仓位系数（交易期间自动切换到前一交易日）
     
     请求参数：
         trade_date: 交易日期（YYYYMMDD格式），可选，默认为今日
     
     返回：
-        仓位系数数据
+        仓位系数数据（包含data_date标识数据实际日期）
     """
     try:
         trade_date = request.args.get('trade_date')
@@ -2793,22 +2802,30 @@ def get_market_temperature_position_ratio():
             from datetime import date
             trade_date = date.today().strftime('%Y%m%d')
         
-        from trading.market_temperature_dao import MarketTemperatureDAO
-        dao = MarketTemperatureDAO()
-        position_ratio = dao.get_position_ratio(trade_date)
-        
-        # 获取完整数据
-        temp_data = dao.query_by_date(trade_date)
+        # 使用MarketTemperature计算，会自动处理交易期间切换到前一交易日
+        from utils.market_temperature import MarketTemperature, DataNotAvailableError
+        mt = MarketTemperature()
+        result = mt.calculate(trade_date, use_cache=True)
         
         return jsonify({
             'success': True,
             'data': clean_data_for_json({
-                'trade_date': trade_date,
-                'position_ratio': position_ratio,
-                'temperature': temp_data['temperature'] if temp_data else None,
-                'status': temp_data['status'] if temp_data else None,
-                'action': temp_data['action'] if temp_data else None
+                'trade_date': result.get('trade_date'),  # 请求的日期
+                'data_date': result.get('data_date'),  # 数据实际日期
+                'is_previous_day': result.get('is_previous_day', False),  # 是否为前一交易日数据
+                'position_ratio': result.get('position_ratio'),
+                'temperature': result.get('temperature'),
+                'status': result.get('status'),
+                'action': result.get('action'),
+                'message': result.get('message')  # 提示信息
             })
+        })
+    except DataNotAvailableError as e:
+        logger.info(f"仓位系数数据不可用: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'error_type': 'data_not_available'
         })
     except Exception as e:
         logger.error(f"获取仓位系数失败: {str(e)}")

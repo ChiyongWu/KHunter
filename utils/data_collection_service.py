@@ -862,7 +862,7 @@ class DataCollectionService:
             self._add_update_log("【第9步】计算并保存市场温度...")
             try:
                 # 导入市场温度计算器
-                from utils.market_temperature import MarketTemperature
+                from utils.market_temperature import MarketTemperature, DataNotAvailableError
                 from trading.market_temperature_dao import MarketTemperatureDAO
                 
                 # 转换日期格式为 YYYYMMDD
@@ -883,6 +883,10 @@ class DataCollectionService:
                     f"仓位{temp_result.get('position_ratio', 0) * 100:.0f}%"
                 )
                 logger.info(f"市场温度已保存: {trade_date_yyyymmdd} - {temp_result.get('temperature')}°")
+            except DataNotAvailableError as e:
+                # 数据不可用（非交易日或API无数据），这是正常的，跳过
+                self._add_update_log(f"ℹ 市场温度跳过: {str(e)}")
+                logger.info(f"市场温度跳过（非交易日或数据不可用）: {trade_date_yyyymmdd} - {str(e)}")
             
             except Exception as e:
                 self._add_update_log(f"⚠ 市场温度计算失败: {str(e)}")

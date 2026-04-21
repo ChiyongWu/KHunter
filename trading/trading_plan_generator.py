@@ -110,7 +110,7 @@ class TradingPlanGenerator:
 
     def _generate_temperature_suggestion(self, temp_data: Dict) -> str:
         """
-        生成温度建议文本
+        生成温度建议文本（只包含仓位建议）
 
         参数：
             temp_data: 温度数据
@@ -119,34 +119,25 @@ class TradingPlanGenerator:
             str: 建议文本
         """
         temp = temp_data.get('temperature')
-        status = temp_data.get('status', '未知')
         position_ratio = temp_data.get('position_ratio', 1.0)
         
         if temp is None:
             return '市场温度数据获取失败，建议谨慎操作'
         
-        # 根据温度状态生成具体建议
-        suggestions = []
-        
-        # 仓位建议
+        # 只生成仓位建议
         position_pct = int(position_ratio * 100)
         if temp >= 80:
-            suggestions.append(f'当前市场活跃({temp}°)，建议仓位{position_pct}%')
-            suggestions.append('可同时持有3-5只股票')
+            return f'当前市场活跃({temp}°)，建议仓位{position_pct}%'
         elif temp >= 65:
-            suggestions.append(f'当前市场正常({temp}°)，建议仓位{position_pct}%')
-            suggestions.append('建议持有2-3只股票')
+            return f'当前市场正常({temp}°)，建议仓位{position_pct}%'
         elif temp >= 50:
-            suggestions.append(f'当前市场偏冷({temp}°)，建议仓位{position_pct}%')
-            suggestions.append('建议仅持有1-2只最强股票')
+            return f'当前市场偏冷({temp}°)，建议仓位{position_pct}%'
         elif temp >= 30:
-            suggestions.append(f'当前市场寒冷({temp}°)，建议仓位{position_pct}%')
-            suggestions.append('建议仅持有1只最强股票，轻仓试探')
+            return f'当前市场寒冷({temp}°)，建议仓位{position_pct}%'
         elif temp >= 15:
-            suggestions.append(f'当前市场冰封({temp}°)，建议仓位{position_pct}%')
-            suggestions.append('建议观望为主，极轻仓试探')
+            return f'当前市场冰封({temp}°)，建议仓位{position_pct}%'
         else:
-            suggestions.append(f'当前市场极端({temp}°)，建议暂停买入')
+            return f'当前市场极端({temp}°)，建议暂停买入'
             suggestions.append('耐心等待市场回暖')
         
         return '；'.join(suggestions)
