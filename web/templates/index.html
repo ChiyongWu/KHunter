@@ -917,6 +917,37 @@
                                     </div>
                                 </div>
                                 
+                                <!-- 温度约束统计 -->
+                                <div id="temp-constraint-stats" style="display:none; margin-bottom:24px; padding:16px; background:#f9fafb; border-radius:6px; border:1px solid #e5e7eb;">
+                                    <h5 style="margin-bottom:12px; color:#374151; font-size:14px;">🌡️ 温度约束统计</h5>
+                                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px;">
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">约束模式</div>
+                                            <div id="temp-stats-mode" style="font-size:16px; font-weight:bold; color:#374151;">--</div>
+                                        </div>
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">受约束天数</div>
+                                            <div id="temp-stats-constrained" style="font-size:16px; font-weight:bold; color:#f59e0b;">--</div>
+                                        </div>
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">冰封天数</div>
+                                            <div id="temp-stats-banned" style="font-size:16px; font-weight:bold; color:#ef4444;">--</div>
+                                        </div>
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">平均仓位</div>
+                                            <div id="temp-stats-position" style="font-size:16px; font-weight:bold; color:#3b82f6;">--</div>
+                                        </div>
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">数量约束</div>
+                                            <div id="temp-stats-count" style="font-size:16px; font-weight:bold; color:#8b5cf6;">--</div>
+                                        </div>
+                                        <div style="text-align:center;">
+                                            <div style="font-size:12px; color:#6b7280;">仓位约束</div>
+                                            <div id="temp-stats-pos" style="font-size:16px; font-weight:bold; color:#10b981;">--</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
                                 <!-- 交易明细表格 -->
                                 <div>
                                     <h5 style="margin-bottom:12px; color:#374151; font-size:14px;">交易明细</h5>

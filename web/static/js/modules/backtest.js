@@ -992,6 +992,26 @@ function displayBacktestResultOnConfigPage(result) {
     if (maxDrawdownEl) maxDrawdownEl.textContent = `${(result.max_drawdown || 0).toFixed(2)}%`;
     if (sharpeRatioEl) sharpeRatioEl.textContent = (result.sharpe_ratio || 0).toFixed(2);
     
+    // 更新温度约束统计
+    const tempStatsEl = document.getElementById('temp-constraint-stats');
+    if (tempStatsEl && result.temp_constraint_stats) {
+        const stats = result.temp_constraint_stats;
+        if (stats.enabled) {
+            tempStatsEl.style.display = 'block';
+            const modeNames = {'count': '数量', 'position': '仓位', 'both': '两者'};
+            document.getElementById('temp-stats-mode').textContent = modeNames[stats.mode] || stats.mode || '--';
+            document.getElementById('temp-stats-constrained').textContent = `${stats.days_constrained || 0}天`;
+            document.getElementById('temp-stats-banned').textContent = `${stats.days_banned || 0}天`;
+            document.getElementById('temp-stats-position').textContent = `${((stats.avg_position_applied || 0) * 100).toFixed(0)}%`;
+            document.getElementById('temp-stats-count').textContent = `${stats.constrained_by_count || 0}天`;
+            document.getElementById('temp-stats-pos').textContent = `${stats.constrained_by_position || 0}天`;
+        } else {
+            tempStatsEl.style.display = 'none';
+        }
+    } else if (tempStatsEl) {
+        tempStatsEl.style.display = 'none';
+    }
+    
     // 绘制收益曲线
     // 注意：result 中没有 capital_history 和 dates，需要从 equity_curve 中提取
     if (result.equity_curve && result.equity_curve.length > 0) {
