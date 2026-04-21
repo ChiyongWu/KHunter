@@ -188,32 +188,108 @@ function showPlanModal(planData) {
     document.getElementById('modal-plan-date').textContent = planData.plan_date;
     document.getElementById('modal-stock-count').textContent = `${planData.total_count} 只`;
     
-    // 3. 更新表格数据
+    // 3. 显示温度建议区域
+    displayTemperatureSuggestion(planData.temperature_info);
+    
+    // 4. 更新表格数据
     const tbody = document.getElementById('plan-tbody');
     tbody.innerHTML = '';
     
     if (planData.plans && planData.plans.length > 0) {
         planData.plans.forEach((plan, index) => {
             const row = document.createElement('tr');
+            
+            // 根据是否有备注添加样式
+            const isConstrained = plan.remark && plan.remark.includes('约束');
+            const rowStyle = isConstrained ? 'background-color: #fef3c7;' : '';
+            
             row.innerHTML = `
-                <td>${index + 1}</td>
-                <td>${plan.stock_code}</td>
-                <td>${plan.stock_name}</td>
-                <td>${plan.support_level.toFixed(2)}</td>
-                <td>${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
-                <td>${plan.position_ratio}%</td>
-                <td>${plan.stop_loss_price.toFixed(2)}</td>
-                <td>${plan.take_profit_price.toFixed(2)}</td>
-                <td>${plan.hold_days}天</td>
+                <td style="${rowStyle}">${plan.rank || (index + 1)}</td>
+                <td style="${rowStyle}">${plan.stock_code}</td>
+                <td style="${rowStyle}">${plan.stock_name}</td>
+                <td style="${rowStyle}">${plan.support_level.toFixed(2)}</td>
+                <td style="${rowStyle}">${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
+                <td style="${rowStyle}">${plan.position_ratio}%</td>
+                <td style="${rowStyle}">${plan.stop_loss_price.toFixed(2)}</td>
+                <td style="${rowStyle}">${plan.take_profit_price.toFixed(2)}</td>
+                <td style="${rowStyle}">${plan.hold_days}天</td>
             `;
             tbody.appendChild(row);
+            
+            // 如果有备注，添加备注行
+            if (plan.remark) {
+                const remarkRow = document.createElement('tr');
+                remarkRow.innerHTML = `
+                    <td colspan="9" style="background-color: #fef3c7; padding: 6px 12px; font-size: 12px; color: #92400e;">
+                        💡 ${plan.remark}
+                    </td>
+                `;
+                tbody.appendChild(remarkRow);
+            }
         });
     } else {
         tbody.innerHTML = '<tr><td colspan="9" class="placeholder">暂无交易计划数据</td></tr>';
     }
     
-    // 4. 显示模态窗口
+    // 5. 显示模态窗口
     document.getElementById('plan-modal').style.display = 'block';
+}
+
+/**
+ * 显示温度建议
+ * @param {Object} tempInfo - 温度信息
+ */
+function displayTemperatureSuggestion(tempInfo) {
+    // 查找或创建温度建议容器
+    let tempContainer = document.getElementById('temp-suggestion-container');
+    if (!tempContainer) {
+        // 获取交易计划基本信息区域
+        const infoArea = document.querySelector('.plan-info-area');
+        if (infoArea) {
+            tempContainer = document.createElement('div');
+            tempContainer.id = 'temp-suggestion-container';
+            tempContainer.className = 'temp-suggestion-box';
+            infoArea.appendChild(tempContainer);
+        }
+    }
+    
+    if (!tempContainer || !tempInfo) return;
+    
+    const temp = tempInfo.temperature;
+    const status = tempInfo.status || '未知';
+    const suggestion = tempInfo.suggestion || '';
+    
+    // 根据温度状态设置颜色
+    let bgColor, textColor, borderColor;
+    if (temp !== null && temp >= 80) {
+        bgColor = '#fef2f2'; borderColor = '#f87171'; textColor = '#991b1b';
+    } else if (temp !== null && temp >= 65) {
+        bgColor = '#fffbeb'; borderColor = '#fbbf24'; textColor = '#92400e';
+    } else if (temp !== null && temp >= 50) {
+        bgColor = '#fefce8'; borderColor = '#facc15'; textColor = '#854d0e';
+    } else if (temp !== null && temp >= 30) {
+        bgColor = '#eff6ff'; borderColor = '#60a5fa'; textColor = '#1e40af';
+    } else if (temp !== null && temp >= 15) {
+        bgColor = '#f5f3ff'; borderColor = '#a78bfa'; textColor = '#5b21b6';
+    } else {
+        bgColor = '#f3f4f6'; borderColor = '#9ca3af'; textColor = '#374151';
+    }
+    
+    const tempDisplay = temp !== null ? `${temp.toFixed(1)}°` : '--';
+    
+    tempContainer.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: ${bgColor}; border-left: 4px solid ${borderColor}; border-radius: 6px;">
+            <div style="text-align: center; min-width: 60px;">
+                <div style="font-size: 12px; color: #6b7280;">市场温度</div>
+                <div style="font-size: 24px; font-weight: bold; color: ${textColor};">${tempDisplay}</div>
+                <div style="font-size: 12px; color: ${textColor};">${status}</div>
+            </div>
+            <div style="flex: 1; border-left: 1px solid ${borderColor}; padding-left: 12px;">
+                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">📊 操作建议</div>
+                <div style="font-size: 13px; color: ${textColor}; line-height: 1.5;">${suggestion}</div>
+            </div>
+        </div>
+    `;
 }
 
 /**

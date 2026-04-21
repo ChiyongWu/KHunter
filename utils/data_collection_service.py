@@ -858,6 +858,36 @@ class DataCollectionService:
                 self._add_update_log(f"✗ 记录更新完成失败: {str(e)}")
                 logger.error(f"记录更新完成失败: {str(e)}")
             
+            # 【第9步】计算并保存市场温度
+            self._add_update_log("【第9步】计算并保存市场温度...")
+            try:
+                # 导入市场温度计算器
+                from utils.market_temperature import MarketTemperature
+                from trading.market_temperature_dao import MarketTemperatureDAO
+                
+                # 转换日期格式为 YYYYMMDD
+                trade_date_yyyymmdd = target_date.replace('-', '')
+                
+                # 计算市场温度（不使用缓存，确保获取最新数据）
+                mt = MarketTemperature()
+                temp_result = mt.calculate(trade_date_yyyymmdd, use_cache=False)
+                
+                # 保存到数据库
+                dao = MarketTemperatureDAO()
+                dao.save(temp_result)
+                
+                # 更新统计信息
+                self._add_update_log(
+                    f"✓ 市场温度计算完成: {temp_result.get('temperature', 'N/A')}° - "
+                    f"{temp_result.get('status', '未知')} - "
+                    f"仓位{temp_result.get('position_ratio', 0) * 100:.0f}%"
+                )
+                logger.info(f"市场温度已保存: {trade_date_yyyymmdd} - {temp_result.get('temperature')}°")
+            
+            except Exception as e:
+                self._add_update_log(f"⚠ 市场温度计算失败: {str(e)}")
+                logger.warning(f"市场温度计算失败: {str(e)}")
+            
             # 检查是否有数据被成功更新
             total_added = self.update_status['totalStats']['kline_added'] + self.update_status['totalStats']['fund_flow_added']
             total_updated = self.update_status['totalStats']['kline_updated'] + self.update_status['totalStats']['fund_flow_updated']

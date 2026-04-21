@@ -428,16 +428,30 @@ function showModal(title, content) {
     // 创建模态框
     const modal = document.createElement('div');
     modal.style.cssText = 'background: white; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); max-width: 90%; max-height: 90%; overflow: auto;';
-    modal.innerHTML = `
-        <div style="padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
-            <h3 style="margin: 0; font-size: 16px; font-weight: 600; color: #374151;">${title}</h3>
-            <button onclick="closeModal()" style="background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px;">&times;</button>
-        </div>
-        <div id="modal-content">${content}</div>
-    `;
     
-        <div id="modal-content">${content}</div>
-    `);
+    // 创建头部
+    const header = document.createElement('div');
+    header.style.cssText = 'padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;';
+    
+    const titleEl = document.createElement('h3');
+    titleEl.style.cssText = 'margin: 0; font-size: 16px; font-weight: 600; color: #374151;';
+    titleEl.textContent = title;
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.style.cssText = 'background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px;';
+    closeBtn.textContent = '×';
+    closeBtn.onclick = closeModal;  // 直接引用，不使用字符串
+    
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+    
+    // 创建内容区
+    const contentDiv = document.createElement('div');
+    contentDiv.id = 'modal-content';
+    contentDiv.innerHTML = content;
+    
+    modal.appendChild(header);
+    modal.appendChild(contentDiv);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
     
