@@ -38,16 +38,44 @@ class MoneyFlowDAO:
         if end_date is None:
             end_date = datetime.now().strftime('%Y%m%d')
 
-        dates = []
-        current = datetime.strptime(end_date, '%Y%m%d')
+        # 计算开始日期（向前推days*2天，留有余量）
+        start_date_dt = datetime.strptime(end_date, '%Y%m%d') - timedelta(days=days * 2)
+        start_date = start_date_dt.strftime('%Y%m%d')
 
-        while len(dates) < days:
-            # 排除周末
-            if current.weekday() < 5:
-                dates.append(current.strftime('%Y%m%d'))
-            current -= timedelta(days=1)
+        # 使用Tushare获取真实交易日历
+        try:
+            df = self.pro.trade_cal(
+                exchange='SSE',  # 上海交易所
+                start_date=start_date,
+                end_date=end_date,
+                is_open='1'  # 只获取交易日
+            )
+            if df is None or df.empty:
+                logger.warning(f"获取交易日历失败，使用简单排除周末方式")
+                # 降级方案：排除周末
+                dates = []
+                current = datetime.strptime(end_date, '%Y%m%d')
+                while len(dates) < days:
+                    if current.weekday() < 5:
+                        dates.append(current.strftime('%Y%m%d'))
+                    current -= timedelta(days=1)
+                return dates
 
-        return dates  # 返回升序列表
+            # 取最后days个交易日
+            trade_dates_list = df['cal_date'].tolist()[-days:]
+            logger.info(f"获取到{len(trade_dates_list)}个交易日: {trade_dates_list}")
+            return trade_dates_list
+
+        except Exception as e:
+            logger.error(f"获取交易日历异常: {e}，使用简单排除周末方式")
+            # 降级方案：排除周末
+            dates = []
+            current = datetime.strptime(end_date, '%Y%m%d')
+            while len(dates) < days:
+                if current.weekday() < 5:
+                    dates.append(current.strftime('%Y%m%d'))
+                current -= timedelta(days=1)
+            return dates
 
     def get_daily_money_flow(self, trade_date: str) -> pd.DataFrame:
         """
