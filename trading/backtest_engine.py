@@ -207,7 +207,9 @@ class BacktestEngine:
                         support_level = 0.0
                     else:
                         # 使用关键日期计算支撑位
-                        support_level = self._calculate_support_level(stock, key_date, config.get('support_method', 'ma20'))
+                        # 注意：config中的参数名是 'support_level_method'，不是 'support_method'
+                        support_method = config.get('support_level_method') or config.get('support_method', 'ma20')
+                        support_level = self._calculate_support_level(stock, key_date, support_method)
                     
                     logger.info(f"股票 {stock_code} {stock['stock_name']} 支撑位置: {support_level}")
                     
@@ -1043,6 +1045,69 @@ class BacktestEngine:
         except Exception as e:
             logger.warning(f"获取股票 {stock_code} 价格失败: {str(e)}")
             return 10.0
+    
+    def _extract_key_date(self, signal: Dict) -> Optional[datetime.date]:
+        """从选股信号中提取关键日期
+        
+        Args:
+            signal: 选股信号字典，可能包含以下字段：
+                - key_date: 关键日期（字符串，格式 YYYY-MM-DD）
+                - key_dates: 关键日期JSON数组
+                
+        Returns:
+            关键日期（datetime.date）或 None
+        """
+        try:
+            # 方式1：直接获取 key_date 字段
+            if 'key_date' in signal and signal['key_date']:
+                key_date_str = signal['key_date']
+                # 处理字符串格式
+                if isinstance(key_date_str, str):
+                    return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
+                # 处理datetime对象
+                elif isinstance(key_date_str, datetime.datetime):
+                    return key_date_str.date()
+                elif isinstance(key_date_str, datetime.date):
+                    return key_date_str
+            
+            # 方式2：从 key_dates JSON 数组中获取第一个
+            if 'key_dates' in signal and signal['key_dates']:
+                key_dates_str = signal['key_dates']
+                
+                # 如果是字符串，需要解析JSON
+                if isinstance(key_dates_str, str):
+                    try:
+                        key_dates_list = json.loads(key_dates_str)
+                    except json.JSONDecodeError:
+                        logger.warning(f"无法解析key_dates JSON: {key_dates_str}")
+                        return None
+                else:
+                    key_dates_list = key_dates_str
+                
+                # 获取第一个关键日期
+                if key_dates_list and len(key_dates_list) > 0:
+                    first_key_date = key_dates_list[0]
+                    # 处理字典格式
+                    if isinstance(first_key_date, dict):
+                        key_date_str = first_key_date.get('date')
+                    else:
+                        key_date_str = first_key_date
+                    
+                    if key_date_str:
+                        if isinstance(key_date_str, str):
+                            return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
+                        elif isinstance(key_date_str, datetime.datetime):
+                            return key_date_str.date()
+                        elif isinstance(key_date_str, datetime.date):
+                            return key_date_str
+            
+            # 如果没有找到关键日期，返回None
+            logger.debug(f"选股信号中没有关键日期")
+            return None
+            
+        except Exception as e:
+            logger.error(f"解析关键日期失败: {str(e)}")
+            return None
     
     def _is_buy_point(self, buy_price: float, support_level: float, config: Dict) -> bool:
         """判断是否为买点
