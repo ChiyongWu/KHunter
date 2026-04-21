@@ -1164,6 +1164,33 @@ def khunter_track():
         }), 500
 
 
+@khunter_bp.route('/latest_kline_date', methods=['GET'])
+def get_latest_kline_date():
+    """
+    获取最后一根K线日期接口
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "latest_date": "2026-04-20"
+            }
+        }
+    """
+    try:
+        result = khunter_api.get_latest_kline_date()
+        return jsonify(result), 200 if result.get('success') else 400
+    
+    except Exception as e:
+        logger.error(f"获取最后一根K线日期失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取失败：{str(e)}',
+            'data': None
+        }), 500
+
+
 # ==================== 交易计划相关接口 ====================
 
 from trading.trading_plan_generator import TradingPlanGenerator

@@ -362,6 +362,30 @@ class KHunterAPI:
             # 7. 跟踪失败
             logger.error(f"跟踪失败: {str(e)}")
             return self._build_error_response(f"跟踪失败：{str(e)}")
+
+    def get_latest_kline_date(self) -> Dict[str, Any]:
+        """
+        获取最后一根K线日期
+        
+        返回：
+            Dict: 标准化响应，包含最后一根K线日期
+        """
+        try:
+            # 从 stock_kline 表获取最新日期
+            sql = "SELECT MAX(date) as latest_date FROM stock_kline"
+            result = self.db_manager.query_one(sql)
+            latest_date = result.get('latest_date') if result else None
+            
+            if latest_date:
+                logger.info(f"获取最后一根K线日期: {latest_date}")
+                return self._build_success_response({'latest_date': latest_date}, "获取成功")
+            else:
+                logger.warning("stock_kline表中没有数据")
+                return self._build_error_response("K线数据为空")
+        
+        except Exception as e:
+            logger.error(f"获取最后一根K线日期失败: {str(e)}")
+            return self._build_error_response(f"获取失败：{str(e)}")
     
     
     # ==================== 私有方法 - 参数验证 ====================

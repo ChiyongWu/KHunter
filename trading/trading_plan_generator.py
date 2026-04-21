@@ -28,25 +28,32 @@ class TradingPlanGenerator:
         self.khunter_dao = khunter_dao
         self.trading_plan_dao = trading_plan_dao
 
-    def generate(self, hunting_date: str) -> Dict[str, Any]:
+    def generate(self, plan_date: str) -> Dict[str, Any]:
         """
         生成交易计划
 
         参数：
-            hunting_date: 狩猎日期，格式 YYYY-MM-DD
+            plan_date: 计划执行日期，格式 YYYY-MM-DD（用户选择的日期）
 
         返回：
             Dict: 包含 plan_date, hunting_date, total_count, plans, temperature_info
         """
-        # 获取温度信息
-        temperature_info = self._get_market_temperature(hunting_date)
+        # 获取实际狩猎日期（计划日期的前一天）
+        hunting_date = self._get_prev_trading_date(plan_date)
         
-        # 获取下一交易日和狩猎结果
-        plan_date = self._get_next_trading_date(hunting_date)
+        # 获取温度信息（使用计划日期）
+        temperature_info = self._get_market_temperature(plan_date)
+        
+        # 获取狩猎结果（使用实际狩猎日期）
         hunting_results = self._get_hunting_results(hunting_date)
         
         # 获取温度约束建议（仅供参考，不限制数据）
         temp_constraints = self._get_temp_constraints(temperature_info)
+        # 转换为对象格式以匹配前端期望
+        temp_constraints_dict = {
+            'max_stocks': temp_constraints[0],
+            'position_ratio': temp_constraints[1]
+        }
         
         # 生成交易计划（不改变数据，只添加建议信息）
         plans = []
@@ -60,7 +67,7 @@ class TradingPlanGenerator:
             'total_count': len(plans),
             'plans': plans,
             'temperature_info': temperature_info,
-            'temp_constraints': temp_constraints  # 温度约束建议（仅供参考）
+            'temp_constraints': temp_constraints_dict  # 温度约束建议（仅供参考）
         }
 
     def _get_market_temperature(self, hunting_date: str) -> Dict[str, Any]:
@@ -171,20 +178,20 @@ class TradingPlanGenerator:
         else:
             return (0, 0.0)  # 禁止买入
 
-    def _get_next_trading_date(self, hunting_date: str) -> str:
+    def _get_prev_trading_date(self, plan_date: str) -> str:
         """
-        获取下一交易日日期（简单实现：狩猎日期+1天）
+        获取前一交易日日期（简单实现：计划日期-1天）
 
         参数：
-            hunting_date: 狩猎日期
+            plan_date: 计划执行日期
 
         返回：
-            str: 下一交易日日期，格式 YYYY-M-D
+            str: 前一交易日日期，格式 YYYY-MM-DD（带前导零）
         """
-        hunting_dt = datetime.strptime(hunting_date, '%Y-%m-%d')
-        next_dt = hunting_dt + timedelta(days=1)
-        # 使用不带前导零的格式
-        return f"{next_dt.year}-{next_dt.month}-{next_dt.day}"
+        plan_dt = datetime.strptime(plan_date, '%Y-%m-%d')
+        prev_dt = plan_dt - timedelta(days=1)
+        # 使用带前导零的格式，与数据库一致
+        return f"{prev_dt.year}-{prev_dt.month:02d}-{prev_dt.day:02d}"
 
     def _get_hunting_results(self, hunting_date: str) -> List[Dict[str, Any]]:
         """

@@ -8,13 +8,38 @@ let totalCount = 0;
 let currentResults = [];
 
 /**
+ * 获取最后一根K线日期并设置为默认日期
+ */
+async function fetchLatestKlineDate() {
+    try {
+        const response = await fetch('/api/khunter/latest_kline_date');
+        const result = await response.json();
+        
+        if (result.success && result.data && result.data.latest_date) {
+            document.getElementById('hunting-date').value = result.data.latest_date;
+        } else {
+            // 降级：使用昨天
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+            document.getElementById('hunting-date').value = formatDate(yesterday);
+        }
+    } catch (error) {
+        console.error('获取K线日期失败:', error);
+        // 降级：使用昨天
+        const today = new Date();
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        document.getElementById('hunting-date').value = formatDate(yesterday);
+    }
+}
+
+/**
  * 页面初始化
  */
 function initPage() {
-    // 1. 设置默认日期（当前交易日期）
-    const today = new Date();
-    const dateStr = formatDate(today);
-    document.getElementById('hunting-date').value = dateStr;
+    // 1. 获取最后一根K线日期作为默认日期
+    fetchLatestKlineDate();
     
     // 2. 设置默认跟踪天数
     document.getElementById('tracking-days').value = 5;
@@ -262,23 +287,6 @@ function displayTemperatureSuggestion(tempInfo, tempConstraints) {
     
     const tempDisplay = temp !== null ? `${temp.toFixed(1)}°` : '--';
     
-    // 温度约束建议（仅供参考）
-    let constraintHtml = '';
-    if (tempConstraints && temp !== null) {
-        const maxStocks = tempConstraints.max_stocks;
-        const positionRatio = tempConstraints.position_ratio;
-        const positionPct = Math.round(positionRatio * 100);
-        
-        if (temp < 80) {
-            constraintHtml = `
-                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed ${borderColor}; font-size: 12px;">
-                    💡 仅供参考：建议买入不超过 <strong>${maxStocks === 999 ? '无限制' : maxStocks + '只'}</strong>，
-                    建议仓位 <strong>${positionPct}%</strong>
-                </div>
-            `;
-        }
-    }
-    
     tempContainer.innerHTML = `
         <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: ${bgColor}; border-left: 4px solid ${borderColor}; border-radius: 6px;">
             <div style="text-align: center; min-width: 60px;">
@@ -289,7 +297,6 @@ function displayTemperatureSuggestion(tempInfo, tempConstraints) {
             <div style="flex: 1; border-left: 1px solid ${borderColor}; padding-left: 12px;">
                 <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">📊 操作建议</div>
                 <div style="font-size: 13px; color: ${textColor}; line-height: 1.5;">${suggestion}</div>
-                ${constraintHtml}
             </div>
         </div>
     `;
