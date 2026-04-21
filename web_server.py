@@ -2648,6 +2648,300 @@ def regenerate_ranking():
         })
 
 
+# ==================== 市场温度计 API ====================
+
+@app.route('/api/market-temperature/calculate', methods=['POST'])
+def calculate_market_temperature():
+    """
+    计算市场温度
+    
+    请求参数：
+        trade_date: 交易日期（YYYYMMDD格式），可选，默认为今日
+        use_cache: 是否使用缓存，默认True
+    
+    返回：
+        市场温度数据，包含：
+        - trade_date: 交易日期
+        - temperature: 综合温度值（0-100）
+        - status: 市场状态
+        - position_ratio: 仓位系数
+        - action: 狩猎场执行规则
+        - 各维度得分和原始数据
+    """
+    try:
+        data = request.get_json() or {}
+        trade_date = data.get('trade_date')
+        use_cache = data.get('use_cache', True)
+        
+        # 如果未指定日期，使用今日
+        if not trade_date:
+            from datetime import date
+            trade_date = date.today().strftime('%Y%m%d')
+        
+        # 调用温度计算器
+        from utils.market_temperature import MarketTemperature
+        mt = MarketTemperature()
+        result = mt.calculate(trade_date, use_cache=use_cache)
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(result)
+        })
+    except Exception as e:
+        logger.error(f"计算市场温度失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/market-temperature/query', methods=['GET'])
+def query_market_temperature():
+    """
+    查询市场温度数据
+    
+    请求参数：
+        trade_date: 交易日期（YYYYMMDD格式）
+    
+    返回：
+        市场温度数据
+    """
+    try:
+        trade_date = request.args.get('trade_date')
+        
+        if not trade_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少trade_date参数'
+            })
+        
+        from trading.market_temperature_dao import MarketTemperatureDAO
+        dao = MarketTemperatureDAO()
+        result = dao.query_by_date(trade_date)
+        
+        if result:
+            return jsonify({
+                'success': True,
+                'data': clean_data_for_json(result)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': f'未找到日期{trade_date}的温度数据'
+            })
+    except Exception as e:
+        logger.error(f"查询市场温度失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/market-temperature/trend', methods=['GET'])
+def get_market_temperature_trend():
+    """
+    获取市场温度趋势
+    
+    请求参数：
+        days: 天数，默认5天
+    
+    返回：
+        趋势数据，包含：
+        - trend: 温度趋势列表
+        - avg_temperature: 平均温度
+        - max_temperature: 最高温度
+        - min_temperature: 最低温度
+        - latest_status: 最新状态
+        - latest_temperature: 最新温度
+        - latest_trade_date: 最新交易日
+    """
+    try:
+        days = int(request.args.get('days', 5))
+        
+        from trading.market_temperature_dao import MarketTemperatureDAO
+        dao = MarketTemperatureDAO()
+        result = dao.get_trend(days)
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(result)
+        })
+    except Exception as e:
+        logger.error(f"获取温度趋势失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/market-temperature/position-ratio', methods=['GET'])
+def get_market_temperature_position_ratio():
+    """
+    获取指定日期的仓位系数
+    
+    请求参数：
+        trade_date: 交易日期（YYYYMMDD格式），可选，默认为今日
+    
+    返回：
+        仓位系数数据
+    """
+    try:
+        trade_date = request.args.get('trade_date')
+        
+        # 如果未指定日期，使用今日
+        if not trade_date:
+            from datetime import date
+            trade_date = date.today().strftime('%Y%m%d')
+        
+        from trading.market_temperature_dao import MarketTemperatureDAO
+        dao = MarketTemperatureDAO()
+        position_ratio = dao.get_position_ratio(trade_date)
+        
+        # 获取完整数据
+        temp_data = dao.query_by_date(trade_date)
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json({
+                'trade_date': trade_date,
+                'position_ratio': position_ratio,
+                'temperature': temp_data['temperature'] if temp_data else None,
+                'status': temp_data['status'] if temp_data else None,
+                'action': temp_data['action'] if temp_data else None
+            })
+        })
+    except Exception as e:
+        logger.error(f"获取仓位系数失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/backtest/constraints', methods=['GET'])
+def get_backtest_constraints():
+    """
+    获取回测期间的温度约束预览
+    
+    请求参数：
+        start_date: 回测开始日期（YYYYMMDD格式）
+        end_date: 回测结束日期（YYYYMMDD格式）
+        mode: 约束模式，count/position/both，默认both
+    
+    返回：
+        批量约束结果，包含每日约束详情和汇总统计
+    """
+    try:
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        mode = request.args.get('mode', 'both')
+        
+        if not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少start_date或end_date参数'
+            })
+        
+        from trading.backtest_temp_constraint import BacktestTempConstraint
+        constraint = BacktestTempConstraint()
+        
+        # 生成日期范围内的交易日列表
+        trade_dates = _generate_trade_dates(start_date, end_date)
+        
+        result = constraint.get_batch_constraints(trade_dates, mode)
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(result)
+        })
+    except Exception as e:
+        logger.error(f"获取回测约束失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/backtest/constraint', methods=['GET'])
+def get_backtest_constraint():
+    """
+    获取单日回测温度约束
+    
+    请求参数：
+        trade_date: 交易日期（YYYYMMDD格式）
+        mode: 约束模式，count/position/both，默认both
+    
+    返回：
+        单日约束详情
+    """
+    try:
+        trade_date = request.args.get('trade_date')
+        mode = request.args.get('mode', 'both')
+        
+        if not trade_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少trade_date参数'
+            })
+        
+        from trading.market_temperature_dao import MarketTemperatureDAO
+        from trading.backtest_temp_constraint import BacktestTempConstraint
+        
+        dao = MarketTemperatureDAO()
+        temp_data = dao.query_by_date(trade_date)
+        
+        if not temp_data:
+            return jsonify({
+                'success': False,
+                'message': f'未找到日期{trade_date}的温度数据'
+            })
+        
+        constraint = BacktestTempConstraint(dao)
+        result = constraint.get_constraint(temp_data['temperature'], mode)
+        result['trade_date'] = trade_date
+        result['temperature'] = temp_data['temperature']
+        result['status'] = temp_data['status']
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(result)
+        })
+    except Exception as e:
+        logger.error(f"获取单日约束失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+def _generate_trade_dates(start_date: str, end_date: str) -> list:
+    """
+    生成日期范围内的交易日列表（工作日）
+    
+    Args:
+        start_date: 开始日期（YYYYMMDD）
+        end_date: 结束日期（YYYYMMDD）
+    
+    Returns:
+        交易日列表
+    """
+    from datetime import datetime, timedelta
+    
+    start = datetime.strptime(start_date, '%Y%m%d')
+    end = datetime.strptime(end_date, '%Y%m%d')
+    
+    dates = []
+    current = start
+    
+    while current <= end:
+        # 只包含周一到周五
+        if current.weekday() < 5:
+            dates.append(current.strftime('%Y%m%d'))
+        current += timedelta(days=1)
+    
+    return dates
+
+
 def run_web_server(host='0.0.0.0', port=5000, debug=False):
     """启动Web服务器"""
     # 初始化日志系统
