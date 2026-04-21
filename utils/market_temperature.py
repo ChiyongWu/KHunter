@@ -237,18 +237,14 @@ class MarketTemperature:
             if not self.tushare_pro:
                 raise DataNotAvailableError("Tushare Pro未初始化，无法获取跌停家数数据")
             
-            # 使用limit_list_d获取涨跌停数据
-            df = self.tushare_pro.limit_list_d(trade_date=trade_date, limit_type='D')
+            # 使用daily接口获取当日所有股票行情
+            df = self.tushare_pro.daily(trade_date=trade_date)
             
             if df is None or df.empty:
-                # 如果没有跌停数据，返回0
-                logger.info(f"跌停家数数据: 0, 日期={trade_date}")
-                return {
-                    'limit_down_count': 0
-                }
+                raise DataNotAvailableError(f"涨跌停数据为空，日期: {trade_date}")
             
-            # 统计跌停家数
-            limit_down_count = len(df)
+            # 计算跌停家数：涨跌幅 <= -9.9%（考虑新股/复牌股涨跌停略有差异）
+            limit_down_count = len(df[df['pct_chg'] <= -9.9])
             
             logger.info(f"跌停家数数据: {limit_down_count}, 日期={trade_date}")
             
@@ -283,10 +279,21 @@ class MarketTemperature:
             if not prev_trade_date:
                 raise DataNotAvailableError(f"无法获取前一交易日，日期: {trade_date}")
             
-            # 获取前一交易日涨停股
-            limit_up_df = self.tushare_pro.limit_list_d(trade_date=prev_trade_date, limit_type='U')
+            # 使用daily数据获取前一交易日涨停股（涨跌幅 >= 9.9%）
+            prev_daily_df = self.tushare_pro.daily(trade_date=prev_trade_date)
             
-            if limit_up_df is None or limit_up_df.empty:
+            if prev_daily_df is None or prev_daily_df.empty:
+                logger.warning(f"前一交易日无行情数据，日期: {prev_trade_date}")
+                return {
+                    'avg_change': 0,
+                    'stock_count': 0
+                }
+            
+            # 筛选涨停股
+            limit_up_df = prev_daily_df[prev_daily_df['pct_chg'] >= 9.9]
+            limit_up_codes = limit_up_df['ts_code'].tolist()[:50]  # 限制数量，防止超时
+            
+            if not limit_up_codes:
                 logger.warning(f"前一交易日无涨停股，日期: {prev_trade_date}")
                 return {
                     'avg_change': 0,
@@ -294,38 +301,26 @@ class MarketTemperature:
                 }
             
             # 获取这些股票今日表现
-            limit_up_codes = limit_up_df['ts_code'].tolist()[:50]  # 限制数量，防止超时
+            today_daily_df = self.tushare_pro.daily(trade_date=trade_date)
             
-            if not limit_up_codes:
-                return {
-                    'avg_change': 0,
-                    'stock_count': 0
-                }
+            if today_daily_df is None or today_daily_df.empty:
+                raise DataNotAvailableError(f"今日行情数据为空，日期: {trade_date}")
             
-            # 逐个获取涨停股今日表现
-            performances = []
-            for ts_code in limit_up_codes:
-                try:
-                    df = self.tushare_pro.daily(
-                        ts_code=ts_code,
-                        start_date=trade_date,
-                        end_date=trade_date
-                    )
-                    if df is not None and not df.empty:
-                        performances.append(df.iloc[0]['pct_chg'])
-                except:
-                    continue
+            # 获取涨停股今日涨跌幅
+            today_limit_up = today_daily_df[today_daily_df['ts_code'].isin(limit_up_codes)]
             
-            if not performances:
+            if today_limit_up.empty:
                 avg_change = 0
+                stock_count = 0
             else:
-                avg_change = sum(performances) / len(performances)
+                avg_change = today_limit_up['pct_chg'].mean()
+                stock_count = len(today_limit_up)
             
-            logger.info(f"涨停表现数据: 昨日涨停={len(limit_up_codes)}只, 今日均涨幅={avg_change:.2f}%, 日期={trade_date}")
+            logger.info(f"涨停表现数据: 昨日涨停={stock_count}只, 今日均涨幅={avg_change:.2f}%, 日期={trade_date}")
             
             return {
                 'avg_change': round(avg_change, 2),
-                'stock_count': len(limit_up_codes)
+                'stock_count': stock_count
             }
         except DataNotAvailableError:
             raise
