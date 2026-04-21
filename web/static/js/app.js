@@ -28,6 +28,7 @@ async function loadModules() {
         const backtestBatchModule = await import('./modules/backtest-batch.js');
         const backtestExecutorModule = await import('./modules/backtest-executor.js');
         const marketTempModule = await import('./modules/market_temperature.js');
+        const moneyFlowModule = await import('./modules/money_flow.js');
         
         // 存储模块
         modules = {
@@ -42,7 +43,8 @@ async function loadModules() {
             utils: utilsModule,
             backtestBatch: backtestBatchModule,
             backtestExecutor: backtestExecutorModule,
-            marketTemp: marketTempModule
+            marketTemp: marketTempModule,
+            moneyFlow: moneyFlowModule
         };
         
         // 初始化
@@ -73,6 +75,9 @@ function initializeApp() {
     
     // 初始化市场温度计
     modules.marketTemp.initMarketTemperature();
+    
+    // 初始化资金流向选股页面
+    modules.moneyFlow.initMoneyFlowPage();
     
     // 暴露市场温度计函数
     window.showTemperatureDetail = modules.marketTemp.showTemperatureDetail;

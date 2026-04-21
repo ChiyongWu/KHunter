@@ -254,6 +254,12 @@
                     <span class="icon">📊</span> 历史选股
                 </li>
                 
+                <!-- 资金选股 -->
+                <li class="nav-group-title">资金选股</li>
+                <li class="nav-item" data-page="money-flow">
+                    <span class="icon">💰</span> 资金流向
+                </li>
+                
                 <!-- 智能分析 -->
                 <li class="nav-group-title">智能分析</li>
                 <li class="nav-item" data-page="analysis">
@@ -596,6 +602,51 @@
                         </div>
                         <div id="selection-results">
                             <p class="placeholder">点击"执行选股"按钮开始选股</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 资金流向选股页 -->
+                <div id="money-flow-page" class="page">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>💰 持续资金流入选股</h3>
+                        </div>
+                        
+                        <!-- 参数设置 -->
+                        <div class="filter-section" style="background: #f0fdf4; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 15px;">
+                                <div>
+                                    <label style="font-size: 12px; font-weight: 600; color: #374151; display: block; margin-bottom: 5px;">结束日期</label>
+                                    <input type="date" id="money-flow-end-date" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;">
+                                </div>
+                                <div>
+                                    <label style="font-size: 12px; font-weight: 600; color: #374151; display: block; margin-bottom: 5px;">连续净流入天数</label>
+                                    <input type="number" id="money-flow-days" value="10" min="5" max="30" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;">
+                                </div>
+                                <div>
+                                    <label style="font-size: 12px; font-weight: 600; color: #374151; display: block; margin-bottom: 5px;">最小日均净流入(万元)</label>
+                                    <input type="number" id="money-flow-min-amount" value="0" min="0" max="10000" step="100" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;">
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <button class="btn btn-primary" id="run-money-flow-btn" onclick="runMoneyFlowSelection()" style="background: #16a34a;">
+                                    <span class="icon">💰</span> 开始选股
+                                </button>
+                                <button class="btn btn-secondary" onclick="clearMoneyFlowResults()" style="padding: 8px 16px; font-size: 13px;">
+                                    <span class="icon">↺</span> 重置
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- 结果统计 -->
+                        <div id="money-flow-stats" style="display: none; background: #f0fdf4; padding: 10px; border-left: 4px solid #16a34a; border-radius: 4px; margin-bottom: 15px; font-size: 13px;">
+                            <span>共选出 <strong id="money-flow-total">0</strong> 只股票</span>
+                        </div>
+                        
+                        <!-- 结果表格 -->
+                        <div id="money-flow-results">
+                            <p class="placeholder">设置参数后点击"开始选股"</p>
                         </div>
                     </div>
                 </div>
