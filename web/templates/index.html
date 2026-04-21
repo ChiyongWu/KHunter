@@ -304,6 +304,15 @@
             <header class="header">
                 <h2 id="page-title">系统概览</h2>
                 <div class="header-actions">
+                    <!-- 市场温度徽章 -->
+                    <div id="market-temp-badge" onclick="showTemperatureDetail()" style="cursor: pointer; background: #6b7280; color: white; padding: 8px 16px; border-radius: 20px; font-size: 13px; display: flex; align-items: center; gap: 8px; transition: all 0.2s;" title="点击查看详情">
+                        <span style="font-size: 16px;">🌡️</span>
+                        <span>温度:</span>
+                        <span id="market-temp-value" style="font-weight: bold;">--</span>
+                        <span>°</span>
+                        <span id="market-temp-status" style="font-size: 12px;">--</span>
+                    </div>
+                    
                     <!-- 账户选择器 -->
                     <div class="account-selector" id="account-selector-container" style="display: none;">
                         <select id="account-selector" class="account-select" onchange="switchAccount()">

@@ -27,6 +27,7 @@ async function loadModules() {
         const utilsModule = await import('./modules/utils.js');
         const backtestBatchModule = await import('./modules/backtest-batch.js');
         const backtestExecutorModule = await import('./modules/backtest-executor.js');
+        const marketTempModule = await import('./modules/market_temperature.js');
         
         // 存储模块
         modules = {
@@ -40,7 +41,8 @@ async function loadModules() {
             ranking: rankingModule,
             utils: utilsModule,
             backtestBatch: backtestBatchModule,
-            backtestExecutor: backtestExecutorModule
+            backtestExecutor: backtestExecutorModule,
+            marketTemp: marketTempModule
         };
         
         // 初始化
@@ -68,6 +70,12 @@ function initializeApp() {
     
     // 初始化批量回测模块
     modules.backtestBatch.initBacktestBatchModule();
+    
+    // 初始化市场温度计
+    modules.marketTemp.initMarketTemperature();
+    
+    // 暴露市场温度计函数
+    window.showTemperatureDetail = modules.marketTemp.showTemperatureDetail;
     
     // // 初始化执行管理器（需要在批量回测模块之后初始化）
     // try {
