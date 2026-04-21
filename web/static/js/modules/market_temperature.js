@@ -51,7 +51,16 @@ function updateTemperatureBadge(data) {
     const badgeStatus = document.getElementById('market-temp-status');
     const badgeDate = document.getElementById('market-temp-date');
     
-    if (!badge || !data) return;
+    if (!badge) return;
+    
+    // 如果没有有效温度数据，隐藏徽章
+    if (!data || data.temperature === null || data.temperature === undefined) {
+        badge.style.display = 'none';
+        return;
+    }
+    
+    // 有温度数据时显示徽章
+    badge.style.display = 'flex';
     
     // 更新日期显示（使用data_date格式化）
     if (badgeDate) {
