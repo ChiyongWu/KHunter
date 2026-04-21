@@ -779,3 +779,55 @@ CREATE INDEX IF NOT EXISTS idx_khunter_strategy ON khunter(strategy_name);
 -- idx_khunter_strategy: 策略名称索引，用于快速查询特定策略的买点记录
 CREATE INDEX IF NOT EXISTS idx_khunter_score ON khunter(hunting_date, score);
 -- idx_khunter_score: 狩猎日期和评分的组合索引，用于按评分排序查询
+
+-- ============================================
+-- 26. 市场温度记录表
+-- ============================================
+-- 说明：存储每日市场温度计算结果，用于市场情绪监控和回测约束
+CREATE TABLE IF NOT EXISTS market_temperature (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 主键ID，自增主键
+    trade_date TEXT NOT NULL UNIQUE,
+    -- trade_date: 交易日期，类型TEXT，必填，唯一，格式YYYYMMDD，例如20260421
+    temperature REAL NOT NULL,
+    -- temperature: 综合温度值，类型REAL，必填，范围0-100
+    status TEXT NOT NULL,
+    -- status: 市场状态，类型TEXT，必填，可选值活跃/正常/偏冷/寒冷/冰封/极端
+    position_ratio REAL NOT NULL,
+    -- position_ratio: 仓位系数，类型REAL，必填，范围0-1，例如0.8表示80%仓位
+    action TEXT,
+    -- action: 狩猎场执行规则，类型TEXT，可选，例如"只买入最高分的前3只"
+    
+    -- 各维度得分
+    up_down_ratio_score REAL,
+    -- up_down_ratio_score: 涨跌家数比得分，类型REAL，可选，范围0-100
+    limit_down_score REAL,
+    -- limit_down_score: 跌停家数得分，类型REAL，可选，范围0-100
+    limit_up_performance_score REAL,
+    -- limit_up_performance_score: 昨日涨停表现得分，类型REAL，可选，范围0-100
+    volume_score REAL,
+    -- volume_score: 成交额得分，类型REAL，可选，范围0-100
+    
+    -- 原始数据
+    up_count INTEGER,
+    -- up_count: 上涨家数，类型INTEGER，可选
+    down_count INTEGER,
+    -- down_count: 下跌家数，类型INTEGER，可选
+    limit_down_count INTEGER,
+    -- limit_down_count: 跌停家数，类型INTEGER，可选
+    avg_limit_up_change REAL,
+    -- avg_limit_up_change: 昨日涨停股今日平均涨幅，类型REAL，可选，单位百分比
+    total_volume REAL,
+    -- total_volume: 两市总成交额，类型REAL，可选，单位亿元
+    volume_ma5_ratio REAL,
+    -- volume_ma5_ratio: 成交额/5日均值，类型REAL，可选
+    
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- created_at: 创建时间，类型TEXT，必填，默认当前时间，格式YYYY-MM-DD HH:MM:SS
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    -- updated_at: 更新时间，类型TEXT，必填，默认当前时间，格式YYYY-MM-DD HH:MM:SS
+);
+
+-- 为 market_temperature 表创建索引
+CREATE INDEX IF NOT EXISTS idx_market_temp_date ON market_temperature(trade_date);
+-- idx_market_temp_date: 交易日期索引，用于快速查询特定日期的温度数据
