@@ -134,13 +134,16 @@ class MoneyFlowDAO:
         min_net_amount: float = 0
     ) -> List[Dict]:
         """
-        筛选连续N日净流入股票
+        筛选连续N日净流入股票（按需获取优化版）
 
-        从end_date往前持续追踪，直到遇到净流出日期，统计真实连续天数
+        优化策略：
+        1. 只获取必要天数的数据（days + 5）
+        2. 逐步获取数据，发现候选为空立即停止
+        3. 避免一次性获取全部数据再筛选
 
         Args:
             end_date: 结束日期（YYYYMMDD），默认今日
-            days: 连续天数要求（最低要求，会持续追踪更多天数）
+            days: 连续天数要求
             min_net_amount: 最小日均净流入(万元)
 
         Returns:
@@ -152,104 +155,124 @@ class MoneyFlowDAO:
         if end_date is None:
             end_date = datetime.now().strftime('%Y%m%d')
 
-        # 获取足够多的交易日用于追踪（days * 2 + 缓冲）
-        track_days = days * 2 + 10
-        trade_dates = self.get_trade_dates(end_date, track_days)
-        if not trade_dates:
-            logger.warning("无有效交易日")
+        # 优化：只获取必要天数（days + 5天余量）
+        need_days = days + 5
+        trade_dates = self.get_trade_dates(end_date, need_days)
+        if len(trade_dates) < days:
+            logger.warning(f"有效交易日不足: {len(trade_dates)} < {days}")
             return []
 
-        # get_trade_dates返回升序列表（从早到晚），需要反转成降序（从新到旧）
-        trade_dates = list(reversed(trade_dates))
-        latest_trade_date = trade_dates[0]
-        earliest_trade_date = trade_dates[-1]
-        logger.info(f"追踪日期范围: {latest_trade_date} ~ {earliest_trade_date} (共{len(trade_dates)}个交易日)")
+        # 升序排列（从早到晚）
+        trade_dates = sorted(trade_dates)
+        latest_trade_date = trade_dates[-1]
+        earliest_trade_date = trade_dates[0]
+        logger.info(f"追踪日期范围: {earliest_trade_date} ~ {latest_trade_date} (共{len(trade_dates)}个交易日)")
 
-        # 获取每日资金流向数据
-        all_data = {}
-        for trade_date in trade_dates:
+        # 按需获取数据：逐日获取，发现空集立即停止
+        all_data = {}  # {trade_date: {ts_code: net_amount}}
+        required_dates = []  # 需要获取详细数据的日期
+
+        # 从最新日期开始逐日获取，直到候选为空
+        candidate_stocks = None  # 当前候选股票集合
+        continuous_days = 0
+
+        for trade_date in reversed(trade_dates):
+            # 获取当日全市场资金流向
             df = self.get_daily_money_flow(trade_date)
-            if not df.empty:
-                inflow_df = df[df['net_amount'] > 0]
-                all_data[trade_date] = inflow_df.set_index('ts_code')['net_amount'].to_dict()
-                logger.info(f"{trade_date}: 全市场{len(df)}只, 净流入{len(inflow_df)}只")
-            else:
+            if df.empty:
                 all_data[trade_date] = {}
+                continue
 
-        # 找出最近日期有净流入的股票作为候选
-        candidate_stocks = set(all_data[latest_trade_date].keys())
-        logger.info(f"起始日{latest_trade_date}净流入股票: {len(candidate_stocks)}只")
+            # 获取净流入股票
+            inflow_df = df[df['net_amount'] > 0]
+            today_stocks = inflow_df.set_index('ts_code')['net_amount'].to_dict()
+            all_data[trade_date] = today_stocks
 
-        # 从候选股票中筛选真正连续净流入的
+            logger.info(f"{trade_date}: 全市场{len(df)}只, 净流入{len(inflow_df)}只")
+
+            if candidate_stocks is None:
+                # 第一天：全市场净流入股票作为初始候选
+                candidate_stocks = set(today_stocks.keys())
+                required_dates = [trade_date]
+                continuous_days = 1
+                logger.info(f"第1天 {trade_date}: {len(candidate_stocks)} 只候选")
+            else:
+                # 后续天：与候选取交集
+                today_set = set(today_stocks.keys())
+                new_candidates = candidate_stocks & today_set
+
+                required_dates.append(trade_date)
+                continuous_days += 1
+
+                if len(new_candidates) == 0:
+                    # 候选为空，停止获取
+                    logger.info(f"第{continuous_days}天 {trade_date}: 候选为空，停止追溯")
+                    break
+                else:
+                    candidate_stocks = new_candidates
+                    logger.info(f"第{continuous_days}天 {trade_date}: {len(candidate_stocks)} 只候选")
+
+                # 达到目标天数，停止获取
+                if continuous_days >= days:
+                    logger.info(f"已达到目标天数 {days}，停止获取")
+                    break
+
+        # 检查是否满足连续天数要求
+        if continuous_days < days:
+            logger.warning(f"实际连续天数 {continuous_days} < 要求 {days}，返回已有结果")
+            days = continuous_days
+
+        # 记录每天的候选股票（用于展示）
+        daily_candidates = {}
+        filtered_stocks = set(all_data[required_dates[0]].keys()) if required_dates else set()
+
+        for i, trade_date in enumerate(required_dates, 1):
+            today_stocks = set(all_data.get(trade_date, {}).keys())
+            if i == 1:
+                filtered_stocks = today_stocks
+            else:
+                filtered_stocks = filtered_stocks & today_stocks
+            daily_candidates[i] = filtered_stocks.copy()
+
+        final_candidates = daily_candidates.get(days, filtered_stocks)
+        logger.info(f"最终候选股票: {len(final_candidates)} 只")
+
+        # 获取这些股票的详细信息
         results = []
-
-        for ts_code in candidate_stocks:
+        for ts_code in final_candidates:
             try:
-                # 从最近日期往前追踪连续净流入（trade_dates已是降序）
-                continuous_count = 0
-                continuous_amount = 0.0
+                # 计算累计净流入
+                total_net_amount = sum(all_data.get(d, {}).get(ts_code, 0) for d in required_dates)
+                total_buy_lg_amount = 0
 
-                for trade_date in trade_dates:
-                    stock_net = all_data.get(trade_date, {}).get(ts_code)
-                    if stock_net is None:
-                        # 股票在该日无数据（停牌或未上市），停止追踪
-                        break
+                # 获取股票名称和涨跌幅
+                stock_df = self.get_stock_money_flow(ts_code, earliest_trade_date, latest_trade_date)
+                name = ""
+                latest_pct_change = 0
+                latest_net_amount = 0
 
-                    if stock_net > 0:
-                        continuous_count += 1
-                        continuous_amount += stock_net
-                    else:
-                        # 遇到净流出或零流入，停止追踪
-                        break
+                if not stock_df.empty:
+                    latest_row = stock_df.iloc[-1]
+                    name = latest_row.get('name', '')
+                    latest_pct_change = latest_row.get('pct_change', 0)
+                    latest_net_amount = latest_row.get('net_amount', 0)
+                    total_buy_lg_amount = stock_df['buy_lg_amount'].sum()
 
-                # 检查是否满足最低连续天数要求
-                if continuous_count < days:
-                    logger.debug(f"{ts_code}: 连续{continuous_count}天 < {days}天要求")
-                    continue
-
-                # 计算平均日净流入
-                avg_net_amount = continuous_amount / continuous_count if continuous_count > 0 else 0
+                avg_net_amount = total_net_amount / days if days > 0 else 0
 
                 # 检查日均净流入是否满足要求
                 if min_net_amount > 0 and avg_net_amount < min_net_amount:
-                    logger.debug(f"{ts_code}: 日均{avg_net_amount:.0f}万 < {min_net_amount}万要求")
                     continue
-
-                # 获取股票名称和今日涨跌幅
-                name = ""
-                latest_pct_change = 0
-                if latest_trade_date in all_data and ts_code in all_data[latest_trade_date]:
-                    # 通过日频数据获取（需要额外查询）
-                    pass
-
-                # 获取个股详细数据以获取名称和涨跌幅
-                stock_df = self.get_stock_money_flow(ts_code, earliest_trade_date, latest_trade_date)
-                if not stock_df.empty:
-                    latest_row = stock_df.iloc[-1]  # 最后一条是最新日期
-                    name = latest_row.get('name', '')
-                    latest_pct_change = latest_row.get('pct_change', 0)
-                else:
-                    name = ""
-                    latest_pct_change = 0
-
-                # 计算追踪期间的累计净流入和大单净流入
-                net_amount_total = continuous_amount
-                buy_lg_amount_total = 0
-                if not stock_df.empty:
-                    # 取最新的continuous_count条数据（最后N条）
-                    tracked_df = stock_df.tail(continuous_count)
-                    net_amount_total = tracked_df['net_amount'].sum()
-                    buy_lg_amount_total = tracked_df['buy_lg_amount'].sum()
 
                 results.append({
                     'ts_code': ts_code,
                     'name': name,
-                    'net_amount_10d': round(net_amount_total, 2),
-                    'buy_lg_amount_10d': round(buy_lg_amount_total, 2),
+                    'net_amount_10d': round(total_net_amount, 2),
+                    'buy_lg_amount_10d': round(total_buy_lg_amount, 2),
                     'avg_net_amount': round(avg_net_amount, 2),
-                    'latest_net_amount': round(all_data[latest_trade_date].get(ts_code, 0), 2),
+                    'latest_net_amount': round(latest_net_amount, 2),
                     'latest_pct_change': round(latest_pct_change, 2),
-                    'continuous_days': continuous_count
+                    'continuous_days': days
                 })
 
             except Exception as e:
@@ -259,8 +282,8 @@ class MoneyFlowDAO:
         # 按连续天数和净流入金额排序
         results.sort(key=lambda x: (x['continuous_days'], x['net_amount_10d']), reverse=True)
 
-        logger.info(f"最终结果: {len(results)} 只股票（连续{days}天以上净流入）")
-        for r in results[:5]:
+        logger.info(f"最终结果: {len(results)} 只股票（连续{days}天净流入）")
+        for r in results[:10]:
             logger.info(f"  {r['ts_code']}: {r['name']}, 连续{r['continuous_days']}天, 净流入{r['net_amount_10d']:.0f}万")
 
         return results
