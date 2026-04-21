@@ -367,6 +367,9 @@ def run_backtest():
         initial_capital = data.get('initial_capital', 1000000)
         buy_amount = data.get('buy_amount', 100000)
         max_daily_buys = data.get('max_daily_buys', 5)
+        # 温度约束参数
+        enable_temp_limit = data.get('enable_temp_limit', 1)
+        temp_limit_mode = data.get('temp_limit_mode', 'both')
         
         # 验证参数
         if not strategy_name or not start_date or not end_date:
@@ -390,7 +393,10 @@ def run_backtest():
             'buy_point_lower': -1,
             'buy_point_upper': 3,
             'start_date': start_date,
-            'end_date': end_date
+            'end_date': end_date,
+            # 温度约束参数
+            'enable_temp_limit': enable_temp_limit,
+            'temp_limit_mode': temp_limit_mode
         }
         
         # 使用原有的回测引擎

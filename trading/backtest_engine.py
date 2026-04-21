@@ -17,6 +17,8 @@ from utils.akshare_fetcher import AKShareFetcher
 from strategy.strategy_registry import StrategyRegistry
 from trading.stock_score_api import calculate_stock_score
 from trading.backtest_scorer import BacktestScoreCalculator
+from trading.backtest_temp_constraint import BacktestTempConstraint
+from trading.market_temperature_dao import MarketTemperatureDAO
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -51,6 +53,20 @@ class BacktestEngine:
         # 初始化回测专用评分器
         self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
         
+        # 初始化温度约束处理器
+        self.temp_constraint = None
+        self.temp_constraint_enabled = False
+        self.temp_constraint_mode = 'both'
+        self.temp_stats = {
+            'total_days': 0,
+            'days_constrained': 0,
+            'days_banned': 0,
+            'constrained_by_count': 0,
+            'constrained_by_position': 0,
+            'avg_position_applied': 0,
+            'total_position_capital': 0
+        }
+        
         # 股票数据缓存（性能优化）
         self.stock_data_cache = {}  # {code: df} 完整历史数据
         self.stock_name_cache = {}  # {code: name} 股票名称缓存
@@ -81,6 +97,28 @@ class BacktestEngine:
             self.stock_name_cache.clear()
             self.stock_filtered_cache.clear()
             self.buy_candidate_pool.clear()
+            
+            # 重置温度统计
+            self.temp_stats = {
+                'total_days': 0,
+                'days_constrained': 0,
+                'days_banned': 0,
+                'constrained_by_count': 0,
+                'constrained_by_position': 0,
+                'avg_position_applied': 0,
+                'total_position_capital': 0
+            }
+            
+            # 初始化温度约束
+            self.temp_constraint_enabled = config.get('enable_temp_limit', 0) == 1
+            self.temp_constraint_mode = config.get('temp_limit_mode', 'both')
+            
+            if self.temp_constraint_enabled:
+                logger.info(f"启用温度约束，模式: {self.temp_constraint_mode}")
+                self.temp_constraint = BacktestTempConstraint(MarketTemperatureDAO())
+            else:
+                self.temp_constraint = None
+                logger.info("温度约束未启用")
             
             # 1. 获取回测日期范围
             start_date = config.get('start_date')
@@ -119,6 +157,52 @@ class BacktestEngine:
                 daily_buys = 0
                 max_daily_buys = config.get('max_daily_buys', 5)
                 candidate_track_days = config.get('candidate_track_days', 5)
+                
+                # 获取温度约束
+                effective_max_buys = max_daily_buys
+                effective_position_ratio = 1.0
+                temp_constraint_info = None
+                
+                if self.temp_constraint_enabled and self.temp_constraint:
+                    trade_date_str = current_date.strftime('%Y%m%d')
+                    temp_data = self.temp_constraint.get_temperature_data(trade_date_str)
+                    
+                    if temp_data:
+                        constraint = self.temp_constraint.get_constraint(
+                            temp_data['temperature'], 
+                            self.temp_constraint_mode
+                        )
+                        temp_constraint_info = {
+                            'trade_date': trade_date_str,
+                            'temperature': temp_data['temperature'],
+                            'status': temp_data['status'],
+                            'constraint': constraint
+                        }
+                        
+                        # 应用数量约束
+                        if self.temp_constraint_mode in ('count', 'both'):
+                            effective_max_buys = min(effective_max_buys, constraint['max_buy_count'])
+                        
+                        # 应用仓位约束
+                        if self.temp_constraint_mode in ('position', 'both'):
+                            effective_position_ratio = constraint['position_ratio']
+                        
+                        # 记录温度统计
+                        self.temp_stats['total_days'] += 1
+                        if constraint['max_buy_count'] == 0:
+                            self.temp_stats['days_banned'] += 1
+                        elif effective_max_buys < max_daily_buys:
+                            self.temp_stats['days_constrained'] += 1
+                            if self.temp_constraint_mode in ('count', 'both') and constraint['max_buy_count'] < max_daily_buys:
+                                self.temp_stats['constrained_by_count'] += 1
+                            if self.temp_constraint_mode in ('position', 'both') and effective_position_ratio < 1.0:
+                                self.temp_stats['constrained_by_position'] += 1
+                                self.temp_stats['total_position_capital'] += effective_position_ratio
+                        
+                        logger.info(f"温度约束: {temp_data['temperature']:.1f}° {temp_data['status']}, "
+                                   f"有效最大买入: {effective_max_buys}, 仓位系数: {effective_position_ratio:.2f}")
+                    else:
+                        logger.warning(f"未找到日期 {trade_date_str} 的温度数据，跳过温度约束")
                 
                 # 统一处理逻辑：先处理卖出，再处理买入
                 
@@ -222,13 +306,17 @@ class BacktestEngine:
                     logger.info(f"股票 {stock_code} {stock['stock_name']} 买点判断: {is_buy}")
                     
                     if is_buy:
-                        if daily_buys >= max_daily_buys:
-                            logger.info(f"达到单日最大买入限制: {max_daily_buys}")
+                        if daily_buys >= effective_max_buys:
+                            logger.info(f"达到当日最大买入限制: {effective_max_buys}")
                             remaining_candidates.append(candidate)
                             continue
                         
-                        # 计算买入金额
-                        buy_amount = min(config.get('buy_amount', 100000), current_capital)
+                        # 计算买入金额（应用仓位系数）
+                        base_buy_amount = config.get('buy_amount', 100000)
+                        buy_amount = min(base_buy_amount * effective_position_ratio, current_capital)
+                        
+                        if effective_position_ratio < 1.0:
+                            logger.info(f"仓位系数 {effective_position_ratio:.2f}，调整买入金额: {base_buy_amount} -> {buy_amount}")
                         
                         if buy_amount > 0:
                             # 计算买入数量
@@ -301,6 +389,11 @@ class BacktestEngine:
             performance = self._calculate_performance(trades, initial_capital, final_capital, dates, capital_history)
             
             # 6. 构建回测结果
+            # 计算平均仓位系数
+            avg_position = 0
+            if self.temp_stats['total_days'] > 0:
+                avg_position = self.temp_stats['total_position_capital'] / self.temp_stats['total_days']
+            
             backtest_result = {
                 'strategy_name': strategy_name,
                 'config': config,
@@ -311,7 +404,18 @@ class BacktestEngine:
                 'performance': performance,
                 'trades': trades,
                 'capital_history': capital_history,
-                'dates': dates
+                'dates': dates,
+                # 温度约束统计
+                'temp_constraint_stats': {
+                    'enabled': self.temp_constraint_enabled,
+                    'mode': self.temp_constraint_mode,
+                    'total_days': self.temp_stats['total_days'],
+                    'days_constrained': self.temp_stats['days_constrained'],
+                    'days_banned': self.temp_stats['days_banned'],
+                    'constrained_by_count': self.temp_stats['constrained_by_count'],
+                    'constrained_by_position': self.temp_stats['constrained_by_position'],
+                    'avg_position_applied': avg_position
+                }
             }
             
             logger.info(f"回测完成，初始资金: {initial_capital}, 最终资金: {final_capital}, 总收益率: {performance['total_return']:.2f}%")
