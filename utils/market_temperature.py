@@ -7,13 +7,26 @@
 - 跌停家数（权重35%）
 - 昨日涨停表现（权重20%）
 - 成交额相对位置（权重10%）
+
+注意：本模块只使用真实数据，不使用任何模拟数据。
+如果数据获取失败，会返回错误而不会使用模拟数据填充。
 """
 
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
+import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# 数据获取异常类
+class MarketTemperatureError(Exception):
+    """市场温度计算异常"""
+    pass
+
+class DataNotAvailableError(MarketTemperatureError):
+    """数据不可用异常（非交易日或API无数据）"""
+    pass
 
 
 class MarketTemperature:
@@ -60,27 +73,64 @@ class MarketTemperature:
         
         Returns:
             市场温度数据字典，包含：
-            - trade_date: 交易日期
+            - trade_date: 请求的交易日期
+            - data_date: 数据对应的实际交易日（交易期间为前一交易日）
+            - is_previous_day: 是否为前一交易日数据
             - temperature: 综合温度值
             - status: 市场状态
             - position_ratio: 仓位系数
             - action: 狩猎场执行规则
             - 各维度得分和原始数据
+        
+        Raises:
+            DataNotAvailableError: 当日期不是交易日、数据不可用时
         """
+        today_str = datetime.now().strftime('%Y%m%d')
+        is_previous_day = False
+        actual_trade_date = trade_date
+        
+        # 检查是否为交易日
+        if not self.is_trading_day(trade_date):
+            raise DataNotAvailableError(f"日期 {trade_date} 不是交易日，无法计算市场温度")
+        
+        # 检查是否在交易时间内（9:30-15:00），如果是当日则自动切换到前一交易日
+        if trade_date == today_str and self._is_within_trading_hours():
+            prev_date = self.get_prev_trade_date(trade_date)
+            if prev_date:
+                logger.info(f"交易期间，自动切换到前一交易日: {trade_date} -> {prev_date}")
+                actual_trade_date = prev_date
+                is_previous_day = True
+            else:
+                raise DataNotAvailableError("无法获取前一交易日数据，请稍后再查询")
+        
         # 尝试从缓存加载
         if use_cache:
             from trading.market_temperature_dao import MarketTemperatureDAO
             dao = MarketTemperatureDAO()
-            cached = dao.query_by_date(trade_date)
+            cached = dao.query_by_date(actual_trade_date)
             if cached:
-                logger.info(f"使用缓存的市场温度数据: {trade_date}")
+                logger.info(f"使用缓存的市场温度数据: {actual_trade_date}")
+                # 更新返回信息
+                cached['trade_date'] = trade_date  # 请求的日期
+                cached['data_date'] = actual_trade_date  # 数据实际日期
+                cached['is_previous_day'] = is_previous_day  # 是否为前一交易日数据
+                if is_previous_day:
+                    cached['message'] = f"当前为交易时间，温度数据为前一交易日({actual_trade_date})"
                 return cached
         
-        # 获取四个维度的数据
-        up_down_ratio_data = self.get_up_down_ratio_data(trade_date)
-        limit_down_data = self.get_limit_down_data(trade_date)
-        limit_up_performance_data = self.get_limit_up_performance_data(trade_date)
-        volume_data = self.get_volume_data(trade_date)
+        # 获取四个维度的数据（不再使用模拟数据）
+        up_down_ratio_data = self.get_up_down_ratio_data(actual_trade_date)
+        limit_down_data = self.get_limit_down_data(actual_trade_date)
+        limit_up_performance_data = self.get_limit_up_performance_data(actual_trade_date)
+        volume_data = self.get_volume_data(actual_trade_date)
+        
+        # 验证数据完整性
+        if up_down_ratio_data.get('up_count') is None or up_down_ratio_data.get('down_count') is None:
+            raise DataNotAvailableError(f"涨跌家数数据不可用，日期: {actual_trade_date}")
+        if limit_down_data.get('limit_down_count') is None:
+            raise DataNotAvailableError(f"跌停家数数据不可用，日期: {actual_trade_date}")
+        if volume_data.get('total_volume') is None:
+            raise DataNotAvailableError(f"成交额数据不可用，日期: {actual_trade_date}")
         
         # 计算各维度得分
         up_down_ratio_score = self.get_up_down_ratio_score(up_down_ratio_data)
@@ -100,7 +150,9 @@ class MarketTemperature:
         status, position_ratio, action = self.get_status_from_temperature(temperature)
         
         result = {
-            'trade_date': trade_date,
+            'trade_date': trade_date,  # 请求的交易日期
+            'data_date': actual_trade_date,  # 数据实际日期
+            'is_previous_day': is_previous_day,  # 是否为前一交易日数据
             'temperature': round(temperature, 1),
             'status': status,
             'position_ratio': position_ratio,
@@ -117,228 +169,314 @@ class MarketTemperature:
             'volume_ma5_ratio': volume_data.get('volume_ma5_ratio')
         }
         
+        # 添加提示信息
+        if is_previous_day:
+            result['message'] = f"当前为交易时间，温度数据为前一交易日({actual_trade_date})"
+        
         # 保存到数据库
         if use_cache:
             from trading.market_temperature_dao import MarketTemperatureDAO
             dao = MarketTemperatureDAO()
-            dao.save(result)
+            # 保存时使用实际交易日期作为主键
+            save_data = result.copy()
+            save_data['trade_date'] = actual_trade_date
+            dao.save(save_data)
         
         return result
+    
+    def is_trading_day(self, trade_date: str) -> bool:
+        """
+        判断指定日期是否为交易日
+        
+        Args:
+            trade_date: 交易日期（YYYYMMDD格式）
+        
+        Returns:
+            是否为交易日
+        """
+        try:
+            if self.tushare_pro:
+                # 使用tushare的交易日历接口
+                df = self.tushare_pro.trade_cal(
+                    start_date=trade_date,
+                    end_date=trade_date,
+                    is_open='1'
+                )
+                if df is not None and not df.empty:
+                    return len(df) > 0
+            return False
+        except Exception as e:
+            logger.warning(f"检查交易日失败: {e}")
+            return False
+    
+    def _is_within_trading_hours(self) -> bool:
+        """
+        判断当前是否在交易时间内 (9:30 - 15:00)
+        
+        Returns:
+            是否在交易时间内
+        """
+        now = datetime.now()
+        current_hour = now.hour
+        current_minute = now.minute
+        current_time_minutes = current_hour * 60 + current_minute
+        
+        # 交易时间：9:30 (570分钟) - 15:00 (900分钟)
+        trading_start = 9 * 60 + 30  # 570
+        trading_end = 15 * 60         # 900
+        
+        return trading_start <= current_time_minutes < trading_end
     
     def get_up_down_ratio_data(self, trade_date: str) -> Dict:
         """
         获取涨跌家数数据
         
         Args:
-            trade_date: 交易日期
+            trade_date: 交易日期（YYYYMMDD格式）
         
         Returns:
             涨跌数据字典，包含上涨家数、下跌家数、涨跌比
+        
+        Raises:
+            DataNotAvailableError: 当数据不可用时
         """
         try:
             if not self.tushare_pro:
-                return self._get_mock_up_down_data(trade_date)
+                raise DataNotAvailableError("Tushare Pro未初始化，无法获取涨跌家数数据")
             
-            # 格式转换
-            date_fmt = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-            
-            # 使用daily_basic获取涨跌停家数
-            df = self.tushare_pro.daily_basic(ts_code='', trade_date=date_fmt)
+            # 使用daily接口获取当日所有股票行情
+            df = self.tushare_pro.daily(trade_date=trade_date)
             
             if df is None or df.empty:
-                return self._get_mock_up_down_data(trade_date)
+                raise DataNotAvailableError(f"涨跌家数数据为空，日期: {trade_date}")
             
-            # 计算涨跌家数（基于close涨跌幅）
+            # 计算涨跌家数（基于涨跌幅 pct_chg）
             up_count = len(df[df['pct_chg'] > 0])
             down_count = len(df[df['pct_chg'] < 0])
+            
+            logger.info(f"涨跌家数数据: 涨={up_count}, 跌={down_count}, 日期={trade_date}")
             
             return {
                 'up_count': up_count,
                 'down_count': down_count
             }
+        except DataNotAvailableError:
+            raise
         except Exception as e:
-            logger.warning(f"获取涨跌家数数据失败，使用模拟数据: {e}")
-            return self._get_mock_up_down_data(trade_date)
-    
-    def _get_mock_up_down_data(self, trade_date: str) -> Dict:
-        """生成模拟涨跌数据（用于测试）"""
-        import random
-        total = 4500
-        up_count = int(total * random.uniform(0.3, 0.7))
-        return {
-            'up_count': up_count,
-            'down_count': total - up_count
-        }
+            logger.error(f"获取涨跌家数数据异常: {e}")
+            raise DataNotAvailableError(f"获取涨跌家数数据失败: {str(e)}")
     
     def get_limit_down_data(self, trade_date: str) -> Dict:
         """
         获取跌停家数数据
         
         Args:
-            trade_date: 交易日期
+            trade_date: 交易日期（YYYYMMDD格式）
         
         Returns:
             跌停数据字典，包含跌停家数
+        
+        Raises:
+            DataNotAvailableError: 当数据不可用时
         """
         try:
             if not self.tushare_pro:
-                return self._get_mock_limit_down_data(trade_date)
+                raise DataNotAvailableError("Tushare Pro未初始化，无法获取跌停家数数据")
             
-            # 格式转换
-            date_fmt = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-            
-            # 使用limit_list_d获取跌停数据
-            df = self.tushare_pro.limit_list_d(trade_date=date_fmt)
+            # 使用limit_list_d获取涨跌停数据
+            df = self.tushare_pro.limit_list_d(trade_date=trade_date, limit_type='D')
             
             if df is None or df.empty:
-                return self._get_mock_limit_down_data(trade_date)
+                # 如果没有跌停数据，返回0
+                logger.info(f"跌停家数数据: 0, 日期={trade_date}")
+                return {
+                    'limit_down_count': 0
+                }
             
             # 统计跌停家数
-            limit_down_count = len(df[df['limit_type'] == 'D'])
+            limit_down_count = len(df)
+            
+            logger.info(f"跌停家数数据: {limit_down_count}, 日期={trade_date}")
             
             return {
                 'limit_down_count': limit_down_count
             }
+        except DataNotAvailableError:
+            raise
         except Exception as e:
-            logger.warning(f"获取跌停家数数据失败，使用模拟数据: {e}")
-            return self._get_mock_limit_down_data(trade_date)
-    
-    def _get_mock_limit_down_data(self, trade_date: str) -> Dict:
-        """生成模拟跌停数据（用于测试）"""
-        import random
-        return {
-            'limit_down_count': int(random.uniform(0, 30))
-        }
+            logger.error(f"获取跌停家数数据异常: {e}")
+            raise DataNotAvailableError(f"获取跌停家数数据失败: {str(e)}")
     
     def get_limit_up_performance_data(self, trade_date: str) -> Dict:
         """
         获取昨日涨停股今日表现数据
         
         Args:
-            trade_date: 交易日期
+            trade_date: 交易日期（YYYYMMDD格式）
         
         Returns:
             涨停表现数据字典，包含昨日涨停股今日平均涨幅
+        
+        Raises:
+            DataNotAvailableError: 当数据不可用时
         """
         try:
             if not self.tushare_pro:
-                return self._get_mock_limit_up_performance_data(trade_date)
+                raise DataNotAvailableError("Tushare Pro未初始化，无法获取涨停表现数据")
             
             # 获取前一交易日
             prev_trade_date = self._get_prev_trade_date(trade_date)
             if not prev_trade_date:
-                return self._get_mock_limit_up_performance_data(trade_date)
-            
-            # 格式转换
-            prev_date_fmt = f"{prev_trade_date[:4]}-{prev_trade_date[4:6]}-{prev_trade_date[6:]}"
-            curr_date_fmt = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+                raise DataNotAvailableError(f"无法获取前一交易日，日期: {trade_date}")
             
             # 获取前一交易日涨停股
-            limit_up_df = self.tushare_pro.limit_list_d(trade_date=prev_date_fmt)
+            limit_up_df = self.tushare_pro.limit_list_d(trade_date=prev_trade_date, limit_type='U')
             
             if limit_up_df is None or limit_up_df.empty:
-                return self._get_mock_limit_up_performance_data(trade_date)
+                logger.warning(f"前一交易日无涨停股，日期: {prev_trade_date}")
+                return {
+                    'avg_change': 0,
+                    'stock_count': 0
+                }
             
             # 获取这些股票今日表现
-            limit_up_codes = limit_up_df[limit_up_df['limit_type'] == 'U']['ts_code'].tolist()
+            limit_up_codes = limit_up_df['ts_code'].tolist()[:50]  # 限制数量，防止超时
             
             if not limit_up_codes:
-                return self._get_mock_limit_up_performance_data(trade_date)
+                return {
+                    'avg_change': 0,
+                    'stock_count': 0
+                }
             
-            # 获取今日行情
-            curr_df = self.tushare_pro.daily(trade_date=curr_date_fmt)
-            if curr_df is None or curr_df.empty:
-                return self._get_mock_limit_up_performance_data(trade_date)
+            # 逐个获取涨停股今日表现
+            performances = []
+            for ts_code in limit_up_codes:
+                try:
+                    df = self.tushare_pro.daily(
+                        ts_code=ts_code,
+                        start_date=trade_date,
+                        end_date=trade_date
+                    )
+                    if df is not None and not df.empty:
+                        performances.append(df.iloc[0]['pct_chg'])
+                except:
+                    continue
             
-            # 计算涨停股今日平均涨幅
-            matched = curr_df[curr_df['ts_code'].isin(limit_up_codes)]
-            if matched.empty:
+            if not performances:
                 avg_change = 0
             else:
-                avg_change = matched['pct_chg'].mean()
+                avg_change = sum(performances) / len(performances)
+            
+            logger.info(f"涨停表现数据: 昨日涨停={len(limit_up_codes)}只, 今日均涨幅={avg_change:.2f}%, 日期={trade_date}")
             
             return {
                 'avg_change': round(avg_change, 2),
                 'stock_count': len(limit_up_codes)
             }
+        except DataNotAvailableError:
+            raise
         except Exception as e:
-            logger.warning(f"获取涨停表现数据失败，使用模拟数据: {e}")
-            return self._get_mock_limit_up_performance_data(trade_date)
-    
-    def _get_mock_limit_up_performance_data(self, trade_date: str) -> Dict:
-        """生成模拟涨停表现数据（用于测试）"""
-        import random
-        return {
-            'avg_change': round(random.uniform(-5, 8), 2),
-            'stock_count': int(random.uniform(30, 100))
-        }
+            logger.error(f"获取涨停表现数据异常: {e}")
+            raise DataNotAvailableError(f"获取涨停表现数据失败: {str(e)}")
     
     def get_volume_data(self, trade_date: str) -> Dict:
         """
         获取成交额数据
         
         Args:
-            trade_date: 交易日期
+            trade_date: 交易日期（YYYYMMDD格式）
         
         Returns:
             成交额数据字典，包含总成交额和相对位置
+        
+        Raises:
+            DataNotAvailableError: 当数据不可用时
         """
         try:
             if not self.tushare_pro:
-                return self._get_mock_volume_data(trade_date)
+                raise DataNotAvailableError("Tushare Pro未初始化，无法获取成交额数据")
             
-            # 格式转换
-            date_fmt = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-            
-            # 获取上证和深证的成交额
+            # 获取上证和深证的成交额（需要逐个获取再合并）
             total_volume = 0
             for index_code in ['000001.SH', '399001.SZ']:
-                df = self.tushare_pro.index_daily(ts_code=index_code, trade_date=date_fmt)
+                df = self.tushare_pro.index_daily(ts_code=index_code, trade_date=trade_date)
                 if df is not None and not df.empty:
                     # 成交额单位为千元，转换为亿元
                     total_volume += df['amount'].iloc[0] / 100000
             
             if total_volume == 0:
-                return self._get_mock_volume_data(trade_date)
+                raise DataNotAvailableError(f"成交额数据为空，日期: {trade_date}")
             
             # 计算5日平均
             ma5_volume = self._get_ma5_volume(trade_date)
             
+            if ma5_volume == 0:
+                raise DataNotAvailableError(f"5日平均成交额计算失败，日期: {trade_date}")
+            
+            logger.info(f"成交额数据: 总成交={total_volume:.2f}亿, 量能比={total_volume/ma5_volume:.2f}, 日期={trade_date}")
+            
             return {
                 'total_volume': round(total_volume, 2),
-                'volume_ma5_ratio': round(total_volume / ma5_volume, 2) if ma5_volume > 0 else 1.0
+                'volume_ma5_ratio': round(total_volume / ma5_volume, 2)
             }
+        except DataNotAvailableError:
+            raise
         except Exception as e:
-            logger.warning(f"获取成交额数据失败，使用模拟数据: {e}")
-            return self._get_mock_volume_data(trade_date)
+            logger.error(f"获取成交额数据异常: {e}")
+            raise DataNotAvailableError(f"获取成交额数据失败: {str(e)}")
     
     def _get_ma5_volume(self, trade_date: str) -> float:
-        """计算5日平均成交额"""
+        """
+        计算5日平均成交额
+        
+        Args:
+            trade_date: 交易日期（YYYYMMDD格式）
+        
+        Returns:
+            5日平均成交额（亿元）
+        
+        Raises:
+            DataNotAvailableError: 当数据不可用时
+        """
         try:
-            dates = self._get_trade_dates(trade_date, 6)
-            if len(dates) < 2:
-                return 10000  # 默认值
+            # 获取近期历史数据（需要足够计算5日均值）
+            start_date = self._date_minus_days(trade_date, 15)
             
-            volumes = []
-            for date in dates[:-1]:  # 不包含今日
-                date_fmt = f"{date[:4]}-{date[4:6]}-{date[6:]}"
-                for index_code in ['000001.SH', '399001.SZ']:
-                    df = self.tushare_pro.index_daily(ts_code=index_code, trade_date=date_fmt)
-                    if df is not None and not df.empty:
-                        volumes.append(df['amount'].iloc[0] / 100000)
+            # 逐个获取指数数据
+            all_data = []
+            for index_code in ['000001.SH', '399001.SZ']:
+                df = self.tushare_pro.index_daily(
+                    ts_code=index_code,
+                    start_date=start_date,
+                    end_date=trade_date
+                )
+                if df is not None and not df.empty:
+                    all_data.append(df)
             
-            return sum(volumes) / len(volumes) if volumes else 10000
-        except:
-            return 10000  # 默认值
-    
-    def _get_mock_volume_data(self, trade_date: str) -> Dict:
-        """生成模拟成交额数据（用于测试）"""
-        import random
-        base_volume = 10000  # 基础成交额1万亿
-        return {
-            'total_volume': round(base_volume * random.uniform(0.7, 1.3), 2),
-            'volume_ma5_ratio': round(random.uniform(0.7, 1.3), 2)
-        }
+            if not all_data:
+                raise DataNotAvailableError(f"历史成交额数据为空，日期: {trade_date}")
+            
+            # 合并数据
+            combined_df = pd.concat(all_data, ignore_index=True)
+            
+            # 按日期分组计算每日总成交额（成交额单位为千元，转换为亿元）
+            daily_volumes = combined_df.groupby('trade_date')['amount'].sum() / 100000
+            
+            # 按日期排序
+            daily_volumes = daily_volumes.sort_index()
+            
+            if len(daily_volumes) < 5:
+                raise DataNotAvailableError(f"历史成交额数据不足，日期: {trade_date}")
+            
+            # 计算5日平均（包含今日）
+            ma5 = daily_volumes.rolling(5).mean().iloc[-1]
+            
+            return ma5
+        except DataNotAvailableError:
+            raise
+        except Exception as e:
+            logger.error(f"计算5日平均成交额异常: {e}")
+            raise DataNotAvailableError(f"计算5日平均成交额失败: {str(e)}")
     
     def get_up_down_ratio_score(self, data: Dict) -> float:
         """
@@ -351,8 +489,11 @@ class MarketTemperature:
         - 涨跌比 0.3-0.8: 20分
         - 涨跌比 < 0.3: 0分
         """
-        up_count = data.get('up_count', 0)
-        down_count = data.get('down_count', 1)
+        up_count = data.get('up_count') or 0
+        down_count = data.get('down_count') or 0
+        
+        if up_count is None or down_count is None:
+            return 0
         
         if down_count == 0:
             return 100 if up_count > 0 else 50
@@ -381,7 +522,10 @@ class MarketTemperature:
         - 跌停 21-50家: 10分
         - 跌停 > 50家: 0分
         """
-        count = data.get('limit_down_count', 0)
+        count = data.get('limit_down_count') or 0
+        
+        if count is None:
+            return 0
         
         if count <= 2:
             return 100
@@ -405,7 +549,10 @@ class MarketTemperature:
         - 平均涨幅 -3-0%: 20分
         - 平均涨幅 < -3%: 0分
         """
-        avg_change = data.get('avg_change', 0)
+        avg_change = data.get('avg_change') or 0
+        
+        if avg_change is None:
+            return 50  # 无数据时给中间值
         
         if avg_change >= 5:
             return 100
@@ -429,7 +576,10 @@ class MarketTemperature:
         - 成交额/5日均值 0.7-0.9: 25分
         - 成交额/5日均值 < 0.7: 0分
         """
-        ratio = data.get('volume_ma5_ratio', 1.0)
+        ratio = data.get('volume_ma5_ratio') or 1.0
+        
+        if ratio is None:
+            return 50  # 无数据时给中间值
         
         if ratio >= 1.3:
             return 100
@@ -463,14 +613,13 @@ class MarketTemperature:
         获取前一交易日
         
         Args:
-            trade_date: 当前日期
+            trade_date: 当前日期（YYYYMMDD格式）
             days: 向前多少天
         
         Returns:
-            前一交易日期
+            前一交易日期，如果不存在返回None
         """
         try:
-            date = datetime.strptime(trade_date, '%Y%m%d')
             dates = self._get_trade_dates(trade_date, days + 5)
             
             # 找到当前日期在列表中的位置
@@ -481,19 +630,34 @@ class MarketTemperature:
                     return dates[idx - days]
             
             return None
-        except:
+        except DataNotAvailableError:
             return None
+    
+    def get_prev_trade_date(self, trade_date: str) -> Optional[str]:
+        """
+        获取前一交易日（公开方法，供外部调用）
+        
+        Args:
+            trade_date: 当前日期（YYYYMMDD格式）
+        
+        Returns:
+            前一交易日期，如果不存在返回None
+        """
+        return self._get_prev_trade_date(trade_date)
     
     def _get_trade_dates(self, trade_date: str, count: int) -> List[str]:
         """
         获取最近的交易日列表
         
         Args:
-            trade_date: 参考日期
+            trade_date: 参考日期（YYYYMMDD格式）
             count: 需要的天数
         
         Returns:
-            交易日列表
+            交易日列表（按日期升序排列）
+        
+        Raises:
+            DataNotAvailableError: 当无法获取交易日历时
         """
         try:
             if self.tushare_pro:
@@ -503,10 +667,16 @@ class MarketTemperature:
                     is_open='1'
                 )
                 if df is not None and not df.empty:
-                    return df['cal_date'].tolist()[-count:]
-            return [trade_date]  # 降级处理
-        except:
-            return [trade_date]
+                    # 按日期升序排列并返回最近的count个
+                    dates = df['cal_date'].tolist()
+                    dates_sorted = sorted(dates)  # 升序排列
+                    return dates_sorted[-count:] if len(dates_sorted) >= count else dates_sorted
+            raise DataNotAvailableError("无法获取交易日历数据")
+        except DataNotAvailableError:
+            raise
+        except Exception as e:
+            logger.error(f"获取交易日历异常: {e}")
+            raise DataNotAvailableError(f"获取交易日历失败: {str(e)}")
     
     def _date_minus_days(self, date_str: str, days: int) -> str:
         """日期减天数"""
