@@ -67,15 +67,16 @@ class MarketTemperature:
         """
         计算指定日期的市场温度
         
+        注意：只有在收盘后（15:00后）或数据已存在于数据库时才返回温度数据。
+        交易期间不会自动生成昨日数据，只返回已有数据。
+        
         Args:
             trade_date: 交易日期（YYYYMMDD格式）
             use_cache: 是否使用缓存，默认True
         
         Returns:
             市场温度数据字典，包含：
-            - trade_date: 请求的交易日期
-            - data_date: 数据对应的实际交易日（交易期间为前一交易日）
-            - is_previous_day: 是否为前一交易日数据
+            - trade_date: 交易日期
             - temperature: 综合温度值
             - status: 市场状态
             - position_ratio: 仓位系数
@@ -85,52 +86,32 @@ class MarketTemperature:
         Raises:
             DataNotAvailableError: 当日期不是交易日、数据不可用时
         """
-        today_str = datetime.now().strftime('%Y%m%d')
-        is_previous_day = False
-        actual_trade_date = trade_date
-        
         # 检查是否为交易日
         if not self.is_trading_day(trade_date):
             raise DataNotAvailableError(f"日期 {trade_date} 不是交易日，无法计算市场温度")
-        
-        # 检查是否在交易时间内（9:30-15:00），如果是当日则自动切换到前一交易日
-        if trade_date == today_str and self._is_within_trading_hours():
-            prev_date = self.get_prev_trade_date(trade_date)
-            if prev_date:
-                logger.info(f"交易期间，自动切换到前一交易日: {trade_date} -> {prev_date}")
-                actual_trade_date = prev_date
-                is_previous_day = True
-            else:
-                raise DataNotAvailableError("无法获取前一交易日数据，请稍后再查询")
         
         # 尝试从缓存加载
         if use_cache:
             from trading.market_temperature_dao import MarketTemperatureDAO
             dao = MarketTemperatureDAO()
-            cached = dao.query_by_date(actual_trade_date)
+            cached = dao.query_by_date(trade_date)
             if cached:
-                logger.info(f"使用缓存的市场温度数据: {actual_trade_date}")
-                # 更新返回信息
-                cached['trade_date'] = trade_date  # 请求的日期
-                cached['data_date'] = actual_trade_date  # 数据实际日期
-                cached['is_previous_day'] = is_previous_day  # 是否为前一交易日数据
-                if is_previous_day:
-                    cached['message'] = f"当前为交易时间，温度数据为前一交易日({actual_trade_date})"
+                logger.info(f"使用缓存的市场温度数据: {trade_date}")
                 return cached
         
         # 获取四个维度的数据（不再使用模拟数据）
-        up_down_ratio_data = self.get_up_down_ratio_data(actual_trade_date)
-        limit_down_data = self.get_limit_down_data(actual_trade_date)
-        limit_up_performance_data = self.get_limit_up_performance_data(actual_trade_date)
-        volume_data = self.get_volume_data(actual_trade_date)
+        up_down_ratio_data = self.get_up_down_ratio_data(trade_date)
+        limit_down_data = self.get_limit_down_data(trade_date)
+        limit_up_performance_data = self.get_limit_up_performance_data(trade_date)
+        volume_data = self.get_volume_data(trade_date)
         
         # 验证数据完整性
         if up_down_ratio_data.get('up_count') is None or up_down_ratio_data.get('down_count') is None:
-            raise DataNotAvailableError(f"涨跌家数数据不可用，日期: {actual_trade_date}")
+            raise DataNotAvailableError(f"涨跌家数数据不可用，日期: {trade_date}")
         if limit_down_data.get('limit_down_count') is None:
-            raise DataNotAvailableError(f"跌停家数数据不可用，日期: {actual_trade_date}")
+            raise DataNotAvailableError(f"跌停家数数据不可用，日期: {trade_date}")
         if volume_data.get('total_volume') is None:
-            raise DataNotAvailableError(f"成交额数据不可用，日期: {actual_trade_date}")
+            raise DataNotAvailableError(f"成交额数据不可用，日期: {trade_date}")
         
         # 计算各维度得分
         up_down_ratio_score = self.get_up_down_ratio_score(up_down_ratio_data)
@@ -150,9 +131,7 @@ class MarketTemperature:
         status, position_ratio, action = self.get_status_from_temperature(temperature)
         
         result = {
-            'trade_date': trade_date,  # 请求的交易日期
-            'data_date': actual_trade_date,  # 数据实际日期
-            'is_previous_day': is_previous_day,  # 是否为前一交易日数据
+            'trade_date': trade_date,
             'temperature': round(temperature, 1),
             'status': status,
             'position_ratio': position_ratio,
@@ -169,18 +148,11 @@ class MarketTemperature:
             'volume_ma5_ratio': volume_data.get('volume_ma5_ratio')
         }
         
-        # 添加提示信息
-        if is_previous_day:
-            result['message'] = f"当前为交易时间，温度数据为前一交易日({actual_trade_date})"
-        
         # 保存到数据库
         if use_cache:
             from trading.market_temperature_dao import MarketTemperatureDAO
             dao = MarketTemperatureDAO()
-            # 保存时使用实际交易日期作为主键
-            save_data = result.copy()
-            save_data['trade_date'] = actual_trade_date
-            dao.save(save_data)
+            dao.save(result)
         
         return result
     
@@ -208,24 +180,6 @@ class MarketTemperature:
         except Exception as e:
             logger.warning(f"检查交易日失败: {e}")
             return False
-    
-    def _is_within_trading_hours(self) -> bool:
-        """
-        判断当前是否在交易时间内 (9:30 - 15:00)
-        
-        Returns:
-            是否在交易时间内
-        """
-        now = datetime.now()
-        current_hour = now.hour
-        current_minute = now.minute
-        current_time_minutes = current_hour * 60 + current_minute
-        
-        # 交易时间：9:30 (570分钟) - 15:00 (900分钟)
-        trading_start = 9 * 60 + 30  # 570
-        trading_end = 15 * 60         # 900
-        
-        return trading_start <= current_time_minutes < trading_end
     
     def get_up_down_ratio_data(self, trade_date: str) -> Dict:
         """

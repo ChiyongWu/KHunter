@@ -2786,13 +2786,13 @@ def get_market_temperature_trend():
 @app.route('/api/market-temperature/position-ratio', methods=['GET'])
 def get_market_temperature_position_ratio():
     """
-    获取指定日期的仓位系数（交易期间自动切换到前一交易日）
+    获取指定日期的仓位系数
     
     请求参数：
         trade_date: 交易日期（YYYYMMDD格式），可选，默认为今日
     
     返回：
-        仓位系数数据（包含data_date标识数据实际日期）
+        仓位系数数据
     """
     try:
         trade_date = request.args.get('trade_date')
@@ -2802,7 +2802,7 @@ def get_market_temperature_position_ratio():
             from datetime import date
             trade_date = date.today().strftime('%Y%m%d')
         
-        # 使用MarketTemperature计算，会自动处理交易期间切换到前一交易日
+        # 获取温度数据（只返回已有数据，不会自动生成）
         from utils.market_temperature import MarketTemperature, DataNotAvailableError
         mt = MarketTemperature()
         result = mt.calculate(trade_date, use_cache=True)
@@ -2810,14 +2810,11 @@ def get_market_temperature_position_ratio():
         return jsonify({
             'success': True,
             'data': clean_data_for_json({
-                'trade_date': result.get('trade_date'),  # 请求的日期
-                'data_date': result.get('data_date'),  # 数据实际日期
-                'is_previous_day': result.get('is_previous_day', False),  # 是否为前一交易日数据
+                'trade_date': result.get('trade_date'),
                 'position_ratio': result.get('position_ratio'),
                 'temperature': result.get('temperature'),
                 'status': result.get('status'),
-                'action': result.get('action'),
-                'message': result.get('message')  # 提示信息
+                'action': result.get('action')
             })
         })
     except DataNotAvailableError as e:

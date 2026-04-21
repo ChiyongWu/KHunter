@@ -62,16 +62,13 @@ function updateTemperatureBadge(data) {
     // 有温度数据时显示徽章
     badge.style.display = 'flex';
     
-    // 更新日期显示（使用data_date格式化）
-    if (badgeDate) {
-        const dateStr = data.data_date || data.trade_date;
-        if (dateStr) {
-            // 格式化为 YYYY-MM-DD
-            const formatted = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
-            badgeDate.textContent = formatted;
-        } else {
-            badgeDate.textContent = '--';
-        }
+    // 更新日期显示
+    if (badgeDate && data.trade_date) {
+        // 格式化为 YYYY-MM-DD
+        const formatted = `${data.trade_date.slice(0,4)}-${data.trade_date.slice(4,6)}-${data.trade_date.slice(6,8)}`;
+        badgeDate.textContent = formatted;
+    } else {
+        badgeDate.textContent = '--';
     }
     
     // 更新温度值
@@ -128,30 +125,20 @@ export async function showTemperatureDetail() {
     
     const data = marketTempCache;
     
-    // 创建弹窗内容
     // 格式化日期显示
     const formatDate = (dateStr) => {
         if (!dateStr) return '--';
         return `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
     };
     
-    // 判断是否显示提示信息
-    const showPreviousDayTip = data.is_previous_day || false;
-    const dateLabel = data.data_date ? formatDate(data.data_date) : formatDate(data.trade_date);
-    const requestDateLabel = data.trade_date ? formatDate(data.trade_date) : '';
+    const dateLabel = data.trade_date ? formatDate(data.trade_date) : '--';
     
     const content = `
         <div style="padding: 20px; min-width: 400px;">
             <!-- 当前状态头部 -->
             <div style="text-align: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid #e5e7eb;">
-                ${showPreviousDayTip ? `
-                <div style="font-size: 12px; color: #f59e0b; margin-bottom: 8px; padding: 4px 8px; background: #fef3c7; border-radius: 4px; display: inline-block;">
-                    ⚠️ ${data.message || '交易期间，显示前一日数据'}
-                </div>
-                ` : ''}
                 <div style="font-size: 14px; color: #6b7280; margin-bottom: 8px;">
                     ${dateLabel} 市场温度
-                    ${requestDateLabel !== dateLabel ? `<span style="font-size: 12px;">（查询: ${requestDateLabel}）</span>` : ''}
                 </div>
                 <div style="font-size: 48px; font-weight: bold; color: ${getTempColor(data.temperature)};">
                     ${data.temperature !== null ? data.temperature.toFixed(1) : '--'}°
