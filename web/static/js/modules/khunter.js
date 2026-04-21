@@ -189,7 +189,7 @@ function showPlanModal(planData) {
     document.getElementById('modal-stock-count').textContent = `${planData.total_count} 只`;
     
     // 3. 显示温度建议区域
-    displayTemperatureSuggestion(planData.temperature_info);
+    displayTemperatureSuggestion(planData.temperature_info, planData.temp_constraints);
     
     // 4. 更新表格数据
     const tbody = document.getElementById('plan-tbody');
@@ -198,34 +198,18 @@ function showPlanModal(planData) {
     if (planData.plans && planData.plans.length > 0) {
         planData.plans.forEach((plan, index) => {
             const row = document.createElement('tr');
-            
-            // 根据是否有备注添加样式
-            const isConstrained = plan.remark && plan.remark.includes('约束');
-            const rowStyle = isConstrained ? 'background-color: #fef3c7;' : '';
-            
             row.innerHTML = `
-                <td style="${rowStyle}">${plan.rank || (index + 1)}</td>
-                <td style="${rowStyle}">${plan.stock_code}</td>
-                <td style="${rowStyle}">${plan.stock_name}</td>
-                <td style="${rowStyle}">${plan.support_level.toFixed(2)}</td>
-                <td style="${rowStyle}">${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
-                <td style="${rowStyle}">${plan.position_ratio}%</td>
-                <td style="${rowStyle}">${plan.stop_loss_price.toFixed(2)}</td>
-                <td style="${rowStyle}">${plan.take_profit_price.toFixed(2)}</td>
-                <td style="${rowStyle}">${plan.hold_days}天</td>
+                <td>${plan.rank || (index + 1)}</td>
+                <td>${plan.stock_code}</td>
+                <td>${plan.stock_name}</td>
+                <td>${plan.support_level.toFixed(2)}</td>
+                <td>${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
+                <td>${plan.position_ratio}%</td>
+                <td>${plan.stop_loss_price.toFixed(2)}</td>
+                <td>${plan.take_profit_price.toFixed(2)}</td>
+                <td>${plan.hold_days}天</td>
             `;
             tbody.appendChild(row);
-            
-            // 如果有备注，添加备注行
-            if (plan.remark) {
-                const remarkRow = document.createElement('tr');
-                remarkRow.innerHTML = `
-                    <td colspan="9" style="background-color: #fef3c7; padding: 6px 12px; font-size: 12px; color: #92400e;">
-                        💡 ${plan.remark}
-                    </td>
-                `;
-                tbody.appendChild(remarkRow);
-            }
         });
     } else {
         tbody.innerHTML = '<tr><td colspan="9" class="placeholder">暂无交易计划数据</td></tr>';
@@ -238,8 +222,9 @@ function showPlanModal(planData) {
 /**
  * 显示温度建议
  * @param {Object} tempInfo - 温度信息
+ * @param {Object} tempConstraints - 温度约束建议（仅供参考）
  */
-function displayTemperatureSuggestion(tempInfo) {
+function displayTemperatureSuggestion(tempInfo, tempConstraints) {
     // 查找或创建温度建议容器
     let tempContainer = document.getElementById('temp-suggestion-container');
     if (!tempContainer) {
@@ -277,6 +262,23 @@ function displayTemperatureSuggestion(tempInfo) {
     
     const tempDisplay = temp !== null ? `${temp.toFixed(1)}°` : '--';
     
+    // 温度约束建议（仅供参考）
+    let constraintHtml = '';
+    if (tempConstraints && temp !== null) {
+        const maxStocks = tempConstraints.max_stocks;
+        const positionRatio = tempConstraints.position_ratio;
+        const positionPct = Math.round(positionRatio * 100);
+        
+        if (temp < 80) {
+            constraintHtml = `
+                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed ${borderColor}; font-size: 12px;">
+                    💡 仅供参考：建议买入不超过 <strong>${maxStocks === 999 ? '无限制' : maxStocks + '只'}</strong>，
+                    建议仓位 <strong>${positionPct}%</strong>
+                </div>
+            `;
+        }
+    }
+    
     tempContainer.innerHTML = `
         <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: ${bgColor}; border-left: 4px solid ${borderColor}; border-radius: 6px;">
             <div style="text-align: center; min-width: 60px;">
@@ -287,6 +289,7 @@ function displayTemperatureSuggestion(tempInfo) {
             <div style="flex: 1; border-left: 1px solid ${borderColor}; padding-left: 12px;">
                 <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">📊 操作建议</div>
                 <div style="font-size: 13px; color: ${textColor}; line-height: 1.5;">${suggestion}</div>
+                ${constraintHtml}
             </div>
         </div>
     `;

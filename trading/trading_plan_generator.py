@@ -45,18 +45,13 @@ class TradingPlanGenerator:
         plan_date = self._get_next_trading_date(hunting_date)
         hunting_results = self._get_hunting_results(hunting_date)
         
-        # 根据温度约束调整交易计划
-        max_stocks, adjusted_position = self._get_temp_constraints(temperature_info)
+        # 获取温度约束建议（仅供参考，不限制数据）
+        temp_constraints = self._get_temp_constraints(temperature_info)
         
-        # 生成交易计划
+        # 生成交易计划（不改变数据，只添加建议信息）
         plans = []
-        for idx, stock_data in enumerate(hunting_results):
-            # 应用温度约束
-            if idx >= max_stocks:
-                # 超出数量限制，标记为待观察
-                plan = self._generate_plan_for_stock(stock_data, plan_date, hunting_date, is_constrained=True)
-            else:
-                plan = self._generate_plan_for_stock(stock_data, plan_date, hunting_date, is_constrained=False)
+        for stock_data in hunting_results:
+            plan = self._generate_plan_for_stock(stock_data, plan_date, hunting_date)
             plans.append(plan)
         
         return {
@@ -64,7 +59,8 @@ class TradingPlanGenerator:
             'hunting_date': hunting_date,
             'total_count': len(plans),
             'plans': plans,
-            'temperature_info': temperature_info
+            'temperature_info': temperature_info,
+            'temp_constraints': temp_constraints  # 温度约束建议（仅供参考）
         }
 
     def _get_market_temperature(self, hunting_date: str) -> Dict[str, Any]:
@@ -213,8 +209,7 @@ class TradingPlanGenerator:
         self,
         stock_data: Dict[str, Any],
         plan_date: str,
-        hunting_date: str,
-        is_constrained: bool = False
+        hunting_date: str
     ) -> Dict[str, Any]:
         """
         为单只股票生成交易计划
@@ -223,21 +218,12 @@ class TradingPlanGenerator:
             stock_data: 股票数据
             plan_date: 计划日期
             hunting_date: 狩猎日期
-            is_constrained: 是否被温度约束限制
 
         返回：
             Dict: 交易计划
         """
         support_level = float(stock_data.get('support_level', 0))
         buy_plan = self._calculate_buy_plan(support_level)
-        
-        # 根据是否被约束调整仓位
-        position_ratio = self.DEFAULT_POSITION_RATIO
-        remark = ''
-        
-        if is_constrained:
-            remark = '⚠️ 受市场温度约束，建议优先选择排名靠前的标的'
-            position_ratio = max(1, int(self.DEFAULT_POSITION_RATIO * 0.5))  # 降低到最低
         
         return {
             'plan_date': plan_date,
@@ -246,12 +232,12 @@ class TradingPlanGenerator:
             'stock_name': stock_data.get('stock_name', ''),
             'buy_lower_price': buy_plan['buy_lower_price'],
             'buy_upper_price': buy_plan['buy_upper_price'],
-            'position_ratio': position_ratio,
+            'position_ratio': self.DEFAULT_POSITION_RATIO,
             'support_level': support_level,
             'stop_loss_price': self._calculate_stop_loss(support_level),
             'take_profit_price': self._calculate_take_profit(support_level),
             'hold_days': self.DEFAULT_HOLD_DAYS,
-            'remark': remark,
+            'remark': '',
             'rank': stock_data.get('rank', 0)
         }
 
