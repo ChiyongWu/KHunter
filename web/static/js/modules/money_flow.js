@@ -116,7 +116,6 @@ function renderMoneyFlowResults(results, params) {
                         <th>10日大单(万)</th>
                         <th>日均净流入(万)</th>
                         <th>最新涨跌幅</th>
-                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
