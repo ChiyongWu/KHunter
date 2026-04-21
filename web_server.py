@@ -2832,6 +2832,53 @@ def get_market_temperature_position_ratio():
         })
 
 
+@app.route('/api/money-flow/select', methods=['POST'])
+def money_flow_select():
+    """
+    持续资金流入选股
+    
+    请求参数（JSON）：
+        days: 连续天数，默认10
+        min_net_amount: 最小日均净流入(万元)，默认0
+        end_date: 结束日期（YYYYMMDD），默认今日
+    
+    返回：
+        选股结果列表
+    """
+    try:
+        data = request.json or {}
+        days = data.get('days', 10)
+        min_net_amount = data.get('min_net_amount', 0)
+        end_date = data.get('end_date')
+        
+        logger.info(f"执行资金流向选股: days={days}, min_net_amount={min_net_amount}, end_date={end_date}")
+        
+        from trading.money_flow_dao import MoneyFlowDAO
+        dao = MoneyFlowDAO()
+        results = dao.select_continuous_inflow_stocks(
+            end_date=end_date,
+            days=days,
+            min_net_amount=min_net_amount
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': results,
+            'total': len(results),
+            'params': {
+                'days': days,
+                'min_net_amount': min_net_amount
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"资金流向选股失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
 @app.route('/api/backtest/constraints', methods=['GET'])
 def get_backtest_constraints():
     """
