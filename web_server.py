@@ -620,8 +620,43 @@ def get_stock_detail(code):
     try:
         # 从数据库读取股票数据
         df = db_manager.read_stock(code)
+        
+        # 如果数据库没有数据，尝试从Tushare实时获取
         if df.empty:
-            return jsonify({'success': False, 'error': '股票不存在'})
+            logger.info(f"数据库中无 {code} 数据，尝试从Tushare获取")
+            try:
+                import tushare as ts
+                pro = ts.pro_api()
+                # 转换代码格式：000001 -> 000001.SZ, 600000 -> 600000.SH
+                if not code.endswith(('.SH', '.SZ')):
+                    if code.startswith('6'):
+                        code_fmt = f"{code}.SH"
+                    else:
+                        code_fmt = f"{code}.SZ"
+                else:
+                    code_fmt = code
+                
+                # 获取最近400个交易日的数据
+                end_date = datetime.now().strftime('%Y%m%d')
+                start_date = (datetime.now() - timedelta(days=400)).strftime('%Y%m%d')
+                
+                df = pro.daily(ts_code=code_fmt, start_date=start_date, end_date=end_date)
+                
+                if df is not None and not df.empty:
+                    # 转换列名以匹配数据库格式
+                    df = df.rename(columns={
+                        'trade_date': 'date', 'vol': 'volume', 'pct_chg': 'pct_change'
+                    })
+                    # 将日期字符串转换为datetime
+                    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+                    df = df.sort_values('date')
+                    df = df.reset_index(drop=True)
+                    logger.info(f"从Tushare获取 {code} 数据成功，共 {len(df)} 条")
+                else:
+                    return jsonify({'success': False, 'error': '股票不存在或数据获取失败'})
+            except Exception as e:
+                logger.error(f"从Tushare获取 {code} 数据失败: {e}")
+                return jsonify({'success': False, 'error': '股票不存在'})
         
         # 计算KDJ指标
         from utils.technical import KDJ
@@ -646,6 +681,7 @@ def get_stock_detail(code):
         
         return jsonify({'success': True, 'code': code, 'data': data})
     except Exception as e:
+        logger.error(f"获取股票详情失败: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 
