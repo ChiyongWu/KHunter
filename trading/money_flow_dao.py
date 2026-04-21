@@ -158,12 +158,14 @@ class MoneyFlowDAO:
 
         # 获取详细数据并计算真实连续天数
         results = []
-        latest_date = trade_dates[-1]
+        # latest_date应该是最近日期（列表第一个），而非最远日期（列表最后一个）
+        latest_date = trade_dates[-1]  # 这是日期范围的结束端点
+        start_date = trade_dates[0]    # 这是日期范围的起始端点（最近日期）
 
         for ts_code in common_stocks:
             try:
-                # 获取这只股票的详细数据
-                df = self.get_stock_money_flow(ts_code, trade_dates[0], latest_date)
+                # 获取这只股票的详细数据（从最早到最近）
+                df = self.get_stock_money_flow(ts_code, latest_date, start_date)
                 if df.empty:
                     continue
 
@@ -172,10 +174,8 @@ class MoneyFlowDAO:
                 buy_lg_amount_10d = df['buy_lg_amount'].sum()
                 avg_net_amount = net_amount_10d / len(df) if len(df) > 0 else 0
 
-                # 获取最新一条数据
-                latest_row = df[df['trade_date'] == latest_date]
-                if latest_row.empty:
-                    latest_row = df.iloc[-1:]
+                # 获取最新一条数据（升序排列后的最后一条，即最近日期）
+                latest_row = df.iloc[-1:]
 
                 latest_net_amount = latest_row.iloc[0]['net_amount']
                 latest_pct_change = latest_row.iloc[0]['pct_change']
