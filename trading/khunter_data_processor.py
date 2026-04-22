@@ -99,8 +99,8 @@ class KHunterDataProcessor:
             actual_hunting_date = self._determine_hunting_date(hunting_date)
             logger.info(f"确定狩猎日期: {hunting_date} -> {actual_hunting_date}")
             
-            # 2. 检查缓存（暂不按timing_strategy过滤缓存，返回该日期所有结果）
-            cached_results = self._check_cache(actual_hunting_date)
+            # 2. 检查缓存（按timing_strategy过滤）
+            cached_results = self._check_cache(actual_hunting_date, timing_strategy)
             if cached_results is not None:
                 calculation_time = time.time() - start_time
                 logger.info(f"从缓存加载结果: {len(cached_results)} 条记录，耗时 {calculation_time:.2f}s")
@@ -661,40 +661,43 @@ class KHunterDataProcessor:
             logger.error(f"获取当前价格失败: {stock_code} - {str(e)}")
             return None
     
-    def _check_cache(self, hunting_date: str) -> Optional[List[Dict]]:
+    def _check_cache(self, hunting_date: str, timing_strategy: str = 'support') -> Optional[List[Dict]]:
         """
         检查缓存
         
         参数：
             hunting_date: 狩猎日期
+            timing_strategy: 择时策略名称
         
         返回：
             List: 缓存的结果列表，如果没有缓存返回 None
         """
         # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，默认support
         try:
             # 1. 查询 KHunter 表中是否存在该狩猎日的记录
             # 注意：使用 score_date 作为选入日期显示
+            # 根据择时策略过滤缓存数据
             sql = """
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
                    buy_range, strategy_name, score, score_date,
                    timing_strategy, timing_signal
             FROM khunter
-            WHERE hunting_date = ?
+            WHERE hunting_date = ? AND timing_strategy = ?
             ORDER BY score DESC
             """
             
             # 2. 执行查询
-            results = self.db_manager.query(sql, (hunting_date,))
+            results = self.db_manager.query(sql, (hunting_date, timing_strategy))
             
             # 3. 如果有缓存，返回结果
             if results:
-                logger.debug(f"缓存命中: {hunting_date}，{len(results)} 条记录")
+                logger.debug(f"缓存命中: {hunting_date}，{timing_strategy}，{len(results)} 条记录")
                 return results
             
             # 4. 如果没有缓存，返回 None
-            logger.debug(f"缓存未命中: {hunting_date}")
+            logger.debug(f"缓存未命中: {hunting_date}，{timing_strategy}")
             return None
         
         except Exception as e:

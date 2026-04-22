@@ -442,10 +442,10 @@ function bindTableData(results) {
     
     // 3. 择时策略中文名称映射
     const timingStrategyNames = {
-        'support': '支撑位策略',
         'turtle': '海龟策略',
         'rsi': 'RSI策略',
-        'bollinger': '布林带策略'
+        'bollinger': '布林带策略',
+        'support': '支撑位策略'
     };
     
     // 4. 遍历结果，创建表格行
