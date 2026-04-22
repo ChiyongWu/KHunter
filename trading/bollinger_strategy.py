@@ -60,6 +60,9 @@ class BollingerStrategy(TimingStrategy):
             df: 股票数据
             position: 持仓信息
             cash: 可用资金
+            use_prev_day_signal: 是否使用前一天信号（回测模式），默认True
+                - True: 使用T-1日指标判断信号（回测模式）
+                - False: 使用T日指标判断信号（狩猎场模式）
             
         Returns:
             择时结果
@@ -74,19 +77,30 @@ class BollingerStrategy(TimingStrategy):
         current_price = latest['close']
         trade_price = latest['open']  # 交易价格为当天开盘价
         
+        # 根据模式选择信号判断基准
+        if use_prev_day_signal and len(df) >= 2:
+            # 回测模式：使用T-1日指标判断信号
+            signal_bar = df.iloc[-2]
+        else:
+            # 狩猎场模式：使用T日指标判断信号
+            signal_bar = latest
+        
         # 计算支撑位和压力位
-        if pd.notna(latest['boll_lower']):
-            result.support_level = latest['boll_lower']
-        if pd.notna(latest['boll_upper']):
-            result.resistance_level = latest['boll_upper']
+        if pd.notna(signal_bar['boll_lower']):
+            result.support_level = signal_bar['boll_lower']
+        if pd.notna(signal_bar['boll_upper']):
+            result.resistance_level = signal_bar['boll_upper']
         
         # 买入条件：价格触及或跌破下轨
-        if pd.notna(latest['boll_lower']) and current_price <= latest['boll_lower']:
+        if pd.notna(signal_bar['boll_lower']) and current_price <= signal_bar['boll_lower']:
             result.is_buy = True
             # 信号强度：(下轨 - 价格) / 下轨
-            signal_strength = (latest['boll_lower'] - current_price) / latest['boll_lower']
+            signal_strength = (signal_bar['boll_lower'] - current_price) / signal_bar['boll_lower']
             result.signal_strength = min(abs(signal_strength), 1.0)
-            result.message = f"价格触及下轨 {latest['boll_lower']:.2f}，买入信号"
+            if use_prev_day_signal:
+                result.message = f"前一天价格触及下轨 {signal_bar['boll_lower']:.2f}，买入信号"
+            else:
+                result.message = f"价格触及下轨 {signal_bar['boll_lower']:.2f}，买入信号"
             result.trade_type = 'buy'
             # 计算买入数量：根据固定金额（资金限制由回测引擎处理）
             if self.use_fixed_amount:
@@ -99,18 +113,21 @@ class BollingerStrategy(TimingStrategy):
             result.buy_quantity = int(buy_amount / trade_price) // 100 * 100
         
         # 卖出条件：价格触及或突破上轨
-        if pd.notna(latest['boll_upper']) and current_price >= latest['boll_upper']:
+        if pd.notna(signal_bar['boll_upper']) and current_price >= signal_bar['boll_upper']:
             result.is_sell = True
             # 信号强度：(价格 - 上轨) / 上轨
-            signal_strength = (current_price - latest['boll_upper']) / latest['boll_upper']
+            signal_strength = (current_price - signal_bar['boll_upper']) / signal_bar['boll_upper']
             result.signal_strength = min(signal_strength, 1.0)
-            result.message = f"价格触及上轨 {latest['boll_upper']:.2f}，卖出信号"
+            if use_prev_day_signal:
+                result.message = f"前一天价格触及上轨 {signal_bar['boll_upper']:.2f}，卖出信号"
+            else:
+                result.message = f"价格触及上轨 {signal_bar['boll_upper']:.2f}，卖出信号"
             result.trade_type = 'sell'
             # 清仓卖出：不需要100的整数倍
             if position:
                 result.sell_quantity = position.get('quantity', 0)
         
-        # 填充指标值
+        # 填充指标值（始终用最新数据）
         result.indicators['boll_mid'] = latest['boll_mid'] if pd.notna(latest['boll_mid']) else 0
         result.indicators['boll_upper'] = latest['boll_upper'] if pd.notna(latest['boll_upper']) else 0
         result.indicators['boll_lower'] = latest['boll_lower'] if pd.notna(latest['boll_lower']) else 0

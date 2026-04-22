@@ -59,6 +59,9 @@ class RSIStrategy(TimingStrategy):
             df: 股票数据
             position: 持仓信息
             cash: 可用资金
+            use_prev_day_signal: 是否使用前一天信号（回测模式），默认True
+                - True: 使用T-1日RSI判断信号（回测模式）
+                - False: 使用T日RSI判断信号（狩猎场模式）
             
         Returns:
             择时结果
@@ -68,11 +71,22 @@ class RSIStrategy(TimingStrategy):
         # 计算RSI
         df = self.calculate_indicators(df)
         
-        # 获取最新RSI
+        # 获取最新数据
         latest = df.iloc[-1]
-        rsi = latest['rsi'] if pd.notna(latest['rsi']) else 50
+        
+        # 根据模式选择信号判断基准
+        if use_prev_day_signal and len(df) >= 2:
+            # 回测模式：使用T-1日RSI判断信号，T日开盘价交易
+            signal_bar = df.iloc[-2]
+            rsi = signal_bar['rsi'] if pd.notna(signal_bar['rsi']) else 50
+            trade_price = latest['open']  # 交易价格为T日开盘价
+        else:
+            # 狩猎场模式：使用T日RSI判断信号
+            signal_bar = latest
+            rsi = latest['rsi'] if pd.notna(latest['rsi']) else 50
+            trade_price = latest['open']
+        
         current_price = latest['close']
-        trade_price = latest['open']  # 交易价格为当天开盘价
         
         # 买入条件：RSI超卖
         if rsi < self.oversold:
@@ -80,7 +94,10 @@ class RSIStrategy(TimingStrategy):
             # 信号强度：(超卖阈值 - RSI) / 超卖阈值
             signal_strength = (self.oversold - rsi) / self.oversold
             result.signal_strength = min(signal_strength, 1.0)
-            result.message = f"RSI超卖 ({rsi:.1f} < {self.oversold})，买入信号"
+            if use_prev_day_signal:
+                result.message = f"前一天RSI超卖 ({rsi:.1f} < {self.oversold})，买入信号"
+            else:
+                result.message = f"RSI超卖 ({rsi:.1f} < {self.oversold})，买入信号"
             result.trade_type = 'buy'
             # 计算买入数量：根据固定金额（资金限制由回测引擎处理）
             if self.use_fixed_amount:
@@ -98,7 +115,10 @@ class RSIStrategy(TimingStrategy):
             # 信号强度：(RSI - 超买阈值) / (100 - 超买阈值)
             signal_strength = (rsi - self.overbought) / (100 - self.overbought)
             result.signal_strength = min(signal_strength, 1.0)
-            result.message = f"RSI超买 ({rsi:.1f} > {self.overbought})，卖出信号"
+            if use_prev_day_signal:
+                result.message = f"前一天RSI超买 ({rsi:.1f} > {self.overbought})，卖出信号"
+            else:
+                result.message = f"RSI超买 ({rsi:.1f} > {self.overbought})，卖出信号"
             result.trade_type = 'sell'
             # 清仓卖出：不需要100的整数倍
             if position:

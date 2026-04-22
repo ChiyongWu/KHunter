@@ -430,11 +430,8 @@ class KHunterDataProcessor:
             strategy = TimingStrategyFactory.create_strategy(timing_strategy_name, {})
             
             # 5. 调用策略获取择时结果
-            # 海龟策略需要特殊处理：狩猎场模式使用当天信号，回测模式使用前一天信号
-            if timing_strategy_name == 'turtle':
-                timing_result = strategy.get_timing_result(df_kline, None, None, use_prev_day_signal=False)
-            else:
-                timing_result = strategy.get_timing_result(df_kline, None, None)
+            # 狩猎场模式：使用当天信号判断（use_prev_day_signal=False）
+            timing_result = strategy.get_timing_result(df_kline, None, None, use_prev_day_signal=False)
             
             # 6. 判断是否发出买入信号
             if not timing_result.is_buy:
