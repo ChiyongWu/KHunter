@@ -89,14 +89,15 @@ class TurtleStrategy(TimingStrategy):
         # 卖出条件（仅基于指标的信号，止盈止损由回测引擎处理）
         if position:
             # 已持仓，判断卖出条件
-            # 日线系统：判断前一天是否跌破下线
+            # 日线系统：判断当天是否跌破下线（使用最新数据的前一根K线作为判断基准）
             if len(df) >= 2:
-                prev = df.iloc[-2]  # 前一天的数据
-                if pd.notna(prev['down']) and prev['low'] < prev['down']:
-                    # 前一天最低价跌破下线，清仓卖出
+                # 使用倒数第二根K线作为当天的判断基准（避免使用未来函数）
+                signal_bar = df.iloc[-2]  # 当天的信号判断基准
+                if pd.notna(signal_bar['down']) and signal_bar['low'] < signal_bar['down']:
+                    # 当天最低价跌破下线，清仓卖出
                     result.is_sell = True
                     result.signal_strength = 1.0
-                    result.message = f"前一天跌破下线 {prev['down']:.2f}，卖出信号"
+                    result.message = f"当天跌破下线 {signal_bar['down']:.2f}，卖出信号"
                     result.trade_type = 'sell'
                     # 清仓卖出：不需要100的整数倍
                     result.sell_quantity = position.get('quantity', 0)
@@ -104,17 +105,18 @@ class TurtleStrategy(TimingStrategy):
         # 买入条件（仅在无持仓且无卖出信号时执行）
         if not position and not result.is_sell:
             # 未持仓，判断买入条件
-            # 日线系统：判断前一天是否突破上线
+            # 日线系统：判断当天是否突破上线（使用最新数据的前一根K线作为判断基准）
             if len(df) >= 2:
-                prev = df.iloc[-2]  # 前一天的数据
-                if pd.notna(prev['up']) and prev['high'] > prev['up']:
-                    # 前一天最高价突破上线
+                # 使用倒数第二根K线作为当天的信号判断基准（避免使用未来函数）
+                signal_bar = df.iloc[-2]  # 当天的信号判断基准
+                if pd.notna(signal_bar['up']) and signal_bar['high'] > signal_bar['up']:
+                    # 当天最高价突破上线
                     buy_price = latest['open']  # 买入价格为当天开盘价
                     # 策略只负责给出信号，限价由回测引擎处理
                     result.is_buy = True
                     result.signal_strength = 1.0
-                    result.message = f"前一天突破上线 {prev['up']:.2f}，买入信号"
-                    result.support_level = prev['up'] * 0.95  # 支撑位为上线的95%
+                    result.message = f"当天突破上线 {signal_bar['up']:.2f}，买入信号"
+                    result.support_level = signal_bar['up'] * 0.95  # 支撑位为上线的95%
                     result.trade_type = 'buy'
                     # 计算买入数量：根据固定金额或仓位比例（不依赖可用资金，资金限制由回测引擎处理）
                     if self.use_fixed_amount:
