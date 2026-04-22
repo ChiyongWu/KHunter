@@ -1066,9 +1066,10 @@ def khunter_query():
     try:
         # 1. 获取查询参数
         hunting_date = request.args.get('hunting_date')
+        timing_strategy = request.args.get('timing_strategy')
         
         # 2. 调用 API 查询
-        result = khunter_api.query(hunting_date)
+        result = khunter_api.query(hunting_date, timing_strategy)
         
         # 3. 返回结果
         return jsonify(result), 200 if result.get('success') else 400
@@ -1104,9 +1105,10 @@ def khunter_check_cache():
     try:
         # 1. 获取查询参数
         hunting_date = request.args.get('hunting_date')
+        timing_strategy = request.args.get('timing_strategy')
         
         # 2. 调用 API 检查缓存
-        result = khunter_api.check_cache(hunting_date)
+        result = khunter_api.check_cache(hunting_date, timing_strategy)
         
         # 3. 返回结果
         return jsonify(result), 200 if result.get('success') else 400

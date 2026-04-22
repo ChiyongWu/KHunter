@@ -149,28 +149,32 @@ class KHunterAPI:
     
     def query(
         self,
-        hunting_date: str
+        hunting_date: str,
+        timing_strategy: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         查询狩猎场数据
         
         参数：
             hunting_date: 狩猎日期
+            timing_strategy: 择时策略名称（可选）
         
         返回：
             Dict: 标准化响应
         """
         # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，可选
         try:
             # 1. 验证参数
             self._validate_date(hunting_date)
             
             # 2. 调用 DAO 查询
-            logger.info(f"查询请求: {hunting_date}")
-            result = self.dao.query_by_date(hunting_date)
+            strategy_info = f" 策略={timing_strategy}" if timing_strategy else ""
+            logger.info(f"查询请求: {hunting_date}{strategy_info}")
+            result = self.dao.query_by_date(hunting_date, timing_strategy)
             
             # 3. 返回成功响应
-            logger.info(f"查询成功: {hunting_date} 返回 {len(result['results'])} 条记录")
+            logger.info(f"查询成功: {hunting_date}{strategy_info} 返回 {len(result['results'])} 条记录")
             return self._build_success_response(result, "查询成功")
         
         except ValueError as e:
@@ -183,30 +187,33 @@ class KHunterAPI:
             logger.error(f"查询失败: {str(e)}")
             return self._build_error_response(f"查询失败：{str(e)}")
     
-    def check_cache(self, hunting_date: str) -> Dict[str, Any]:
+    def check_cache(self, hunting_date: str, timing_strategy: Optional[str] = None) -> Dict[str, Any]:
         """
         检查缓存
         
         参数：
             hunting_date: 狩猎日期
+            timing_strategy: 择时策略名称（可选）
         
         返回：
             Dict: 标准化响应
         """
         # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，可选
         try:
             # 1. 验证参数
             self._validate_date(hunting_date)
             
             # 2. 检查缓存
-            logger.info(f"缓存检查请求: {hunting_date}")
-            has_cache = self.dao.check_cache(hunting_date)
+            strategy_info = f" 策略={timing_strategy}" if timing_strategy else ""
+            logger.info(f"缓存检查请求: {hunting_date}{strategy_info}")
+            has_cache = self.dao.check_cache(hunting_date, timing_strategy)
             
             # 3. 如果有缓存，获取记录数
             record_count = 0
             if has_cache:
                 # 4. 查询记录数
-                result = self.dao.query_by_date(hunting_date)
+                result = self.dao.query_by_date(hunting_date, timing_strategy)
                 record_count = result['total_count']
             
             # 5. 返回成功响应
@@ -216,7 +223,7 @@ class KHunterAPI:
                 'hunting_date': hunting_date
             }
             
-            logger.info(f"缓存检查完成: {hunting_date} - {'命中' if has_cache else '未命中'}")
+            logger.info(f"缓存检查完成: {hunting_date}{strategy_info} - {'命中' if has_cache else '未命中'}")
             return self._build_success_response(response_data, "检查成功")
         
         except ValueError as e:

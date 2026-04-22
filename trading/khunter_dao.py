@@ -161,13 +161,15 @@ class KHunterDAO:
     
     def query_by_date(
         self,
-        hunting_date: str
+        hunting_date: str,
+        timing_strategy: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         按日期查询
         
         参数：
             hunting_date: 狩猎日期
+            timing_strategy: 择时策略名称（可选，为None时不按策略过滤）
         
         返回：
             Dict: 查询结果
@@ -176,30 +178,50 @@ class KHunterDAO:
             Exception: 如果查询失败
         """
         # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，可选
         try:
-            # 1. 查询总记录数
-            sql_count = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ?"
-            result_count = self.db_manager.query_one(sql_count, (hunting_date,))
+            # 1. 构建查询条件
+            if timing_strategy:
+                # 按日期+策略查询
+                sql_count = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ? AND timing_strategy = ?"
+                result_count = self.db_manager.query_one(sql_count, (hunting_date, timing_strategy))
+                
+                sql = f"""
+                SELECT stock_code, stock_name, industry, sector,
+                       support_level, current_price, price_diff, price_diff_percent,
+                       buy_range, strategy_name, score_date, score,
+                       timing_strategy, timing_signal
+                FROM {self.TABLE_NAME}
+                WHERE hunting_date = ? AND timing_strategy = ?
+                ORDER BY score DESC
+                """
+                params = (hunting_date, timing_strategy)
+            else:
+                # 仅按日期查询（兼容旧逻辑）
+                sql_count = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ?"
+                result_count = self.db_manager.query_one(sql_count, (hunting_date,))
+                
+                sql = f"""
+                SELECT stock_code, stock_name, industry, sector,
+                       support_level, current_price, price_diff, price_diff_percent,
+                       buy_range, strategy_name, score_date, score,
+                       timing_strategy, timing_signal
+                FROM {self.TABLE_NAME}
+                WHERE hunting_date = ?
+                ORDER BY score DESC
+                """
+                params = (hunting_date,)
+            
+            # 2. 获取总数
             total_count = result_count['count'] if result_count else 0
             
-            # 2. 查询所有数据
-            # 注意：使用 score_date 作为选入日期显示
-            sql = f"""
-            SELECT stock_code, stock_name, industry, sector,
-                   support_level, current_price, price_diff, price_diff_percent,
-                   buy_range, strategy_name, score_date, score,
-                   timing_strategy, timing_signal
-            FROM {self.TABLE_NAME}
-            WHERE hunting_date = ?
-            ORDER BY score DESC
-            """
-            
             # 3. 执行查询
-            results = self.db_manager.query(sql, (hunting_date,))
+            results = self.db_manager.query(sql, params)
             
             # 4. 记录日志
+            strategy_info = f" 策略={timing_strategy}" if timing_strategy else ""
             logger.debug(
-                f"按日期查询: {hunting_date}，"
+                f"按日期查询: {hunting_date}{strategy_info}，"
                 f"总数 {total_count}，返回 {len(results)} 条"
             )
             
@@ -216,7 +238,8 @@ class KHunterDAO:
     def query_by_date_and_code(
         self,
         hunting_date: str,
-        stock_code: str
+        stock_code: str,
+        timing_strategy: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         按日期和股票代码查询
@@ -224,6 +247,7 @@ class KHunterDAO:
         参数：
             hunting_date: 狩猎日期
             stock_code: 股票代码
+            timing_strategy: 择时策略名称（可选，为None时不按策略过滤）
         
         返回：
             List: 查询结果列表
@@ -233,25 +257,39 @@ class KHunterDAO:
         """
         # hunting_date: 狩猎日期，类型str，必填
         # stock_code: 股票代码，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，可选
         try:
             # 1. 构建查询 SQL
-            # 注意：使用 score_date 作为选入日期显示
-            sql = f"""
-            SELECT stock_code, stock_name, industry, sector,
-                   support_level, current_price, price_diff, price_diff_percent,
-                   buy_range, strategy_name, score_date, score,
-                   timing_strategy, timing_signal
-            FROM {self.TABLE_NAME}
-            WHERE hunting_date = ? AND stock_code = ?
-            ORDER BY score DESC
-            """
+            if timing_strategy:
+                sql = f"""
+                SELECT stock_code, stock_name, industry, sector,
+                       support_level, current_price, price_diff, price_diff_percent,
+                       buy_range, strategy_name, score_date, score,
+                       timing_strategy, timing_signal
+                FROM {self.TABLE_NAME}
+                WHERE hunting_date = ? AND stock_code = ? AND timing_strategy = ?
+                ORDER BY score DESC
+                """
+                params = (hunting_date, stock_code, timing_strategy)
+            else:
+                sql = f"""
+                SELECT stock_code, stock_name, industry, sector,
+                       support_level, current_price, price_diff, price_diff_percent,
+                       buy_range, strategy_name, score_date, score,
+                       timing_strategy, timing_signal
+                FROM {self.TABLE_NAME}
+                WHERE hunting_date = ? AND stock_code = ?
+                ORDER BY score DESC
+                """
+                params = (hunting_date, stock_code)
             
             # 2. 执行查询
-            results = self.db_manager.query(sql, (hunting_date, stock_code))
+            results = self.db_manager.query(sql, params)
             
             # 3. 记录日志
+            strategy_info = f" 策略={timing_strategy}" if timing_strategy else ""
             logger.debug(
-                f"按日期和股票代码查询: {hunting_date} {stock_code}，"
+                f"按日期和股票代码查询: {hunting_date} {stock_code}{strategy_info}，"
                 f"返回 {len(results)} 条"
             )
             
@@ -261,12 +299,13 @@ class KHunterDAO:
             logger.error(f"按日期和股票代码查询失败: {str(e)}")
             raise
     
-    def check_cache(self, hunting_date: str) -> bool:
+    def check_cache(self, hunting_date: str, timing_strategy: Optional[str] = None) -> bool:
         """
         检查缓存
         
         参数：
             hunting_date: 狩猎日期
+            timing_strategy: 择时策略名称（可选，为None时不按策略过滤）
         
         返回：
             bool: 是否存在缓存
@@ -275,16 +314,22 @@ class KHunterDAO:
             Exception: 如果查询失败
         """
         # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy: 择时策略名称，类型str，可选
         try:
             # 1. 查询记录数
-            sql = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ?"
-            result = self.db_manager.query_one(sql, (hunting_date,))
+            if timing_strategy:
+                sql = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ? AND timing_strategy = ?"
+                result = self.db_manager.query_one(sql, (hunting_date, timing_strategy))
+            else:
+                sql = f"SELECT COUNT(*) as count FROM {self.TABLE_NAME} WHERE hunting_date = ?"
+                result = self.db_manager.query_one(sql, (hunting_date,))
             
             # 2. 判断是否存在缓存
             has_cache = result and result['count'] > 0
             
             # 3. 记录日志
-            logger.debug(f"检查缓存: {hunting_date} - {'命中' if has_cache else '未命中'}")
+            strategy_info = f" 策略={timing_strategy}" if timing_strategy else ""
+            logger.debug(f"检查缓存: {hunting_date}{strategy_info} - {'命中' if has_cache else '未命中'}")
             
             return has_cache
         
