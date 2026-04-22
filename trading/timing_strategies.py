@@ -83,13 +83,16 @@ class TimingStrategy(ABC):
         return 0.0
     
     @abstractmethod
-    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None) -> TimingResult:
+    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
         """获取择时结果
         
         Args:
             df: 股票数据
             position: 持仓信息
             cash: 可用资金
+            use_prev_day_signal: 是否使用前一天信号（回测模式），默认True
+                - True: 使用倒数第二根K线判断前一天是否突破
+                - False: 使用最新K线判断当天是否突破（狩猎场模式）
             
         Returns:
             择时结果

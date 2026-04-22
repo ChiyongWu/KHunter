@@ -52,7 +52,7 @@ class RSIStrategy(TimingStrategy):
         
         return result
     
-    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None) -> TimingResult:
+    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
         """获取RSI策略择时结果
         
         Args:
