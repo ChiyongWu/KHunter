@@ -26,7 +26,7 @@ class KHunterDAO:
     FIELDS = [
         'stock_code', 'stock_name', 'industry', 'sector',
         'hunting_date', 'strategy_name', 'support_level', 'current_price',
-        'price_diff', 'price_diff_percent', 'score', 'score_date', 'selection_record_id',
+        'price_diff', 'price_diff_percent', 'buy_range', 'score', 'score_date', 'selection_record_id',
         'timing_strategy', 'timing_signal'
     ]
     
@@ -187,7 +187,7 @@ class KHunterDAO:
             sql = f"""
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score_date, score,
+                   buy_range, strategy_name, score_date, score,
                    timing_strategy, timing_signal
             FROM {self.TABLE_NAME}
             WHERE hunting_date = ?
@@ -239,7 +239,7 @@ class KHunterDAO:
             sql = f"""
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score_date, score,
+                   buy_range, strategy_name, score_date, score,
                    timing_strategy, timing_signal
             FROM {self.TABLE_NAME}
             WHERE hunting_date = ? AND stock_code = ?
@@ -393,10 +393,10 @@ class KHunterDAO:
             INSERT INTO {self.TABLE_NAME} (
                 stock_code, stock_name, industry, sector,
                 hunting_date, strategy_name, support_level, current_price,
-                price_diff, price_diff_percent, score, score_date, selection_record_id,
+                price_diff, price_diff_percent, buy_range, score, score_date, selection_record_id,
                 timing_strategy, timing_signal,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """
             
             # 2. 准备参数
@@ -411,6 +411,7 @@ class KHunterDAO:
                 result['current_price'],
                 result['price_diff'],
                 result['price_diff_percent'],
+                result.get('buy_range', ''),
                 result.get('score'),
                 result.get('score_date'),
                 result.get('selection_record_id'),
@@ -452,6 +453,7 @@ class KHunterDAO:
                 current_price = ?,
                 price_diff = ?,
                 price_diff_percent = ?,
+                buy_range = ?,
                 score = ?,
                 score_date = ?,
                 timing_strategy = ?,
@@ -466,6 +468,7 @@ class KHunterDAO:
                 result['current_price'],
                 result['price_diff'],
                 result['price_diff_percent'],
+                result.get('buy_range', ''),
                 result.get('score'),
                 result.get('score_date'),
                 result.get('timing_strategy', 'support'),

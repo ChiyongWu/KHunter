@@ -758,6 +758,8 @@ CREATE TABLE IF NOT EXISTS khunter (
     -- price_diff: 价格差，类型REAL，必填，计算值=current_price-support_level，例如0.10
     price_diff_percent REAL NOT NULL,
     -- price_diff_percent: 价格差百分比，类型REAL，必填，计算值=(price_diff/support_level)*100，例如0.95
+    buy_range VARCHAR(50),
+    -- buy_range: 买入区间，类型VARCHAR(50)，可选，格式"10.39-10.60"，当前价格±1%
     score DECIMAL(5,2),
     -- score: 综合评分，类型DECIMAL(5,2)，可选，范围0-100，例如85.50
     score_date DATE,

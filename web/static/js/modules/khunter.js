@@ -237,7 +237,7 @@ function showPlanModal(planData) {
     if (planData.plans && planData.plans.length > 0) {
         planData.plans.forEach((plan, index) => {
             // 防御性处理空数据
-            const supportLevel = plan.support_level != null ? plan.support_level.toFixed(2) : '-';
+            const currentPrice = plan.current_price != null ? plan.current_price.toFixed(2) : '-';
             const buyLower = plan.buy_lower_price != null ? plan.buy_lower_price.toFixed(2) : '-';
             const buyUpper = plan.buy_upper_price != null ? plan.buy_upper_price.toFixed(2) : '-';
             const positionRatio = plan.position_ratio != null ? plan.position_ratio : '-';
@@ -250,7 +250,7 @@ function showPlanModal(planData) {
                 <td>${plan.rank || (index + 1)}</td>
                 <td>${plan.stock_code || '-'}</td>
                 <td>${plan.stock_name || '-'}</td>
-                <td>${supportLevel}</td>
+                <td>${currentPrice}</td>
                 <td>${buyLower}-${buyUpper}</td>
                 <td>${positionRatio}%</td>
                 <td>${stopLoss}</td>
@@ -436,7 +436,7 @@ function bindTableData(results) {
     
     // 2. 如果没有数据，显示占位符
     if (!results || results.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="13" class="placeholder">未找到符合条件的数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="placeholder">未找到符合条件的数据</td></tr>';
         return;
     }
     
@@ -459,10 +459,7 @@ function bindTableData(results) {
             <td>${item.stock_name}</td>
             <td>${item.industry || '-'}</td>
             <td>${item.sector || '-'}</td>
-            <td>${item.support_level.toFixed(2)}</td>
-            <td>${item.current_price.toFixed(2)}</td>
-            <td>${item.price_diff.toFixed(2)}</td>
-            <td>${item.price_diff_percent.toFixed(2)}%</td>
+            <td>${item.buy_range || '-'}</td>
             <td>${item.strategy_name}</td>
             <td>${timingStrategyDisplay}</td>
             <td>${item.timing_signal || '-'}</td>
@@ -623,9 +620,9 @@ function handleTableClick(e) {
         openStockDetail(stockCode);
     } else if (e.target.classList.contains('score-link')) {
         e.preventDefault();
-        // 获取该行的评分日期（第12列，index 11）
+        // 获取该行的评分日期（第9列，index 8）
         const row = e.target.closest('tr');
-        const scoreDate = row.cells[11].textContent.trim();
+        const scoreDate = row.cells[8].textContent.trim();
         const stockCode = row.cells[0].textContent.trim();
         openScoreDetail(stockCode, scoreDate);
     }

@@ -283,8 +283,10 @@ class TradingPlanGenerator:
         返回：
             Dict: 交易计划
         """
+        # 获取支撑位和当前价格
         support_level = float(stock_data.get('support_level', 0))
-        buy_plan = self._calculate_buy_plan(support_level)
+        current_price = float(stock_data.get('current_price', support_level))
+        buy_plan = self._calculate_buy_plan(current_price)
         
         return {
             'plan_date': plan_date,
@@ -295,6 +297,7 @@ class TradingPlanGenerator:
             'buy_upper_price': buy_plan['buy_upper_price'],
             'position_ratio': self.DEFAULT_POSITION_RATIO,
             'support_level': support_level,
+            'current_price': current_price,
             'stop_loss_price': self._calculate_stop_loss(support_level),
             'take_profit_price': self._calculate_take_profit(support_level),
             'hold_days': self.DEFAULT_HOLD_DAYS,
@@ -302,19 +305,19 @@ class TradingPlanGenerator:
             'rank': stock_data.get('rank', 0)
         }
 
-    def _calculate_buy_plan(self, support_level: float) -> Dict[str, float]:
+    def _calculate_buy_plan(self, current_price: float) -> Dict[str, float]:
         """
-        计算买入计划
+        计算买入计划（当前价格±1%）
 
         参数：
-            support_level: 支撑位价格
+            current_price: 当前价格
 
         返回：
             Dict: 包含 buy_lower_price, buy_upper_price
         """
         return {
-            'buy_lower_price': round(support_level * 0.99, 2),
-            'buy_upper_price': round(support_level * 1.03, 2)
+            'buy_lower_price': round(current_price * 0.99, 2),
+            'buy_upper_price': round(current_price * 1.01, 2)
         }
 
     def _calculate_stop_loss(self, support_level: float) -> float:

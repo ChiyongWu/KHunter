@@ -113,6 +113,45 @@ class DatabaseMigrationHelper:
             logger.error(f"检查/添加 timing_strategy/timing_signal 列失败: {str(e)}")
             return False
     
+    def check_and_add_khunter_buy_range_column(self) -> bool:
+        """
+        检查并添加 khunter 表的 buy_range 列
+        
+        Returns:
+            bool: 如果列已存在或成功添加则返回 True
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 检查 khunter 表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='khunter'")
+            if not cursor.fetchone():
+                logger.warning("khunter 表不存在，跳过 buy_range 列检查")
+                conn.close()
+                return False
+            
+            # 获取现有列
+            cursor.execute("PRAGMA table_info(khunter)")
+            cols = cursor.fetchall()
+            col_names = [col[1] for col in cols]
+            
+            # 添加 buy_range 列
+            if 'buy_range' not in col_names:
+                logger.info("正在为 khunter 表添加 buy_range 列...")
+                cursor.execute("ALTER TABLE khunter ADD COLUMN buy_range VARCHAR(50)")
+                conn.commit()
+                logger.info("✓ buy_range 列已成功添加到 khunter 表")
+            else:
+                logger.info("✓ khunter 表已有 buy_range 列")
+            
+            conn.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"检查/添加 buy_range 列失败: {str(e)}")
+            return False
+    
     def check_all_required_columns(self) -> dict:
         """
         检查所有必需的列
@@ -124,7 +163,7 @@ class DatabaseMigrationHelper:
             'khunter': [
                 'id', 'stock_code', 'stock_name', 'industry', 'sector',
                 'hunting_date', 'strategy_name', 'support_level', 'current_price',
-                'price_diff', 'price_diff_percent', 'score', 'score_date',
+                'price_diff', 'price_diff_percent', 'buy_range', 'score', 'score_date',
                 'selection_record_id', 'created_at', 'updated_at',
                 'timing_strategy', 'timing_signal'
             ]
@@ -203,6 +242,9 @@ def ensure_database_schema(db_path: str = 'data/stock_selection.db') -> bool:
     
     # 检查并添加 timing_strategy 和 timing_signal 列
     success = helper.check_and_add_khunter_timing_columns() and success
+    
+    # 检查并添加 buy_range 列
+    success = helper.check_and_add_khunter_buy_range_column() and success
     
     # 打印迁移状态
     helper.print_migration_status()

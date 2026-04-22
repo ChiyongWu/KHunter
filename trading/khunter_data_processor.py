@@ -76,6 +76,7 @@ class KHunterDataProcessor:
                         'current_price': float,
                         'price_diff': float,
                         'price_diff_percent': float,
+                        'buy_range': str,
                         'strategy_name': str,
                         'score': float,
                         'timing_strategy': str,
@@ -351,7 +352,12 @@ class KHunterDataProcessor:
                 )
                 return None
             
-            # 6. 组织结果
+            # 6. 计算买入区间（当前价格±1%）
+            buy_range_lower = round(current_price * 0.99, 2)
+            buy_range_upper = round(current_price * 1.01, 2)
+            buy_range = f"{buy_range_lower}-{buy_range_upper}"
+            
+            # 7. 组织结果
             result = {
                 'stock_code': stock_code,
                 'stock_name': record['stock_name'],
@@ -363,6 +369,7 @@ class KHunterDataProcessor:
                 'current_price': current_price,
                 'price_diff': buy_point_result['price_diff'],
                 'price_diff_percent': buy_point_result['price_diff_percent'],
+                'buy_range': buy_range,
                 'score': record.get('score'),
                 'score_date': record.get('selection_date'),  # 分数对应的日期
                 'selection_record_id': record['id'],
@@ -450,7 +457,12 @@ class KHunterDataProcessor:
                 'support': '支撑位策略'
             }.get(timing_strategy_name, timing_strategy_name)
             
-            # 10. 组织结果
+            # 10. 计算买入区间（当前价格±1%）
+            buy_range_lower = round(current_price * 0.99, 2)
+            buy_range_upper = round(current_price * 1.01, 2)
+            buy_range = f"{buy_range_lower}-{buy_range_upper}"
+            
+            # 11. 组织结果
             result = {
                 'stock_code': stock_code,
                 'stock_name': record['stock_name'],
@@ -462,6 +474,7 @@ class KHunterDataProcessor:
                 'current_price': current_price,
                 'price_diff': price_diff,
                 'price_diff_percent': price_diff_percent,
+                'buy_range': buy_range,
                 'score': record.get('score'),
                 'score_date': record.get('selection_date'),
                 'selection_record_id': record.get('id'),
@@ -665,7 +678,7 @@ class KHunterDataProcessor:
             sql = """
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score, score_date,
+                   buy_range, strategy_name, score, score_date,
                    timing_strategy, timing_signal
             FROM khunter
             WHERE hunting_date = ?

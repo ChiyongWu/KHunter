@@ -1296,7 +1296,7 @@ def export_trading_plan():
         ws = wb.active
         ws.title = "交易计划"
 
-        headers = ['序号', '股票代码', '股票名称', '支撑位', '买入价格区间', '仓位(%)', '止损', '止盈', '持有日期']
+        headers = ['序号', '股票代码', '股票名称', '当前价格', '买入价格区间', '仓位(%)', '止损', '止盈', '持有日期']
         header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
         header_font = Font(bold=True, color="FFFFFF")
 
@@ -1310,7 +1310,7 @@ def export_trading_plan():
             ws.cell(row=idx+1, column=1, value=idx)
             ws.cell(row=idx+1, column=2, value=plan.get('stock_code', ''))
             ws.cell(row=idx+1, column=3, value=plan.get('stock_name', ''))
-            ws.cell(row=idx+1, column=4, value=plan.get('support_level', 0))
+            ws.cell(row=idx+1, column=4, value=plan.get('current_price', 0))
             ws.cell(row=idx+1, column=5, value=f"{plan.get('buy_lower_price', 0)}-{plan.get('buy_upper_price', 0)}")
             ws.cell(row=idx+1, column=6, value=plan.get('position_ratio', 0))
             ws.cell(row=idx+1, column=7, value=plan.get('stop_loss_price', 0))
