@@ -310,15 +310,6 @@
             <header class="header">
                 <h2 id="page-title">系统概览</h2>
                 <div class="header-actions">
-                    <!-- 市场温度徽章 -->
-                    <div id="market-temp-badge" onclick="showTemperatureDetail()" style="cursor: pointer; background: #6b7280; color: white; padding: 8px 16px; border-radius: 20px; font-size: 13px; display: flex; align-items: center; gap: 8px; transition: all 0.2s;" title="点击查看详情">
-                        <span id="market-temp-date" style="font-size: 11px; opacity: 0.9;">--</span>
-                        <span style="font-size: 16px;">🌡️</span>
-                        <span id="market-temp-value" style="font-weight: bold;">--</span>
-                        <span>°</span>
-                        <span id="market-temp-status" style="font-size: 12px;">--</span>
-                    </div>
-                    
                     <!-- 账户选择器 -->
                     <div class="account-selector" id="account-selector-container" style="display: none;">
                         <select id="account-selector" class="account-select" onchange="switchAccount()">
@@ -856,12 +847,15 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <label for="support-level" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">支撑位置</label>
-                                    <select id="support-level" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:150px;">
-                                        <option value="ma20">20日均线</option>
-                                        <option value="key_close_5">关键日收盘价下5%</option>
-                                        <option value="key_open">关键日开盘价</option>
-                                        <option value="key_close">关键日收盘价</option>
+                                    <label for="timing-strategy" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">择时策略</label>
+                                    <select id="timing-strategy" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:150px;">
+                                        <option value="turtle">海龟策略</option>
+                                        <option value="rsi">RSI策略</option>
+                                        <option value="bollinger">布林带策略</option>
+                                        <option value="support_ma20">支撑位-20日均线</option>
+                                        <option value="support_close95">支撑位-关键日收盘价下5%</option>
+                                        <option value="support_open">支撑位-关键日开盘价</option>
+                                        <option value="support_close">支撑位-关键日收盘价</option>
                                     </select>
                                 </div>
                                 <div>
@@ -881,15 +875,15 @@
                                 <div class="table-container" style="border:1px solid #e5e7eb; border-radius:6px; overflow:hidden; margin-bottom:12px;">
                                     <table class="data-table" id="backtest-task-table" aria-label="回测任务列表">
                                         <thead>
-                                            <tr>
-                                                <th scope="col" style="width:50px;">序号</th>
-                                                <th scope="col">策略名称</th>
-                                                <th scope="col">开始日期</th>
-                                                <th scope="col">结束日期</th>
-                                                <th scope="col">支撑位</th>
-                                                <th scope="col" style="width:80px;">操作</th>
-                                            </tr>
-                                        </thead>
+                                        <tr>
+                                            <th scope="col" style="width:50px;">序号</th>
+                                            <th scope="col">策略名称</th>
+                                            <th scope="col">择时策略</th>
+                                            <th scope="col">开始日期</th>
+                                            <th scope="col">结束日期</th>
+                                            <th scope="col" style="width:80px;">操作</th>
+                                        </tr>
+                                    </thead>
                                         <tbody id="backtest-task-body">
                                         </tbody>
                                     </table>
@@ -1467,6 +1461,17 @@
                                     <input type="number" id="tracking-days" class="form-control" min="1" max="365" value="10">
                                 </div>
                                 
+                                <!-- 择时策略 -->
+                                <div class="form-group" style="display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 200px;">
+                                    <label for="timing-strategy" style="white-space: nowrap;">择时策略</label>
+                                    <select id="timing-strategy" class="form-control">
+                                        <option value="support" selected>支撑位策略</option>
+                                        <option value="turtle">海龟策略</option>
+                                        <option value="rsi">RSI策略</option>
+                                        <option value="bollinger">布林带策略</option>
+                                    </select>
+                                </div>
+                                
                                 <!-- 操作按钮 -->
                                 <div class="form-group" style="display: flex; flex-direction: row; gap: 10px; align-items: center; flex: 0 0 auto;">
                                     <button id="calculate-btn" class="btn btn-primary">
@@ -1509,12 +1514,14 @@
                                             <th>价格差</th>
                                             <th>价格差%</th>
                                             <th>策略名称</th>
+                                            <th>择时策略</th>
+                                            <th>择时信号</th>
                                             <th>选入日期</th>
                                             <th>评分</th>
                                         </tr>
                                     </thead>
                                     <tbody id="results-tbody">
-                                        <tr><td colspan="11" class="placeholder">请选择日期并点击'计算'按钮开始分析</td></tr>
+                                        <tr><td colspan="13" class="placeholder">请选择日期并点击'计算'按钮开始分析</td></tr>
                                     </tbody>
                                 </table>
                             </div>

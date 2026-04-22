@@ -29,11 +29,11 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         """初始化策略参数"""
         default_params = {
             'lookback_days': 60,              # 回溯天数
-            'breakout_ratio': -0.02,          # 突破阈值（-0.02表示98%）
-            'min_change_pct': 0.08,           # 最小涨幅（8%）
-            'volume_ratio': 1.8,              # 成交量倍数
-            'volume_ma_period': 5,            # 成交量均值周期
-            'max_search_days': 5,             # 最大搜索天数
+            'breakout_ratio': 0.0,             # 突破阈值（0表示100%）
+            'min_change_pct': 0.09,            # 最小涨幅（9%）
+            'volume_ratio': 2.2,               # 成交量倍数
+            'volume_ma_period': 5,             # 成交量均值周期
+            'max_search_days': 5,              # 最大搜索天数
         }
 
         if params:

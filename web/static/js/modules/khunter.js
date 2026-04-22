@@ -94,6 +94,7 @@ function calculate() {
     // 1. 获取参数
     const huntingDate = document.getElementById('hunting-date').value;
     const trackingDays = parseInt(document.getElementById('tracking-days').value);
+    const timingStrategy = document.getElementById('timing-strategy').value;
     
     // 2. 验证参数
     if (!huntingDate) {
@@ -118,7 +119,8 @@ function calculate() {
         },
         body: JSON.stringify({
             hunting_date: huntingDate,
-            tracking_days: trackingDays
+            tracking_days: trackingDays,
+            timing_strategy: timingStrategy
         })
     })
     .then(response => response.json())
@@ -186,7 +188,12 @@ function generateTradingPlan() {
         // 5. 处理响应
         if (data.success) {
             // 显示交易计划模态窗口
-            showPlanModal(data.data);
+            try {
+                showPlanModal(data.data);
+            } catch (e) {
+                console.error('显示交易计划模态窗口失败:', e);
+                showAlert('显示交易计划失败，请稍后重试', 'error');
+            }
         } else {
             showAlert(data.message || '生成交易计划失败', 'error');
         }
@@ -205,13 +212,20 @@ function generateTradingPlan() {
  * 显示交易计划模态窗口
  */
 function showPlanModal(planData) {
+    // 防御性检查
+    if (!planData) {
+        console.error('交易计划数据为空');
+        showAlert('交易计划数据为空', 'error');
+        return;
+    }
+    
     // 1. 更新模态窗口标题
     document.getElementById('modal-title').textContent = `📋 ${planData.plan_date}日交易计划`;
     
     // 2. 更新基本信息
-    document.getElementById('modal-hunting-date').textContent = planData.hunting_date;
-    document.getElementById('modal-plan-date').textContent = planData.plan_date;
-    document.getElementById('modal-stock-count').textContent = `${planData.total_count} 只`;
+    document.getElementById('modal-hunting-date').textContent = planData.hunting_date || '-';
+    document.getElementById('modal-plan-date').textContent = planData.plan_date || '-';
+    document.getElementById('modal-stock-count').textContent = `${planData.total_count || 0} 只`;
     
     // 3. 显示温度建议区域
     displayTemperatureSuggestion(planData.temperature_info, planData.temp_constraints);
@@ -222,17 +236,26 @@ function showPlanModal(planData) {
     
     if (planData.plans && planData.plans.length > 0) {
         planData.plans.forEach((plan, index) => {
+            // 防御性处理空数据
+            const supportLevel = plan.support_level != null ? plan.support_level.toFixed(2) : '-';
+            const buyLower = plan.buy_lower_price != null ? plan.buy_lower_price.toFixed(2) : '-';
+            const buyUpper = plan.buy_upper_price != null ? plan.buy_upper_price.toFixed(2) : '-';
+            const positionRatio = plan.position_ratio != null ? plan.position_ratio : '-';
+            const stopLoss = plan.stop_loss_price != null ? plan.stop_loss_price.toFixed(2) : '-';
+            const takeProfit = plan.take_profit_price != null ? plan.take_profit_price.toFixed(2) : '-';
+            const holdDays = plan.hold_days != null ? plan.hold_days : '-';
+            
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${plan.rank || (index + 1)}</td>
-                <td>${plan.stock_code}</td>
-                <td>${plan.stock_name}</td>
-                <td>${plan.support_level.toFixed(2)}</td>
-                <td>${plan.buy_lower_price.toFixed(2)}-${plan.buy_upper_price.toFixed(2)}</td>
-                <td>${plan.position_ratio}%</td>
-                <td>${plan.stop_loss_price.toFixed(2)}</td>
-                <td>${plan.take_profit_price.toFixed(2)}</td>
-                <td>${plan.hold_days}天</td>
+                <td>${plan.stock_code || '-'}</td>
+                <td>${plan.stock_name || '-'}</td>
+                <td>${supportLevel}</td>
+                <td>${buyLower}-${buyUpper}</td>
+                <td>${positionRatio}%</td>
+                <td>${stopLoss}</td>
+                <td>${takeProfit}</td>
+                <td>${holdDays}天</td>
             `;
             tbody.appendChild(row);
         });
@@ -250,6 +273,12 @@ function showPlanModal(planData) {
  * @param {Object} tempConstraints - 温度约束建议（仅供参考）
  */
 function displayTemperatureSuggestion(tempInfo, tempConstraints) {
+    // 防御性检查
+    if (!tempInfo) {
+        console.warn('温度信息为空');
+        return;
+    }
+    
     // 查找或创建温度建议容器
     let tempContainer = document.getElementById('temp-suggestion-container');
     if (!tempContainer) {
@@ -263,29 +292,29 @@ function displayTemperatureSuggestion(tempInfo, tempConstraints) {
         }
     }
     
-    if (!tempContainer || !tempInfo) return;
+    if (!tempContainer) return;
     
     const temp = tempInfo.temperature;
     const status = tempInfo.status || '未知';
-    const suggestion = tempInfo.suggestion || '';
+    const suggestion = tempInfo.suggestion || '暂无建议';
     
     // 根据温度状态设置颜色
     let bgColor, textColor, borderColor;
-    if (temp !== null && temp >= 80) {
+    if (temp !== null && temp !== undefined && temp >= 80) {
         bgColor = '#fef2f2'; borderColor = '#f87171'; textColor = '#991b1b';
-    } else if (temp !== null && temp >= 65) {
+    } else if (temp !== null && temp !== undefined && temp >= 65) {
         bgColor = '#fffbeb'; borderColor = '#fbbf24'; textColor = '#92400e';
-    } else if (temp !== null && temp >= 50) {
+    } else if (temp !== null && temp !== undefined && temp >= 50) {
         bgColor = '#fefce8'; borderColor = '#facc15'; textColor = '#854d0e';
-    } else if (temp !== null && temp >= 30) {
+    } else if (temp !== null && temp !== undefined && temp >= 30) {
         bgColor = '#eff6ff'; borderColor = '#60a5fa'; textColor = '#1e40af';
-    } else if (temp !== null && temp >= 15) {
+    } else if (temp !== null && temp !== undefined && temp >= 15) {
         bgColor = '#f5f3ff'; borderColor = '#a78bfa'; textColor = '#5b21b6';
     } else {
         bgColor = '#f3f4f6'; borderColor = '#9ca3af'; textColor = '#374151';
     }
     
-    const tempDisplay = temp !== null ? `${temp.toFixed(1)}°` : '--';
+    const tempDisplay = (temp !== null && temp !== undefined) ? `${Number(temp).toFixed(1)}°` : '--';
     
     tempContainer.innerHTML = `
         <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: ${bgColor}; border-left: 4px solid ${borderColor}; border-radius: 6px;">
@@ -316,10 +345,16 @@ function exportTradingPlan() {
     // 1. 获取参数
     const huntingDate = document.getElementById('hunting-date').value;
     
-    // 2. 显示加载状态
+    // 2. 验证参数
+    if (!huntingDate) {
+        showAlert('请先选择狩猎日期', 'error');
+        return;
+    }
+    
+    // 3. 显示加载状态
     showGlobalLoading();
     
-    // 3. 调用导出 API
+    // 4. 调用导出 API
     fetch('/api/khunter/export_plan', {
         method: 'POST',
         headers: {
@@ -329,45 +364,49 @@ function exportTradingPlan() {
             hunting_date: huntingDate
         })
     })
-    .then(response => {
-        if (response.ok) {
+    .then(async response => {
+        // 5. 检查响应类型
+        const contentType = response.headers.get('content-type');
+        
+        if (response.ok && contentType && contentType.includes('spreadsheetml')) {
+            // 成功返回Excel文件
+            const blob = await response.blob();
+            
             // 获取文件名从响应头
             const contentDisposition = response.headers.get('Content-Disposition');
             let filename = '交易计划.xlsx';
             if (contentDisposition) {
                 const match = contentDisposition.match(/filename="([^"]+)"/);
                 if (match && match[1]) {
-                    filename = match[1];
+                    filename = decodeURIComponent(match[1]);
                 }
             }
-            return response.blob().then(blob => ({ blob, filename }));
+            
+            // 6. 创建下载链接
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            // 7. 显示成功提示
+            showAlert('交易计划导出成功', 'success');
         } else {
-            throw new Error('导出失败');
+            // 处理错误响应（JSON格式）
+            const errorData = await response.json().catch(() => ({}));
+            const message = errorData.message || '导出失败，请稍后重试';
+            showAlert(message, 'error');
         }
     })
-    .then(({ blob, filename }) => {
-        // 4. 创建下载链接
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        
-        // 5. 关闭模态窗口
-        closePlanModal();
-        
-        // 6. 显示成功提示
-        showAlert('交易计划导出成功', 'success');
-    })
     .catch(error => {
-        console.error('Error:', error);
-        showAlert('导出失败，请稍后重试', 'error');
+        console.error('导出交易计划失败:', error);
+        showAlert('导出失败，网络错误', 'error');
     })
     .finally(() => {
-        // 7. 隐藏加载状态
+        // 8. 隐藏加载状态
         hideGlobalLoading();
     });
 }
@@ -397,12 +436,23 @@ function bindTableData(results) {
     
     // 2. 如果没有数据，显示占位符
     if (!results || results.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="placeholder">未找到符合条件的数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="13" class="placeholder">未找到符合条件的数据</td></tr>';
         return;
     }
     
-    // 3. 遍历结果，创建表格行
+    // 3. 择时策略中文名称映射
+    const timingStrategyNames = {
+        'support': '支撑位策略',
+        'turtle': '海龟策略',
+        'rsi': 'RSI策略',
+        'bollinger': '布林带策略'
+    };
+    
+    // 4. 遍历结果，创建表格行
     results.forEach(item => {
+        // 4a. 获取择时策略显示名称
+        const timingStrategyDisplay = timingStrategyNames[item.timing_strategy] || item.timing_strategy || '支撑位策略';
+        
         const row = document.createElement('tr');
         row.innerHTML = `
             <td><a class="stock-link" onclick="openStockDetail('${item.stock_code}')">${item.stock_code}</a></td>
@@ -414,6 +464,8 @@ function bindTableData(results) {
             <td>${item.price_diff.toFixed(2)}</td>
             <td>${item.price_diff_percent.toFixed(2)}%</td>
             <td>${item.strategy_name}</td>
+            <td>${timingStrategyDisplay}</td>
+            <td>${item.timing_signal || '-'}</td>
             <td>${item.score_date || '-'}</td>
             <td><a class="score-link" onclick="openScoreDetail('${item.stock_code}', '${item.score_date}')">${item.score.toFixed(2)}</a></td>
         `;
@@ -457,6 +509,7 @@ function saveResults() {
     // 1. 获取参数
     const huntingDate = document.getElementById('hunting-date').value;
     const trackingDays = parseInt(document.getElementById('tracking-days').value);
+    const timingStrategy = document.getElementById('timing-strategy').value;
     
     // 2. 显示加载状态
     showLoading(true);
@@ -470,7 +523,8 @@ function saveResults() {
         },
         body: JSON.stringify({
             hunting_date: huntingDate,
-            tracking_days: trackingDays
+            tracking_days: trackingDays,
+            timing_strategy: timingStrategy
         })
     })
     .then(response => response.json())
@@ -569,9 +623,9 @@ function handleTableClick(e) {
         openStockDetail(stockCode);
     } else if (e.target.classList.contains('score-link')) {
         e.preventDefault();
-        // 获取该行的评分日期（第10列，index 9）
+        // 获取该行的评分日期（第12列，index 11）
         const row = e.target.closest('tr');
-        const scoreDate = row.cells[9].textContent.trim();
+        const scoreDate = row.cells[11].textContent.trim();
         const stockCode = row.cells[0].textContent.trim();
         openScoreDetail(stockCode, scoreDate);
     }
@@ -595,6 +649,7 @@ function showLoading(show) {
 function disableControls(disable) {
     document.getElementById('hunting-date').disabled = disable;
     document.getElementById('tracking-days').disabled = disable;
+    document.getElementById('timing-strategy').disabled = disable;
     document.getElementById('calculate-btn').disabled = disable;
     document.getElementById('save-btn').disabled = disable;
 }

@@ -7,6 +7,7 @@ KHunter 数据处理模块
 
 import logging
 import json
+import pandas as pd
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import time
@@ -46,7 +47,8 @@ class KHunterDataProcessor:
     def process(
         self,
         hunting_date: str,
-        tracking_days: int = DEFAULT_TRACKING_DAYS
+        tracking_days: int = DEFAULT_TRACKING_DAYS,
+        timing_strategy: str = 'support'
     ) -> Dict[str, Any]:
         """
         处理狩猎场数据
@@ -54,11 +56,13 @@ class KHunterDataProcessor:
         参数：
             hunting_date: 狩猎日期，格式 YYYY-MM-DD
             tracking_days: 跟踪天数，默认10
+            timing_strategy: 择时策略名称，默认support，可选support/turtle/rsi/bollinger
         
         返回：
             Dict: {
                 'hunting_date': str,
                 'tracking_days': int,
+                'timing_strategy': str,
                 'from_cache': bool,
                 'total_count': int,
                 'calculation_time': float,
@@ -73,7 +77,9 @@ class KHunterDataProcessor:
                         'price_diff': float,
                         'price_diff_percent': float,
                         'strategy_name': str,
-                        'score': float
+                        'score': float,
+                        'timing_strategy': str,
+                        'timing_signal': str
                     },
                     ...
                 ]
@@ -84,6 +90,7 @@ class KHunterDataProcessor:
         """
         # hunting_date: 狩猎日期，类型str，必填
         # tracking_days: 跟踪天数，类型int，默认10
+        # timing_strategy: 择时策略名称，类型str，默认support
         start_time = time.time()
         
         try:
@@ -91,7 +98,7 @@ class KHunterDataProcessor:
             actual_hunting_date = self._determine_hunting_date(hunting_date)
             logger.info(f"确定狩猎日期: {hunting_date} -> {actual_hunting_date}")
             
-            # 2. 检查缓存
+            # 2. 检查缓存（暂不按timing_strategy过滤缓存，返回该日期所有结果）
             cached_results = self._check_cache(actual_hunting_date)
             if cached_results is not None:
                 calculation_time = time.time() - start_time
@@ -99,6 +106,7 @@ class KHunterDataProcessor:
                 return {
                     'hunting_date': actual_hunting_date,
                     'tracking_days': tracking_days,
+                    'timing_strategy': timing_strategy,
                     'from_cache': True,
                     'total_count': len(cached_results),
                     'calculation_time': calculation_time,
@@ -115,12 +123,19 @@ class KHunterDataProcessor:
             filtered_records = self._filter_by_score_threshold(selection_records)
             logger.info(f"按分数阈值过滤: {len(filtered_records)} 条")
             
-            # 5. 计算支撑位和判断买点
+            # 5. 根据择时策略类型判断买点
             results = []
             for record in filtered_records:
                 try:
-                    # 6. 计算支撑位和判断买点
-                    result = self._calculate_and_judge(record, actual_hunting_date)
+                    # 6. 根据择时策略选择不同的判断逻辑
+                    if timing_strategy == 'support':
+                        # 6a. 支撑位策略：走现有逻辑
+                        result = self._calculate_and_judge(record, actual_hunting_date)
+                    else:
+                        # 6b. 其他择时策略：使用择时策略判断
+                        result = self._judge_by_timing_strategy(
+                            record, actual_hunting_date, timing_strategy
+                        )
                     
                     # 7. 只保存符合买点条件的记录
                     if result is not None:
@@ -145,6 +160,7 @@ class KHunterDataProcessor:
             return {
                 'hunting_date': actual_hunting_date,
                 'tracking_days': tracking_days,
+                'timing_strategy': timing_strategy,
                 'from_cache': False,
                 'total_count': len(final_results),
                 'calculation_time': calculation_time,
@@ -349,7 +365,9 @@ class KHunterDataProcessor:
                 'price_diff_percent': buy_point_result['price_diff_percent'],
                 'score': record.get('score'),
                 'score_date': record.get('selection_date'),  # 分数对应的日期
-                'selection_record_id': record['id']
+                'selection_record_id': record['id'],
+                'timing_strategy': 'support',
+                'timing_signal': buy_point_result.get('message', '价格在支撑位区间')
             }
             
             logger.debug(
@@ -361,6 +379,157 @@ class KHunterDataProcessor:
         
         except Exception as e:
             logger.error(f"计算和判断失败: {str(e)}")
+            return None
+    
+    def _judge_by_timing_strategy(
+        self,
+        record: Dict,
+        hunting_date: str,
+        timing_strategy_name: str
+    ) -> Optional[Dict]:
+        """
+        使用择时策略判断是否纳入狩猎范围
+        
+        参数：
+            record: 选股记录
+            hunting_date: 狩猎日期
+            timing_strategy_name: 择时策略名称(turtle/rsi/bollinger)
+        
+        返回：
+            Dict: 处理结果，如果不符合条件返回None
+        """
+        # record: 选股记录，类型Dict，必填
+        # hunting_date: 狩猎日期，类型str，必填
+        # timing_strategy_name: 择时策略名称，类型str，必填
+        try:
+            # 1. 获取股票代码
+            stock_code = record['stock_code']
+            strategy_name = record['strategy_name']
+            
+            # 2. 获取当前价格
+            current_price = self._get_current_price(stock_code, hunting_date)
+            if not current_price:
+                logger.warning(f"{stock_code} 无法获取当前价格")
+                return None
+            
+            # 3. 加载K线数据
+            df_kline = self._load_kline_for_timing(stock_code, hunting_date)
+            if df_kline is None or len(df_kline) < 20:
+                logger.warning(f"{stock_code} K线数据不足，无法使用择时策略")
+                return None
+            
+            # 4. 创建择时策略实例
+            from trading.timing_strategies import TimingStrategyFactory
+            strategy = TimingStrategyFactory.create_strategy(timing_strategy_name, {})
+            
+            # 5. 调用策略获取择时结果
+            timing_result = strategy.get_timing_result(df_kline, None, None)
+            
+            # 6. 判断是否发出买入信号
+            if not timing_result.is_buy:
+                logger.debug(
+                    f"{stock_code} {timing_strategy_name}策略未发出买入信号: "
+                    f"{timing_result.message}"
+                )
+                return None
+            
+            # 7. 获取支撑位（如果有）
+            support_level = timing_result.support_level if timing_result.support_level > 0 else current_price
+            
+            # 8. 计算价格差
+            price_diff = current_price - support_level
+            price_diff_percent = round(
+                (price_diff / support_level) * 100, 2
+            ) if support_level > 0 else 0
+            
+            # 9. 择时策略中文名称映射
+            timing_strategy_display = {
+                'turtle': '海龟策略',
+                'rsi': 'RSI策略',
+                'bollinger': '布林带策略',
+                'support': '支撑位策略'
+            }.get(timing_strategy_name, timing_strategy_name)
+            
+            # 10. 组织结果
+            result = {
+                'stock_code': stock_code,
+                'stock_name': record['stock_name'],
+                'industry': record.get('industry'),
+                'sector': record.get('sector'),
+                'hunting_date': hunting_date,
+                'strategy_name': strategy_name,
+                'support_level': support_level,
+                'current_price': current_price,
+                'price_diff': price_diff,
+                'price_diff_percent': price_diff_percent,
+                'score': record.get('score'),
+                'score_date': record.get('selection_date'),
+                'selection_record_id': record.get('id'),
+                'timing_strategy': timing_strategy_name,
+                'timing_signal': timing_result.message or f'{timing_strategy_display}发出买入信号'
+            }
+            
+            logger.info(
+                f"{stock_code} {timing_strategy_display}发出买入信号: "
+                f"当前价={current_price} 支撑位={support_level} "
+                f"信号={timing_result.message}"
+            )
+            return result
+        
+        except Exception as e:
+            logger.error(f"择时策略判断失败: {str(e)}")
+            return None
+    
+    def _load_kline_for_timing(
+        self,
+        stock_code: str,
+        hunting_date: str,
+        days: int = 200
+    ) -> Optional[pd.DataFrame]:
+        """
+        为择时策略加载K线数据
+        
+        参数：
+            stock_code: 股票代码
+            hunting_date: 狩猎日期
+            days: 加载天数（默认200个自然日，约120个交易日）
+        
+        返回：
+            DataFrame: K线数据（正序，日期从早到晚），如果数据不足返回None
+        """
+        # stock_code: 股票代码，类型str，必填
+        # hunting_date: 狩猎日期，类型str，必填
+        # days: 加载天数，类型int，默认200
+        try:
+            # 1. 计算起始日期
+            start_date = self._calculate_date_before(hunting_date, days)
+            
+            # 2. 查询K线数据
+            sql = """
+            SELECT date, open, high, low, close, volume
+            FROM stock_kline
+            WHERE code = ? AND date BETWEEN ? AND ?
+            ORDER BY date ASC
+            """
+            results = self.db_manager.query(sql, (stock_code, start_date, hunting_date))
+            
+            # 3. 检查数据是否足够
+            if not results or len(results) < 10:
+                logger.warning(f"{stock_code} K线数据不足: {len(results) if results else 0} 条")
+                return None
+            
+            # 4. 转换为DataFrame
+            df = pd.DataFrame(results, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # 5. 确保数值类型
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            logger.debug(f"{stock_code} 加载K线数据: {len(df)} 条，{start_date} ~ {hunting_date}")
+            return df
+        
+        except Exception as e:
+            logger.error(f"加载K线数据失败: {stock_code} - {str(e)}")
             return None
     
     def _prepare_result(
@@ -496,7 +665,8 @@ class KHunterDataProcessor:
             sql = """
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score, score_date
+                   strategy_name, score, score_date,
+                   timing_strategy, timing_signal
             FROM khunter
             WHERE hunting_date = ?
             ORDER BY score DESC

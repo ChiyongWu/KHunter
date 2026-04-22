@@ -34,6 +34,7 @@ class BacktestTaskManager {
       strategy_name: config.strategy_name,  // 中文名称
       start_date: config.start_date,
       end_date: config.end_date,
+      timing_strategy: config.timing_strategy || 'turtle',
       support_level_method: config.support_level_method || 'ma20',
       status: 'pending', // pending, running, completed, failed
       result: null,
@@ -156,7 +157,7 @@ class BacktestUIManager {
     this.elements = {
       // 配置表单
       strategySelect: document.getElementById('strategy-select'),
-      supportLevel: document.getElementById('support-level'),
+      timingStrategy: document.getElementById('timing-strategy'),
       startDate: document.getElementById('start-date'),
       endDate: document.getElementById('end-date'),
       addTaskBtn: document.getElementById('add-task-btn'),
@@ -203,15 +204,23 @@ class BacktestUIManager {
     // 显示任务列表容器
     this.elements.taskListContainer.style.display = 'block';
 
+    // 择时策略映射
+    const timingStrategyMap = {
+      'turtle': '海龟策略',
+      'rsi': 'RSI策略',
+      'bollinger': '布林带策略',
+      'support': '支撑位策略'
+    };
+
     // 添加任务行
     tasks.forEach((task, index) => {
       const row = document.createElement('tr');
       row.innerHTML = `
         <td>${index + 1}</td>
         <td>${task.strategy_name}</td>
+        <td>${timingStrategyMap[task.timing_strategy] || task.timing_strategy}</td>
         <td>${task.start_date}</td>
         <td>${task.end_date}</td>
-        <td>${task.support_level_method}</td>
         <td>
           <button class="btn btn-sm btn-danger" onclick="window.removeBacktestTask(${task.id})" style="padding:4px 8px; font-size:11px;">删除</button>
         </td>
@@ -398,6 +407,7 @@ class BacktestUIManager {
               <thead>
                 <tr style="background: #f9fafb;">
                   <th style="padding: 8px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb;">股票代码</th>
+                  <th style="padding: 8px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb;">股票名称</th>
                   <th style="padding: 8px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb;">买入日期</th>
                   <th style="padding: 8px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb;">买入价格</th>
                   <th style="padding: 8px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb;">卖出日期</th>
@@ -408,7 +418,8 @@ class BacktestUIManager {
               <tbody>
                 ${trades.length > 0 ? trades.map(trade => `
                   <tr style="border-bottom: 1px solid #e5e7eb;">
-                    <td style="padding: 8px; font-size: 12px;">${trade.stock_code || ''}</td>
+                    <td style="padding: 8px; font-size: 12px;"><a href="${trade.detail_url || 'javascript:void(0)'}" onclick="viewStockDetail('${trade.stock_code}'); return false;" style="color: #2563eb; text-decoration: none; cursor: pointer; font-weight: 600;">${trade.stock_code || ''}</a></td>
+                    <td style="padding: 8px; font-size: 12px;">${trade.stock_name || ''}</td>
                     <td style="padding: 8px; font-size: 12px;">${trade.buy_date || ''}</td>
                     <td style="padding: 8px; font-size: 12px;">${(trade.buy_price || 0).toFixed(2)}</td>
                     <td style="padding: 8px; font-size: 12px;">${trade.sell_date || ''}</td>
@@ -417,7 +428,7 @@ class BacktestUIManager {
                       ${(trade.return_rate || 0).toFixed(2)}%
                     </td>
                   </tr>
-                `).join('') : '<tr><td colspan="6" style="padding: 16px; text-align: center; font-size: 12px; color: #6b7280;">暂无交易记录</td></tr>'}
+                `).join('') : '<tr><td colspan="7" style="padding: 16px; text-align: center; font-size: 12px; color: #6b7280;">暂无交易记录</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -740,9 +751,6 @@ class BacktestUIManager {
       this.elements.strategySelect.selectedIndex = 0;
     }
     
-    // 支撑位选择：重置为 'ma20'
-    this.elements.supportLevel.value = 'ma20';
-    
     // 获取当前日期
     const today = new Date();
     
@@ -773,10 +781,19 @@ class BacktestUIManager {
   getFormData() {
     // 直接使用中文策略名称
     const chineseStrategyName = this.elements.strategySelect.value || '';
+    let timingStrategy = this.elements.timingStrategy?.value || 'turtle';
+    let supportLevelMethod = 'ma20';
+    
+    // 处理支撑位策略的情况
+    if (timingStrategy.startsWith('support_')) {
+      supportLevelMethod = timingStrategy.replace('support_', '');
+      timingStrategy = 'support';
+    }
     
     return {
       strategy_name: chineseStrategyName,  // 发送中文名称给后端
-      support_level_method: this.elements.supportLevel.value,
+      timing_strategy: timingStrategy,
+      support_level_method: supportLevelMethod,
       start_date: this.elements.startDate.value,
       end_date: this.elements.endDate.value
     };
@@ -793,12 +810,18 @@ let backtestUIManager = null;
  * 初始化批量回测模块
  * 创建任务管理器和UI管理器实例，绑定事件处理
  */
-function initBacktestBatchModule() {
+async function initBacktestBatchModule() {
   console.log('初始化批量回测模块');
   
   // 创建管理器实例
   backtestTaskManager = new BacktestTaskManager();
   backtestUIManager = new BacktestUIManager();
+
+  // 加载策略列表
+  await loadStrategies();
+
+  // 初始化表单（设置默认日期）
+  backtestUIManager.clearForm();
 
   // 绑定事件
   bindBacktestBatchEvents();
@@ -808,6 +831,37 @@ function initBacktestBatchModule() {
   backtestUIManager.updateTaskStats(0, '0小时');
   
   console.log('批量回测模块初始化完成');
+}
+
+/**
+ * 加载策略列表
+ */
+async function loadStrategies() {
+  try {
+    const response = await fetch('/api/trading/backtest/strategies');
+    if (!response.ok) {
+      throw new Error('加载策略列表失败');
+    }
+    const data = await response.json();
+    if (data.success) {
+      const strategies = data.data.strategies;
+      const strategySelect = document.getElementById('strategy-select');
+      if (strategySelect) {
+        strategySelect.innerHTML = '';
+        strategies.forEach(strategy => {
+          const option = document.createElement('option');
+          // 使用中文名称作为value和显示文本
+          const chineseName = strategy.display_name || strategy.name;
+          option.value = chineseName;
+          option.textContent = chineseName;
+          strategySelect.appendChild(option);
+        });
+      }
+    }
+  } catch (error) {
+    console.error('加载策略列表失败:', error);
+    alert('加载策略列表失败，请刷新页面重试');
+  }
 }
 
 /**
@@ -960,76 +1014,58 @@ async function executeBacktestBatch() {
         remainingTime: `${Math.round((tasks.length - i - 1) * 2.5)}小时`
       });
 
-      let taskCompleted = false;
-      let retryCount = 0;
-      const maxRetries = 3;
+      // 执行回测（不带重试）
+      try {
+        // 构建回测参数
+        const backtestParams = {
+          config_name: `${task.strategy_name}_${task.start_date}_${task.end_date}`,
+          strategy_name: task.strategy_name,
+          start_date: task.start_date,
+          end_date: task.end_date,
+          initial_capital: savedParams.initial_capital,
+          score_threshold: savedParams.score_threshold,
+          buy_amount: savedParams.buy_amount,
+          max_daily_buys: savedParams.max_daily_buys,
+          timing_strategy: task.timing_strategy,
+          support_level_method: task.support_level_method,
+          stop_loss: savedParams.stop_loss * 100, // 转换为百分比
+          take_profit: savedParams.take_profit * 100, // 转换为百分比
+          max_hold_days: savedParams.max_hold_days
+        };
 
-      // 重试机制：如果任务失败，最多重试3次
-      while (!taskCompleted && retryCount < maxRetries) {
-        try {
-          // 构建回测参数
-          const backtestParams = {
-            config_name: `${task.strategy_name}_${task.start_date}_${task.end_date}`,
-            strategy_name: task.strategy_name,
-            start_date: task.start_date,
-            end_date: task.end_date,
-            initial_capital: savedParams.initial_capital,
-            score_threshold: savedParams.score_threshold,
-            buy_amount: savedParams.buy_amount,
-            max_daily_buys: savedParams.max_daily_buys,
-            support_level_method: task.support_level_method,
-            stop_loss: savedParams.stop_loss * 100, // 转换为百分比
-            take_profit: savedParams.take_profit * 100, // 转换为百分比
-            max_hold_days: savedParams.max_hold_days
-          };
+        // 执行回测
+        console.log(`执行回测任务 ${i + 1}/${tasks.length}: ${task.strategy_name}`);
+        const response = await fetch('/api/trading/backtest/run', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(backtestParams)
+        });
 
-          // 执行回测
-          console.log(`执行回测任务 ${i + 1}/${tasks.length}: ${task.strategy_name} (尝试 ${retryCount + 1}/${maxRetries})`);
-          const response = await fetch('/api/trading/backtest/run', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(backtestParams)
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const data = await response.json();
-          if (data.success) {
-            // 保存结果
-            const result = data.data;
-            backtestTaskManager.updateTaskStatus(task.id, 'completed', result);
-            
-            // 添加结果页签
-            backtestUIManager.addResultTab(task, result);
-            
-            // 显示成功信息
-            backtestUIManager.showInfo(`任务 ${i + 1}/${tasks.length} 执行完成: ${task.strategy_name}`, 'success');
-            
-            // 标记任务完成
-            taskCompleted = true;
-          } else {
-            throw new Error(data.message || '执行回测失败');
-          }
-        } catch (error) {
-          // 处理执行错误
-          retryCount++;
-          console.error(`执行任务 ${task.id} 失败 (尝试 ${retryCount}/${maxRetries}):`, error);
-          
-          if (retryCount >= maxRetries) {
-            // 达到最大重试次数，标记任务失败
-            backtestTaskManager.updateTaskStatus(task.id, 'failed');
-            backtestUIManager.showError(`执行任务 ${i + 1} 失败: ${error.message}`);
-            taskCompleted = true; // 退出重试循环，继续下一个任务
-          } else {
-            // 等待后重试
-            console.log(`等待 5 秒后重试...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-          }
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
+
+        const data = await response.json();
+        if (data.success) {
+          // 保存结果
+          const result = data.data;
+          backtestTaskManager.updateTaskStatus(task.id, 'completed', result);
+          
+          // 添加结果页签
+          backtestUIManager.addResultTab(task, result);
+          
+          // 显示成功信息
+          backtestUIManager.showInfo(`任务 ${i + 1}/${tasks.length} 执行完成: ${task.strategy_name}`, 'success');
+        } else {
+          throw new Error(data.message || '执行回测失败');
+        }
+      } catch (error) {
+        // 标记任务失败
+        console.error(`执行任务 ${task.id} 失败:`, error);
+        backtestTaskManager.updateTaskStatus(task.id, 'failed');
+        backtestUIManager.showError(`执行任务 ${i + 1} 失败: ${error.message}`);
       }
     }
 

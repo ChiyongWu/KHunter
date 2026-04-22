@@ -24,17 +24,33 @@ export async function initMarketTemperature() {
  */
 export async function loadCurrentTemperature() {
     try {
-        const response = await fetch('/api/market-temperature/calculate', {
+        // 1. 首先尝试获取数据库中最新保存的温度数据
+        let response = await fetch('/api/market-temperature/latest');
+        let result = await response.json();
+        
+        if (result.success && result.data) {
+            // 使用最新保存的温度数据
+            marketTempCache = result.data;
+            updateTemperatureBadge(result.data);
+            return;
+        }
+        
+        // 2. 如果没有最新数据，尝试计算当前日期的温度
+        response = await fetch('/api/market-temperature/calculate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ use_cache: true })
         });
         
-        const result = await response.json();
+        result = await response.json();
         
         if (result.success) {
             marketTempCache = result.data;
             updateTemperatureBadge(result.data);
+        } else {
+            // 数据不可用时隐藏徽章
+            const badge = document.getElementById('market-temp-badge');
+            if (badge) badge.style.display = 'none';
         }
     } catch (error) {
         console.error('加载市场温度失败:', error);

@@ -26,11 +26,12 @@ class KHunterDAO:
     FIELDS = [
         'stock_code', 'stock_name', 'industry', 'sector',
         'hunting_date', 'strategy_name', 'support_level', 'current_price',
-        'price_diff', 'price_diff_percent', 'score', 'score_date', 'selection_record_id'
+        'price_diff', 'price_diff_percent', 'score', 'score_date', 'selection_record_id',
+        'timing_strategy', 'timing_signal'
     ]
     
     # 唯一约束字段
-    UNIQUE_FIELDS = ['stock_code', 'hunting_date', 'strategy_name']
+    UNIQUE_FIELDS = ['stock_code', 'hunting_date', 'strategy_name', 'timing_strategy']
     
     def __init__(self, db_manager):
         """
@@ -186,7 +187,8 @@ class KHunterDAO:
             sql = f"""
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score_date, score
+                   strategy_name, score_date, score,
+                   timing_strategy, timing_signal
             FROM {self.TABLE_NAME}
             WHERE hunting_date = ?
             ORDER BY score DESC
@@ -237,7 +239,8 @@ class KHunterDAO:
             sql = f"""
             SELECT stock_code, stock_name, industry, sector,
                    support_level, current_price, price_diff, price_diff_percent,
-                   strategy_name, score_date, score
+                   strategy_name, score_date, score,
+                   timing_strategy, timing_signal
             FROM {self.TABLE_NAME}
             WHERE hunting_date = ? AND stock_code = ?
             ORDER BY score DESC
@@ -345,16 +348,17 @@ class KHunterDAO:
             stock_code = result['stock_code']
             hunting_date = result['hunting_date']
             strategy_name = result['strategy_name']
+            timing_strategy = result.get('timing_strategy', 'support')
             
             # 2. 查询是否存在
             sql_check = f"""
             SELECT COUNT(*) as count FROM {self.TABLE_NAME}
-            WHERE stock_code = ? AND hunting_date = ? AND strategy_name = ?
+            WHERE stock_code = ? AND hunting_date = ? AND strategy_name = ? AND timing_strategy = ?
             """
             
             # 3. 执行查询
             result_check = self.db_manager.query_one(
-                sql_check, (stock_code, hunting_date, strategy_name)
+                sql_check, (stock_code, hunting_date, strategy_name, timing_strategy)
             )
             
             # 4. 判断是否存在
@@ -390,8 +394,9 @@ class KHunterDAO:
                 stock_code, stock_name, industry, sector,
                 hunting_date, strategy_name, support_level, current_price,
                 price_diff, price_diff_percent, score, score_date, selection_record_id,
+                timing_strategy, timing_signal,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """
             
             # 2. 准备参数
@@ -408,7 +413,9 @@ class KHunterDAO:
                 result['price_diff_percent'],
                 result.get('score'),
                 result.get('score_date'),
-                result.get('selection_record_id')
+                result.get('selection_record_id'),
+                result.get('timing_strategy', 'support'),
+                result.get('timing_signal', '')
             )
             
             # 3. 执行插入
@@ -447,8 +454,10 @@ class KHunterDAO:
                 price_diff_percent = ?,
                 score = ?,
                 score_date = ?,
+                timing_strategy = ?,
+                timing_signal = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE stock_code = ? AND hunting_date = ? AND strategy_name = ?
+            WHERE stock_code = ? AND hunting_date = ? AND strategy_name = ? AND timing_strategy = ?
             """
             
             # 2. 准备参数
@@ -459,9 +468,12 @@ class KHunterDAO:
                 result['price_diff_percent'],
                 result.get('score'),
                 result.get('score_date'),
+                result.get('timing_strategy', 'support'),
+                result.get('timing_signal', ''),
                 result['stock_code'],
                 result['hunting_date'],
-                result['strategy_name']
+                result['strategy_name'],
+                result.get('timing_strategy', 'support')
             )
             
             # 3. 执行更新

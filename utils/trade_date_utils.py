@@ -84,3 +84,33 @@ def get_trading_days(start_date: str, end_date: str) -> List[str]:
     except Exception as e:
         logger.error(f"获取交易日列表时出错: {e}")
         return []
+
+
+def get_trading_days_between(start_date: str, end_date: str) -> int:
+    """
+    计算两个日期之间的交易日天数
+
+    参数:
+        start_date: 开始日期，支持 YYYY-MM-DD 格式或 date 对象
+        end_date: 结束日期，支持 YYYY-MM-DD 格式或 date 对象
+    返回:
+        int: 交易日天数
+    """
+    try:
+        # 处理 date 对象
+        if hasattr(start_date, 'strftime'):
+            start_date_str = start_date.strftime('%Y-%m-%d')
+        else:
+            start_date_str = start_date
+        
+        if hasattr(end_date, 'strftime'):
+            end_date_str = end_date.strftime('%Y-%m-%d')
+        else:
+            end_date_str = end_date
+        
+        # 获取交易日列表并返回长度
+        trading_days = get_trading_days(start_date_str, end_date_str)
+        return len(trading_days) - 1  # 减去1，因为不包括买入当天
+    except Exception as e:
+        logger.error(f"计算交易日天数时出错: {e}")
+        return 0

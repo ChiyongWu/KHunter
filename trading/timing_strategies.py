@@ -11,11 +11,14 @@ class TimingResult:
     def __init__(self):
         self.is_buy = False        # 是否为买点
         self.is_sell = False       # 是否为卖点
+        self.buy_quantity = 0      # 买入数量
+        self.sell_quantity = 0     # 卖出数量（包括减仓）
         self.signal_strength = 0.0 # 信号强度（0-1）
         self.support_level = 0.0   # 支撑位
         self.resistance_level = 0.0 # 压力位
         self.indicators = {}       # 指标值
         self.message = ""          # 信号说明
+        self.trade_type = ""       # 交易类型：buy, add, sell, reduce
 
 
 class TimingStrategy(ABC):

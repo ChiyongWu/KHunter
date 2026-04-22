@@ -353,6 +353,7 @@ def run_backtest():
         # 提取执行条件和回测配置
         strategy_name = data.get('strategy_name', '')  # 接收中文名称
         support_level_method = data.get('support_level_method', 'ma20')
+        timing_strategy = data.get('timing_strategy', 'turtle')
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
         
@@ -389,6 +390,7 @@ def run_backtest():
             'initial_capital': initial_capital,
             'buy_amount': buy_amount,
             'max_daily_buys': max_daily_buys,
+            'timing_strategy': timing_strategy,
             'support_level_method': support_level_method,
             'buy_point_lower': -1,
             'buy_point_upper': 3,
@@ -983,9 +985,10 @@ def khunter_calculate():
         data = request.get_json() or {}
         hunting_date = data.get('hunting_date')
         tracking_days = data.get('tracking_days', 10)
+        timing_strategy = data.get('timing_strategy', 'support')
         
         # 2. 调用 API 计算
-        result = khunter_api.calculate(hunting_date, tracking_days)
+        result = khunter_api.calculate(hunting_date, tracking_days, timing_strategy)
         
         # 3. 返回结果
         return jsonify(result), 200 if result.get('success') else 400
@@ -1025,9 +1028,10 @@ def khunter_save():
         data = request.get_json() or {}
         hunting_date = data.get('hunting_date')
         tracking_days = data.get('tracking_days', 10)
+        timing_strategy = data.get('timing_strategy', 'support')
         
         # 2. 调用 API 保存
-        result = khunter_api.save(hunting_date, tracking_days)
+        result = khunter_api.save(hunting_date, tracking_days, timing_strategy)
         
         # 3. 返回结果
         return jsonify(result), 200 if result.get('success') else 400

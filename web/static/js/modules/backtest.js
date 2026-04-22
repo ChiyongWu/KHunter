@@ -12,19 +12,54 @@ let backtestConfig = {
     buy_amount: 100000,
     max_daily_buys: 5,
     support_level_method: 'ma20',
+    timing_strategy: 'support',
+    timing_params: {
+        turtle: {
+            n1: 6,
+            n2: 12,
+            atr_period: 20
+        },
+        rsi: {
+            overbought: 70,
+            oversold: 30,
+            period: 14
+        },
+        bollinger: {
+            period: 20,
+            std_dev: 2
+        }
+    },
     stop_loss: -0.05,  // 修复：应该是负数，表示 -5%（止损 5%）
     take_profit: 0.15,
     max_hold_days: 10
 };
 
 /**
+ * 切换支撑位置选择框的启用/禁用状态
+ */
+function toggleSupportLevel() {
+    const timingStrategy = document.getElementById('timing-strategy');
+    const supportLevel = document.getElementById('support-level');
+    
+    if (timingStrategy && supportLevel) {
+        if (timingStrategy.value === 'turtle') {
+            supportLevel.disabled = true;
+            supportLevel.style.opacity = '0.5';
+        } else {
+            supportLevel.disabled = false;
+            supportLevel.style.opacity = '1';
+        }
+    }
+}
+
+/**
  * 初始化回测配置页面
  */
-export function initBacktestConfigPage() {
+export async function initBacktestConfigPage() {
     console.log('初始化回测配置页面');
     
     // 加载策略列表
-    loadStrategies();
+    await loadStrategies();
     
     // 绑定表单事件
     bindConfigFormEvents();
@@ -221,10 +256,11 @@ async function loadBacktestParams() {
  * 初始化日期选择器
  */
 function initDatePickers() {
-    // 设置默认日期范围为最近3个月
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - 3);
+    // 获取当前日期
+    const today = new Date();
+    
+    // 开始日期：重置为上个月1日
+    const startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
     
     const startDateInput = document.getElementById('start-date');
     const endDateInput = document.getElementById('end-date');
@@ -234,7 +270,7 @@ function initDatePickers() {
     }
     
     if (endDateInput) {
-        endDateInput.value = endDate.toISOString().split('T')[0];
+        endDateInput.value = today.toISOString().split('T')[0];
     }
 }
 
@@ -248,6 +284,7 @@ async function runBacktest() {
         const startDateInput = document.getElementById('start-date');
         const endDateInput = document.getElementById('end-date');
         const supportLevelSelect = document.getElementById('support-level');
+        const timingStrategySelect = document.getElementById('timing-strategy');
         const backtestEngineSelect = document.getElementById('backtest-engine');
         
         // 验证表单数据
@@ -295,6 +332,15 @@ async function runBacktest() {
         // 直接使用中文策略名称
         const chineseStrategyName = strategySelect?.value || '';
         
+        let timingStrategy = timingStrategySelect?.value || 'turtle';
+        let supportLevelMethod = 'ma20';
+        
+        // 处理支撑位策略的情况
+        if (timingStrategy.startsWith('support_')) {
+            supportLevelMethod = timingStrategy.replace('support_', '');
+            timingStrategy = 'support';
+        }
+        
         backtestConfig = {
             config_name: configName,
             strategy_name: chineseStrategyName,  // 发送中文名称给后端
@@ -304,7 +350,9 @@ async function runBacktest() {
             score_threshold: savedParams.score_threshold,
             buy_amount: savedParams.buy_amount,
             max_daily_buys: savedParams.max_daily_buys,
-            support_level_method: supportLevelSelect?.value || 'ma20',
+            support_level_method: supportLevelMethod,
+            timing_strategy: timingStrategy,
+            timing_params: backtestConfig.timing_params,
             stop_loss: savedParams.stop_loss * 100, // 转换为百分比
             take_profit: savedParams.take_profit * 100, // 转换为百分比
             max_hold_days: savedParams.max_hold_days
@@ -417,6 +465,10 @@ function displayBacktestResult(result) {
                         <div class="form-group">
                             <label>回测期间</label>
                             <input type="text" value="${result.start_date || ''} 至 ${result.end_date || ''}" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label>择时策略</label>
+                            <input type="text" value="${result.timing_strategy || ''}" disabled>
                         </div>
                         <div class="form-group">
                             <label>支撑位置计算方法</label>
@@ -716,6 +768,10 @@ function displayBacktestResultInModal(result) {
                         <div class="form-group" style="flex: 1; min-width: 200px;">
                             <label>回测期间</label>
                             <input type="text" value="${result.start_date || ''} 至 ${result.end_date || ''}" disabled>
+                        </div>
+                        <div class="form-group" style="flex: 1; min-width: 200px;">
+                            <label>择时策略</label>
+                            <input type="text" value="${result.timing_strategy || ''}" disabled>
                         </div>
                         <div class="form-group" style="flex: 1; min-width: 200px;">
                             <label>支撑位置计算方法</label>

@@ -658,8 +658,8 @@ class BacktestDAO:
                     result_id, stock_code, stock_name, selection_date,
                     buy_date, buy_price, buy_amount, quantity,
                     sell_date, sell_price, sell_type, return_rate,
-                    profit_loss, hold_days, support_level
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    profit_loss, hold_days, support_level, trade_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
             params_list = []
@@ -695,7 +695,8 @@ class BacktestDAO:
                     trade.get('return_rate', 0) or 0,
                     trade.get('profit_loss', 0) or 0,
                     trade.get('hold_days', 0) or 0,
-                    trade.get('support_level', 0) or 0
+                    trade.get('support_level', 0) or 0,
+                    trade.get('trade_type', 'normal') or 'normal'
                 )
                 params_list.append(params)
             

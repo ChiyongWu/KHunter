@@ -54,7 +54,8 @@ class KHunterAPI:
     def calculate(
         self,
         hunting_date: str,
-        tracking_days: int = DEFAULT_TRACKING_DAYS
+        tracking_days: int = DEFAULT_TRACKING_DAYS,
+        timing_strategy: str = 'support'
     ) -> Dict[str, Any]:
         """
         计算狩猎场数据
@@ -62,20 +63,23 @@ class KHunterAPI:
         参数：
             hunting_date: 狩猎日期
             tracking_days: 跟踪天数
+            timing_strategy: 择时策略名称，默认support
         
         返回：
             Dict: 标准化响应
         """
         # hunting_date: 狩猎日期，类型str，必填
         # tracking_days: 跟踪天数，类型int，默认10
+        # timing_strategy: 择时策略名称，类型str，默认support
         try:
             # 1. 验证参数
             self._validate_date(hunting_date)
             self._validate_tracking_days(tracking_days)
+            self._validate_timing_strategy(timing_strategy)
             
             # 2. 调用数据处理器
-            logger.info(f"计算请求: {hunting_date} {tracking_days}")
-            result = self.data_processor.process(hunting_date, tracking_days)
+            logger.info(f"计算请求: {hunting_date} {tracking_days} timing_strategy={timing_strategy}")
+            result = self.data_processor.process(hunting_date, tracking_days, timing_strategy)
             
             # 3. 返回成功响应
             logger.info(f"计算成功: {hunting_date} {len(result['results'])} 条记录")
@@ -94,7 +98,8 @@ class KHunterAPI:
     def save(
         self,
         hunting_date: str,
-        tracking_days: int = DEFAULT_TRACKING_DAYS
+        tracking_days: int = DEFAULT_TRACKING_DAYS,
+        timing_strategy: str = 'support'
     ) -> Dict[str, Any]:
         """
         保存计算结果
@@ -102,20 +107,23 @@ class KHunterAPI:
         参数：
             hunting_date: 狩猎日期
             tracking_days: 跟踪天数
+            timing_strategy: 择时策略名称，默认support
         
         返回：
             Dict: 标准化响应
         """
         # hunting_date: 狩猎日期，类型str，必填
         # tracking_days: 跟踪天数，类型int，默认10
+        # timing_strategy: 择时策略名称，类型str，默认support
         try:
             # 1. 验证参数
             self._validate_date(hunting_date)
             self._validate_tracking_days(tracking_days)
+            self._validate_timing_strategy(timing_strategy)
             
             # 2. 先计算数据
-            logger.info(f"保存请求: {hunting_date} {tracking_days}")
-            result = self.data_processor.process(hunting_date, tracking_days)
+            logger.info(f"保存请求: {hunting_date} {tracking_days} timing_strategy={timing_strategy}")
+            result = self.data_processor.process(hunting_date, tracking_days, timing_strategy)
             
             # 3. 保存结果到数据库
             saved_count = self.dao.save_batch_results(result['results'])
@@ -389,6 +397,37 @@ class KHunterAPI:
     
     
     # ==================== 私有方法 - 参数验证 ====================
+    
+    # 合法的择时策略列表
+    VALID_TIMING_STRATEGIES = ['support', 'turtle', 'rsi', 'bollinger']
+    
+    def _validate_timing_strategy(self, timing_strategy: str) -> None:
+        """
+        验证择时策略名称
+        
+        参数：
+            timing_strategy: 择时策略名称
+        
+        异常：
+            ValueError: 如果策略名称无效
+        """
+        # timing_strategy: 择时策略名称，类型str，必填
+        try:
+            # 1. 检查类型
+            if not timing_strategy or not isinstance(timing_strategy, str):
+                raise ValueError("择时策略名称不能为空")
+            
+            # 2. 检查是否为合法策略
+            if timing_strategy not in self.VALID_TIMING_STRATEGIES:
+                raise ValueError(
+                    f"无效的择时策略: {timing_strategy}，"
+                    f"可选值: {', '.join(self.VALID_TIMING_STRATEGIES)}"
+                )
+            
+            logger.debug(f"择时策略验证成功: {timing_strategy}")
+        
+        except ValueError as e:
+            raise
     
     def _validate_date(self, date_str: str) -> None:
         """

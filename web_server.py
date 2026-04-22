@@ -2782,6 +2782,37 @@ def query_market_temperature():
         })
 
 
+@app.route('/api/market-temperature/latest', methods=['GET'])
+def get_latest_market_temperature():
+    """
+    获取最新的市场温度数据
+    
+    返回：
+        最新市场温度数据
+    """
+    try:
+        from trading.market_temperature_dao import MarketTemperatureDAO
+        dao = MarketTemperatureDAO()
+        result = dao.get_latest()
+        
+        if result:
+            return jsonify({
+                'success': True,
+                'data': clean_data_for_json(result)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': '暂无温度数据'
+            })
+    except Exception as e:
+        logger.error(f"获取最新市场温度失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
 @app.route('/api/market-temperature/trend', methods=['GET'])
 def get_market_temperature_trend():
     """
@@ -3056,7 +3087,8 @@ def run_web_server(host='0.0.0.0', port=5000, debug=False):
         app, 
         host=host, 
         port=port, 
-        debug=debug
+        debug=debug,
+        allow_unsafe_werkzeug=True
     )
 
 

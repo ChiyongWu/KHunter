@@ -140,6 +140,10 @@ class StrategyRegistry:
         自动从目录加载策略
         导入所有非 _ 开头的 .py 文件
         """
+        # 如果已经有策略注册，跳过自动注册
+        if self.strategies:
+            return
+        
         strategy_path = Path(strategy_dir)
         if not strategy_path.exists():
             strategy_path = Path(__file__).parent

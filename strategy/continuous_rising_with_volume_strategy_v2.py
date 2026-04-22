@@ -33,7 +33,7 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         self.min_consecutive_阳 = self.params.get('min_consecutive_阳', 3)  # 最小连续阳线天数
         self.max_consecutive_阳 = self.params.get('max_consecutive_阳', 10)  # 最大连续阳线天数
         self.volume_multiplier = self.params.get('volume_multiplier', 2.2)  # 倍量阈值（2.2倍）
-        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.07)  # 倍量阳线最小涨幅（7%）
+        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.08)  # 倍量阳线最小涨幅（8%）
         self.max_adjust_days = self.params.get('max_adjust_days', 4)  # 缩量调整最大天数
         self.min_adjust_days = self.params.get('min_adjust_days', 2)  # 缩量调整最小天数
         self.key_day_offset_min = self.params.get('key_day_offset_min', 3)  # 关键日距今最小天数

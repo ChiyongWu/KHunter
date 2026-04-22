@@ -694,6 +694,8 @@ CREATE TABLE IF NOT EXISTS backtest_trade (
     -- hold_days: 持有天数，类型INTEGER，可选
     support_level REAL,
     -- support_level: 支撑位置，类型REAL，可选
+    trade_type TEXT DEFAULT 'normal',
+    -- trade_type: 交易类型，类型TEXT，默认normal，可选值buy/add/sell/reduce
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     -- created_at: 创建时间，类型DATETIME，默认当前时间
     FOREIGN KEY (result_id) REFERENCES backtest_result(id) ON DELETE CASCADE
@@ -766,8 +768,12 @@ CREATE TABLE IF NOT EXISTS khunter (
     -- created_at: 创建时间，类型DATETIME，必填，默认当前时间
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- updated_at: 更新时间，类型DATETIME，必填，默认当前时间
-    UNIQUE(stock_code, hunting_date, strategy_name)
-    -- 股票代码、狩猎日期、策略名称的组合唯一
+    timing_strategy VARCHAR(20) NOT NULL DEFAULT 'support',
+    -- timing_strategy: 择时策略名称，类型VARCHAR(20)，必填，默认support，可选值support/turtle/rsi/bollinger
+    timing_signal VARCHAR(200),
+    -- timing_signal: 择时信号描述，类型VARCHAR(200)，可选，例如价格在支撑位区间
+    UNIQUE(stock_code, hunting_date, strategy_name, timing_strategy)
+    -- 股票代码、狩猎日期、策略名称、择时策略的组合唯一
 );
 
 -- 为 khunter 表创建索引

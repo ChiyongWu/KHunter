@@ -48,7 +48,7 @@ async function loadModules() {
         };
         
         // 初始化
-        initializeApp();
+        await initializeApp();
     } catch (error) {
         console.error('Failed to load modules:', error);
         alert('加载模块失败，请刷新页面重试');
@@ -56,7 +56,7 @@ async function loadModules() {
 }
 
 // 初始化应用
-function initializeApp() {
+async function initializeApp() {
     // 初始化WebSocket连接
     modules.websocket.initWebSocket();
     
@@ -71,16 +71,10 @@ function initializeApp() {
     modules.ranking.setupRankingEvents();
     
     // 初始化批量回测模块
-    modules.backtestBatch.initBacktestBatchModule();
-    
-    // 初始化市场温度计
-    modules.marketTemp.initMarketTemperature();
+    await modules.backtestBatch.initBacktestBatchModule();
     
     // 初始化资金流向选股页面
     modules.moneyFlow.initMoneyFlowPage();
-    
-    // 暴露市场温度计函数
-    window.showTemperatureDetail = modules.marketTemp.showTemperatureDetail;
     
     // // 初始化执行管理器（需要在批量回测模块之后初始化）
     // try {

@@ -28,21 +28,24 @@ class TradingPlanGenerator:
         self.khunter_dao = khunter_dao
         self.trading_plan_dao = trading_plan_dao
 
-    def generate(self, plan_date: str) -> Dict[str, Any]:
+    def generate(self, plan_date_input: str) -> Dict[str, Any]:
         """
         生成交易计划
 
         参数：
-            plan_date: 计划执行日期，格式 YYYY-MM-DD（用户选择的日期）
+            plan_date_input: 用户输入的日期（可能是交易日或非交易日），格式 YYYY-MM-DD
 
         返回：
             Dict: 包含 plan_date, hunting_date, total_count, plans, temperature_info
         """
         # 获取实际狩猎日期（如果当天有K线则用当天，否则用前一天）
-        hunting_date = self._get_hunting_date(plan_date)
+        hunting_date = self._get_hunting_date(plan_date_input)
         
-        # 获取温度信息（使用计划日期）
-        temperature_info = self._get_market_temperature(plan_date)
+        # 获取下一个交易日作为计划执行日期
+        plan_date = self._get_next_trading_date(hunting_date)
+        
+        # 获取温度信息（使用狩猎日期，因为温度数据与K线日期对应）
+        temperature_info = self._get_market_temperature(hunting_date)
         
         # 获取狩猎结果（使用实际狩猎日期）
         hunting_results = self._get_hunting_results(hunting_date)
@@ -206,6 +209,43 @@ class TradingPlanGenerator:
         except Exception as e:
             logger.warning(f"检查K线数据失败: {e}")
             return False
+
+    def _get_next_trading_date(self, hunting_date: str) -> str:
+        """
+        获取狩猎日的下一个交易日
+
+        参数：
+            hunting_date: 狩猎日期，格式 YYYY-MM-DD
+
+        返回：
+            str: 下一个交易日，格式 YYYY-MM-DD
+        """
+        try:
+            # 往前找一天，查询是否有下一个交易日的K线数据
+            hunting_dt = datetime.strptime(hunting_date, '%Y-%m-%d')
+            
+            # 逐日向后查找，最多查找30天
+            for i in range(1, 31):
+                next_dt = hunting_dt + timedelta(days=i)
+                next_date_str = f"{next_dt.year}-{next_dt.month:02d}-{next_dt.day:02d}"
+                
+                # 检查是否有K线数据
+                if self._has_kline_data(next_date_str):
+                    logger.debug(f"狩猎日 {hunting_date} 的下一个交易日: {next_date_str}")
+                    return next_date_str
+            
+            # 如果没找到，使用后一天（周末等）
+            next_dt = hunting_dt + timedelta(days=1)
+            fallback_date = f"{next_dt.year}-{next_dt.month:02d}-{next_dt.day:02d}"
+            logger.warning(f"未找到下一个交易日，使用后一天: {fallback_date}")
+            return fallback_date
+            
+        except Exception as e:
+            logger.error(f"获取下一个交易日失败: {e}")
+            # fallback：直接返回后一天
+            hunting_dt = datetime.strptime(hunting_date, '%Y-%m-%d')
+            next_dt = hunting_dt + timedelta(days=1)
+            return f"{next_dt.year}-{next_dt.month:02d}-{next_dt.day:02d}"
 
     def _get_hunting_results(self, hunting_date: str) -> List[Dict[str, Any]]:
         """
