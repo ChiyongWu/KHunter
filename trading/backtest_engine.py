@@ -10,15 +10,16 @@ import numpy as np
 import pandas as pd
 import json
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
 from strategy.strategy_registry import StrategyRegistry
 from trading.stock_score_api import calculate_stock_score
 from trading.backtest_scorer import BacktestScoreCalculator
-from trading.backtest_temp_constraint import BacktestTempConstraint
-from trading.market_temperature_dao import MarketTemperatureDAO
+
+from trading.timing_strategies import TimingStrategyFactory
+from utils.strategy_name_mapper import get_english_name
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -52,21 +53,7 @@ class BacktestEngine:
         
         # 初始化回测专用评分器
         self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
-        
-        # 初始化温度约束处理器
-        self.temp_constraint = None
-        self.temp_constraint_enabled = False
-        self.temp_constraint_mode = 'both'
-        self.temp_stats = {
-            'total_days': 0,
-            'days_constrained': 0,
-            'days_banned': 0,
-            'constrained_by_count': 0,
-            'constrained_by_position': 0,
-            'avg_position_applied': 0,
-            'total_position_capital': 0
-        }
-        
+
         # 股票数据缓存（性能优化）
         self.stock_data_cache = {}  # {code: df} 完整历史数据
         self.stock_name_cache = {}  # {code: name} 股票名称缓存
@@ -78,6 +65,12 @@ class BacktestEngine:
         # 交易日历缓存
         self.trading_calendar_cache = {}  # {date_str: is_open} 交易日历缓存
         self._sorted_trading_dates = []   # 排序后的交易日列表
+        
+        # 择时策略
+        self.timing_strategy = None
+        
+        # 加载策略支撑位方法配置（从 config/support_methods.yaml）
+        self._support_methods_config = self._load_support_methods_config()
         
     def run_backtest(self, strategy_name: str, config: Dict) -> Dict:
         """运行回测
@@ -98,27 +91,18 @@ class BacktestEngine:
             self.stock_filtered_cache.clear()
             self.buy_candidate_pool.clear()
             
-            # 重置温度统计
-            self.temp_stats = {
-                'total_days': 0,
-                'days_constrained': 0,
-                'days_banned': 0,
-                'constrained_by_count': 0,
-                'constrained_by_position': 0,
-                'avg_position_applied': 0,
-                'total_position_capital': 0
-            }
+            # 初始化择时策略
+            timing_strategy_name = config.get('timing_strategy', 'support')
+            timing_params = config.get('timing_params', {})
+            self.timing_strategy = TimingStrategyFactory.create_strategy(
+                timing_strategy_name, timing_params.get(timing_strategy_name, {})
+            )
+            logger.info(f"初始化择时策略: {timing_strategy_name}")
             
-            # 初始化温度约束
-            self.temp_constraint_enabled = config.get('enable_temp_limit', 0) == 1
-            self.temp_constraint_mode = config.get('temp_limit_mode', 'both')
+            # 存储择时策略名称，用于后续日志记录
+            self.timing_strategy_name = timing_strategy_name
             
-            if self.temp_constraint_enabled:
-                logger.info(f"启用温度约束，模式: {self.temp_constraint_mode}")
-                self.temp_constraint = BacktestTempConstraint(MarketTemperatureDAO())
-            else:
-                self.temp_constraint = None
-                logger.info("温度约束未启用")
+
             
             # 1. 获取回测日期范围
             start_date = config.get('start_date')
@@ -151,64 +135,49 @@ class BacktestEngine:
             dates = []      # 回测日期列表
             
             for i, current_date in enumerate(date_range):
+                logger.info(f"\n============================================================")
                 logger.info(f"处理日期: {current_date}")
+                logger.info(f"============================================================")
                 
                 # 初始化当日买入计数
                 daily_buys = 0
                 max_daily_buys = config.get('max_daily_buys', 5)
-                candidate_track_days = config.get('candidate_track_days', 5)
                 
-                # 获取温度约束
-                effective_max_buys = max_daily_buys
-                effective_position_ratio = 1.0
-                temp_constraint_info = None
+                # 记录当日卖出的股票（用于限制当天卖出的股票不买入）
+                today_sold_stocks = set()
                 
-                if self.temp_constraint_enabled and self.temp_constraint:
-                    trade_date_str = current_date.strftime('%Y%m%d')
-                    temp_data = self.temp_constraint.get_temperature_data(trade_date_str)
-                    
-                    if temp_data:
-                        constraint = self.temp_constraint.get_constraint(
-                            temp_data['temperature'], 
-                            self.temp_constraint_mode
-                        )
-                        temp_constraint_info = {
-                            'trade_date': trade_date_str,
-                            'temperature': temp_data['temperature'],
-                            'status': temp_data['status'],
-                            'constraint': constraint
-                        }
-                        
-                        # 应用数量约束
-                        if self.temp_constraint_mode in ('count', 'both'):
-                            effective_max_buys = min(effective_max_buys, constraint['max_buy_count'])
-                        
-                        # 应用仓位约束
-                        if self.temp_constraint_mode in ('position', 'both'):
-                            effective_position_ratio = constraint['position_ratio']
-                        
-                        # 记录温度统计
-                        self.temp_stats['total_days'] += 1
-                        if constraint['max_buy_count'] == 0:
-                            self.temp_stats['days_banned'] += 1
-                        elif effective_max_buys < max_daily_buys:
-                            self.temp_stats['days_constrained'] += 1
-                            if self.temp_constraint_mode in ('count', 'both') and constraint['max_buy_count'] < max_daily_buys:
-                                self.temp_stats['constrained_by_count'] += 1
-                            if self.temp_constraint_mode in ('position', 'both') and effective_position_ratio < 1.0:
-                                self.temp_stats['constrained_by_position'] += 1
-                                self.temp_stats['total_position_capital'] += effective_position_ratio
-                        
-                        logger.info(f"温度约束: {temp_data['temperature']:.1f}° {temp_data['status']}, "
-                                   f"有效最大买入: {effective_max_buys}, 仓位系数: {effective_position_ratio:.2f}")
-                    else:
-                        logger.warning(f"未找到日期 {trade_date_str} 的温度数据，跳过温度约束")
+                # 记录当日交易情况
+                logger.info(f"当日初始资金: {current_capital:.2f}")
+                logger.info(f"当日初始持仓: {len(positions)} 只股票")
+                logger.info(f"当日最大买入限制: {max_daily_buys} 只")
                 
                 # 统一处理逻辑：先处理卖出，再处理买入
+                
+                # 合并重复持仓（同一股票可能有多条记录）
+                if positions and len(positions) > 1:
+                    merged = {}
+                    for pos in positions:
+                        code = pos['stock_code']
+                        if code in merged:
+                            # 合并：累加数量和金额，重新计算均价
+                            merged[code]['quantity'] += pos['quantity']
+                            merged[code]['buy_amount'] += pos['buy_amount']
+                            merged[code]['buy_price'] = merged[code]['buy_amount'] / merged[code]['quantity']
+                        else:
+                            merged[code] = pos.copy()
+                    new_positions = list(merged.values())
+                    if len(new_positions) < len(positions):
+                        logger.info(f"合并重复持仓: {len(positions)} -> {len(new_positions)}")
+                    positions = new_positions
                 
                 # 处理卖出（如果有持仓）
                 if positions:
                     logger.info(f"开始执行卖出操作，当前持仓数: {len(positions)}")
+                    # 记录当前持仓详情
+                    logger.info("当前持仓详情:")
+                    for i, pos in enumerate(positions):
+                        logger.info(f"  {i+1}. {pos['stock_code']} {pos['stock_name']}: 持仓数量={pos['quantity']}, 成本价={pos['buy_price']:.2f}, 持仓金额={pos['buy_amount']:.2f}")
+                    
                     positions, sell_records = self._process_sell(positions, current_date, config)
                     logger.info(f"卖出操作完成，卖出 {len(sell_records)} 笔交易，剩余持仓数: {len(positions)}")
                     
@@ -216,40 +185,66 @@ class BacktestEngine:
                     for sell_record in sell_records:
                         current_capital += sell_record['sell_amount']
                         trades.append(sell_record)
-                        logger.info(f"卖出股票: {sell_record['stock_code']} {sell_record['stock_name']}, 类型: {sell_record['sell_type']}, 收益率: {sell_record['return_rate']:.2f}%")
+                        # 记录当日卖出的股票
+                        today_sold_stocks.add(sell_record['stock_code'])
+                        logger.info(f"【卖出】股票: {sell_record['stock_code']} {sell_record['stock_name']}, 类型: {sell_record['sell_type']}, 价格: {sell_record['sell_price']:.2f}, 数量: {sell_record['quantity']}, 金额: {sell_record['sell_amount']:.2f}, 收益率: {sell_record['return_rate']:.2f}%")
+                    
+                    if today_sold_stocks:
+                        logger.info(f"当日卖出股票: {list(today_sold_stocks)}")
+                    else:
+                        logger.info("当日无卖出股票")
+                
+                # 检查股票池移除条件（在选股之前执行，使用前一日收盘价）
+                if self.buy_candidate_pool:
+                    logger.info(f"开始检查股票池移除条件，当前股票池数量: {len(self.buy_candidate_pool)}")
+                    removed = self._check_pool_removal(current_date, config)
+                    if removed:
+                        logger.info(f"股票池移除 {len(removed)} 只股票")
                 
                 # 执行选股获得前一日的选股结果
                 selection_date = self._get_previous_trading_day(current_date)
                 logger.info(f"执行选股日期: {selection_date}")
                 
-                # 执行选股（内存中处理，不存入数据库）
-                logger.info(f"开始执行选股，策略: {strategy_name}，日期: {selection_date}")
-                selected_stocks = self._execute_selection(strategy_name, selection_date)
-                logger.info(f"选股完成，共选出 {len(selected_stocks)} 只股票")
-                
-                # 评分并筛选（回测模式：不依赖数据库）
-                logger.info(f"开始对 {len(selected_stocks)} 只股票进行评分")
-                scored_stocks = self._score_stocks(selected_stocks, strategy_name, selection_date)
-                # 记录每只股票的综合评分
-                for stock in scored_stocks:
-                    logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 综合评分: {stock['score']}，否决标志: {stock.get('veto_flag', False)}")
-                candidate_stocks = [stock for stock in scored_stocks if not stock.get('veto_flag', False) and stock['score'] >= config.get('score_threshold', 60)]
-                
-                logger.info(f"筛选后待买入股票数: {len(candidate_stocks)}")
+                # 执行选股、评分、筛选，得到候选股票池
+                candidate_stocks = self._select_and_score_stocks(strategy_name, selection_date, config)
                 
                 # 将新选出的股票加入可买股票池
+                new_added = 0
                 for stock in candidate_stocks:
                     # 检查是否已经在池中
                     if not any(item['stock']['stock_code'] == stock['stock_code'] for item in self.buy_candidate_pool):
+                        # 计算支撑位（加入时直接计算并保存）
+                        support_level = self._calculate_support_level(stock, strategy_name, selection_date)
+                        # 获取支撑位计算方法
+                        support_method = self._get_support_method_for_strategy(strategy_name)
+                        
                         self.buy_candidate_pool.append({
                             'stock': stock,
                             'added_date': selection_date,
-                            'strategy_name': strategy_name
+                            'strategy_name': strategy_name,
+                            'support_level': support_level,       # 支撑位价格
+                            'support_method': support_method      # 支撑位计算方法
                         })
-                        logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池")
+                        # 记录加入日志（包含支撑位信息）
+                        if support_level > 0:
+                            logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池, "
+                                       f"支撑位={support_level:.2f}, 方法={support_method}")
+                        else:
+                            logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池, 支撑位计算失败")
+                        new_added += 1
                 
                 # 处理可买股票池
-                logger.info(f"当前可买股票池数量: {len(self.buy_candidate_pool)}")
+                logger.info(f"\n当前可买股票池数量: {len(self.buy_candidate_pool)} (新增 {new_added} 只)")
+                if self.buy_candidate_pool:
+                    logger.info("可买股票池详情:")
+                    for i, candidate in enumerate(self.buy_candidate_pool):
+                        stock = candidate['stock']
+                        added_date = candidate['added_date']
+                        support_level = candidate.get('support_level', 0.0)
+                        support_method = candidate.get('support_method', 'unknown')
+                        # 显示支撑位信息
+                        support_info = f"，支撑位={support_level:.2f}({support_method})" if support_level > 0 else "，支撑位=未计算"
+                        logger.info(f"  {i+1}. {stock['stock_code']} {stock['stock_name']}: 加入日期={added_date}，评分={stock['score']}{support_info}")
                 remaining_candidates = []
                 
                 # 记录当日已买入的股票代码
@@ -260,114 +255,153 @@ class BacktestEngine:
                     stock_code = stock['stock_code']
                     added_date = candidate['added_date']
                     
-                    # 检查是否已经持有
-                    if any(p['stock_code'] == stock_code for p in positions):
-                        logger.info(f"股票 {stock_code} 已持有，从可买股票池中移除")
-                        continue
-                    
-                    # 检查当日是否已经买入过
+                    # 当日已买入的股票：跳过检查，但保留在池中
                     if stock_code in today_bought_stocks:
-                        logger.info(f"股票 {stock_code} 当日已买入，从可买股票池中移除")
-                        continue
-                    
-                    # 计算跟踪的交易日天数
-                    # 获取从加入日期到当前选股日期的所有交易日
-                    trading_dates = self._get_trading_dates(added_date.strftime('%Y-%m-%d'), selection_date.strftime('%Y-%m-%d'))
-                    track_days = len(trading_dates)
-                    logger.info(f"股票 {stock_code} {stock['stock_name']} 已跟踪 {track_days} 个交易日")
-                    
-                    # 检查是否跟踪满5个交易日
-                    if track_days >= candidate_track_days:
-                        logger.info(f"股票 {stock_code} {stock['stock_name']} 跟踪满 {candidate_track_days} 个交易日，从可买股票池中移除")
-                        continue
-                    
-                    # 从选股信号中解析关键日期
-                    signal = stock.get('signal', {})
-                    key_date = self._extract_key_date(signal)
-                    
-                    # 如果没有关键日期，跳过支撑位计算
-                    if not key_date:
-                        logger.warning(f"选股信号中没有关键日期，跳过支撑位计算: {stock_code}")
-                        support_level = 0.0
-                    else:
-                        # 使用关键日期计算支撑位
-                        # 注意：config中的参数名是 'support_level_method'，不是 'support_method'
-                        support_method = config.get('support_level_method') or config.get('support_method', 'ma20')
-                        support_level = self._calculate_support_level(stock, key_date, support_method)
-                    
-                    logger.info(f"股票 {stock_code} {stock['stock_name']} 支撑位置: {support_level}")
-                    
-                    # 计算买入价格（当日开盘价）
-                    buy_price = self._get_stock_price(stock_code, current_date, 'open')
-                    logger.info(f"股票 {stock_code} {stock['stock_name']} 当日开盘价: {buy_price}")
-                    
-                    # 买点判断
-                    is_buy = self._is_buy_point(buy_price, support_level, config)
-                    logger.info(f"股票 {stock_code} {stock['stock_name']} 买点判断: {is_buy}")
-                    
-                    if is_buy:
-                        if daily_buys >= effective_max_buys:
-                            logger.info(f"达到当日最大买入限制: {effective_max_buys}")
-                            remaining_candidates.append(candidate)
-                            continue
-                        
-                        # 计算买入金额（应用仓位系数）
-                        base_buy_amount = config.get('buy_amount', 100000)
-                        buy_amount = min(base_buy_amount * effective_position_ratio, current_capital)
-                        
-                        if effective_position_ratio < 1.0:
-                            logger.info(f"仓位系数 {effective_position_ratio:.2f}，调整买入金额: {base_buy_amount} -> {buy_amount}")
-                        
-                        if buy_amount > 0:
-                            # 计算买入数量
-                            quantity = int(buy_amount / buy_price)
-                            if quantity > 0:
-                                # 执行买入
-                                buy_record = self._execute_buy(
-                                    stock_code,
-                                    stock['stock_name'],
-                                    added_date,
-                                    current_date,
-                                    buy_price,
-                                    buy_amount,
-                                    quantity,
-                                    support_level
-                                )
-                                
-                                # 更新持仓和资金
-                                positions.append({
-                                    'stock_code': stock_code,
-                                    'stock_name': stock['stock_name'],
-                                    'buy_date': current_date,
-                                    'buy_price': buy_price,
-                                    'quantity': quantity,
-                                    'buy_amount': buy_amount,
-                                    'support_level': support_level
-                                })
-                                
-                                current_capital -= buy_amount
-                                trades.append(buy_record)
-                                daily_buys += 1
-                                
-                                # 记录当日已买入的股票
-                                today_bought_stocks.add(stock_code)
-                                
-                                logger.info(f"买入股票: {stock_code} {stock['stock_name']}, 价格: {buy_price}, 数量: {quantity}, 金额: {buy_amount}")
-                    else:
-                        # 未达到买点，继续在池中跟踪
+                        logger.info(f"股票 {stock_code} 当日已买入，继续跟踪")
                         remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 检查当日最大买入限制
+                    if daily_buys >= max_daily_buys:
+                        logger.info(f"达到当日最大买入限制: {max_daily_buys}")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 获取股票数据
+                    df = self.stock_filtered_cache.get(stock_code)
+                    if df is None:
+                        logger.warning(f"无法获取股票 {stock_code} 的数据，跳过")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 日期切片：只取到当前日期为止的数据
+                    date_str = current_date.strftime('%Y-%m-%d')
+                    df_to_date = df[df['date'] <= date_str].copy()
+                    if df_to_date.empty:
+                        logger.warning(f"股票 {stock_code} 没有可用数据，跳过")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 反转数据为倒序（最新的在前），供策略使用
+                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                    
+                    # 调用策略获取完整信号（策略会判断是否加仓）
+                    result = None
+                    if self.timing_strategy:
+                        result = self.timing_strategy.get_timing_result(df_to_date, None, current_capital)
+                        timing_name = self.timing_strategy.__class__.__name__
+                        logger.info(f"{timing_name}信号: is_buy={result.is_buy}, is_sell={result.is_sell}, "
+                                   f"buy_qty={result.buy_quantity}, sell_qty={result.sell_quantity}, "
+                                   f"type={result.trade_type}, msg={result.message}")
+                    
+                    # 判断是否买入
+                    is_buy = result.is_buy if result else False
+                    if not is_buy:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 无买入信号")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 获取买入价格（以开盘价为准）
+                    buy_price = self._get_stock_price(stock_code, current_date, 'open')
+                    logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格: {buy_price}")
+                    
+                    # 计算买入数量：优先使用策略返回的数量，否则根据配置的买入金额计算
+                    if result and result.buy_quantity > 0:
+                        quantity = result.buy_quantity
+                    else:
+                        # 策略未返回有效数量，用配置的买入金额计算
+                        config_buy_amount = config.get('buy_amount', 100000)
+                        quantity = int(config_buy_amount / buy_price) // 100 * 100
+                    
+                    if quantity <= 0:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 计算买入数量为0")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 确保不超过可用资金
+                    buy_amount = quantity * buy_price
+                    if buy_amount > current_capital:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 资金不足（需要{buy_amount:.2f}，可用{current_capital:.2f}）")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
+                    # 执行买入
+                    trade_type = result.trade_type if result else 'new'
+                    
+                    buy_record = self._execute_buy(stock_code, stock['stock_name'], added_date, current_date,
+                                                  buy_price, buy_amount, quantity)
+                    buy_record['trade_type'] = trade_type
+                    
+                    # 处理持仓：查找是否已有同股票持仓
+                    existing_pos = None
+                    for pos in positions:
+                        if pos['stock_code'] == stock_code:
+                            existing_pos = pos
+                            break
+                    
+                    if existing_pos:
+                        # 已有持仓，合并（加仓）
+                        old_quantity = existing_pos['quantity']
+                        old_amount = existing_pos['buy_amount']
+                        existing_pos['quantity'] += quantity
+                        existing_pos['buy_amount'] += buy_amount
+                        # 加权平均买入价
+                        existing_pos['buy_price'] = existing_pos['buy_amount'] / existing_pos['quantity']
+                        logger.info(f"【加仓】{current_date} {stock_code} {stock['stock_name']}: "
+                                   f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
+                                   f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
+                    else:
+                        # 新买入：添加到持仓
+                        positions.append({
+                            'stock_code': stock_code,
+                            'stock_name': stock['stock_name'],
+                            'buy_date': current_date,
+                            'buy_price': buy_price,
+                            'quantity': quantity,
+                            'buy_amount': buy_amount
+                        })
+                        logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}")
+                    
+                    current_capital -= buy_amount
+                    trades.append(buy_record)
+                    daily_buys += 1
+                    today_bought_stocks.add(stock_code)
+                    
+                    # 买入成功仍保留在股票池中
+                    remaining_candidates.append(candidate)
                 
-                # 更新可买股票池
+                # 更新可买股票池（保留所有股票，不因买入而移出）
                 self.buy_candidate_pool = remaining_candidates
                 logger.info(f"处理后可买股票池数量: {len(self.buy_candidate_pool)}")
                 
                 # 计算当日总资产（可用资金 + 持仓市值）
                 total_assets = current_capital
+                position_details = []
                 for position in positions:
                     # 获取当日收盘价
                     current_price = self._get_stock_price(position['stock_code'], current_date, 'close')
                     position_value = current_price * position['quantity']
                     total_assets += position_value
+                    position_details.append({
+                        'code': position['stock_code'],
+                        'name': position['stock_name'],
+                        'price': current_price,
+                        'quantity': position['quantity'],
+                        'value': position_value
+                    })
+                
+                # 记录每日资产详情
+                logger.info(f"\n========== {current_date} 每日资产 ==========")
+                logger.info(f"资金余额: {current_capital:.2f}")
+                if position_details:
+                    logger.info(f"持股清单 ({len(position_details)} 只):")
+                    for p in position_details:
+                        logger.info(f"  - {p['code']} {p['name']}: 价格={p['price']:.2f}, 数量={p['quantity']}, 市值={p['value']:.2f}")
+                else:
+                    logger.info(f"持股清单: 空仓")
+                logger.info(f"持股市值: {total_assets - current_capital:.2f}")
+                logger.info(f"总资产: {total_assets:.2f}")
+                logger.info(f"==========================================")
                 
                 # 记录资金历史（包含持仓市值）
                 capital_history.append(total_assets)
@@ -389,11 +423,6 @@ class BacktestEngine:
             performance = self._calculate_performance(trades, initial_capital, final_capital, dates, capital_history)
             
             # 6. 构建回测结果
-            # 计算平均仓位系数
-            avg_position = 0
-            if self.temp_stats['total_days'] > 0:
-                avg_position = self.temp_stats['total_position_capital'] / self.temp_stats['total_days']
-            
             backtest_result = {
                 'strategy_name': strategy_name,
                 'config': config,
@@ -404,18 +433,7 @@ class BacktestEngine:
                 'performance': performance,
                 'trades': trades,
                 'capital_history': capital_history,
-                'dates': dates,
-                # 温度约束统计
-                'temp_constraint_stats': {
-                    'enabled': self.temp_constraint_enabled,
-                    'mode': self.temp_constraint_mode,
-                    'total_days': self.temp_stats['total_days'],
-                    'days_constrained': self.temp_stats['days_constrained'],
-                    'days_banned': self.temp_stats['days_banned'],
-                    'constrained_by_count': self.temp_stats['constrained_by_count'],
-                    'constrained_by_position': self.temp_stats['constrained_by_position'],
-                    'avg_position_applied': avg_position
-                }
+                'dates': dates
             }
             
             logger.info(f"回测完成，初始资金: {initial_capital}, 最终资金: {final_capital}, 总收益率: {performance['total_return']:.2f}%")
@@ -425,104 +443,6 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"回测失败: {str(e)}")
             raise
-    
-    def _get_stock_name(self, code: str) -> str:
-        """从选股信号中提取关键日期
-        
-        Args:
-            signal: 选股信号字典，可能包含以下字段：
-                - key_date: 关键日期（字符串，格式 YYYY-MM-DD）
-                - key_dates: 关键日期JSON数组
-                
-        Returns:
-            关键日期（datetime.date）或 None
-        """
-        try:
-            # 方式1：直接获取 key_date 字段
-            if 'key_date' in signal and signal['key_date']:
-                key_date_str = signal['key_date']
-                # 处理字符串格式
-                if isinstance(key_date_str, str):
-                    return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
-                # 处理datetime对象
-                elif isinstance(key_date_str, datetime.datetime):
-                    return key_date_str.date()
-                elif isinstance(key_date_str, datetime.date):
-                    return key_date_str
-            
-            # 方式2：从 key_dates JSON 数组中获取第一个
-            if 'key_dates' in signal and signal['key_dates']:
-                key_dates_str = signal['key_dates']
-                
-                # 如果是字符串，需要解析JSON
-                if isinstance(key_dates_str, str):
-                    try:
-                        key_dates_list = json.loads(key_dates_str)
-                    except json.JSONDecodeError:
-                        logger.warning(f"无法解析key_dates JSON: {key_dates_str}")
-                        return None
-                else:
-                    key_dates_list = key_dates_str
-                
-                # 获取第一个关键日期
-                if key_dates_list and len(key_dates_list) > 0:
-                    first_key_date = key_dates_list[0]
-                    # 处理字典格式
-                    if isinstance(first_key_date, dict):
-                        key_date_str = first_key_date.get('date')
-                    else:
-                        key_date_str = first_key_date
-                    
-                    if key_date_str:
-                        if isinstance(key_date_str, str):
-                            return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
-                        elif isinstance(key_date_str, datetime.datetime):
-                            return key_date_str.date()
-                        elif isinstance(key_date_str, datetime.date):
-                            return key_date_str
-            
-            # 如果没有找到关键日期，返回None
-            logger.debug(f"选股信号中没有关键日期")
-            return None
-            
-        except Exception as e:
-            logger.error(f"解析关键日期失败: {str(e)}")
-            return None
-    
-    def _normalize_support_method(self, method: str) -> str:
-        """将旧方法名称转换为新方法名称
-        
-        Args:
-            method: 支撑位计算方法名称
-            
-        Returns:
-            标准化后的方法名称
-        """
-        # 方法名称映射（旧 -> 新）
-        METHOD_NAME_MAPPING = {
-            'ma20': 'ma20',
-            'close_95': 'key_close_5',
-            'open': 'key_open',
-            'close': 'key_close',
-            'resistance': None,  # 不支持
-            'key_close_5': 'key_close_5',
-            'key_open': 'key_open',
-            'key_close': 'key_close',
-        }
-        
-        # 获取标准化后的方法名称
-        normalized_method = METHOD_NAME_MAPPING.get(method, method)
-        
-        # 如果方法不支持，使用默认方法
-        if normalized_method is None:
-            logger.warning(f"方法 {method} 不再支持，使用默认方法 'ma20'")
-            return 'ma20'
-        
-        # 如果是旧方法名称，添加警告日志
-        if method != normalized_method and method in METHOD_NAME_MAPPING:
-            logger.warning(f"方法 {method} 已过时，请使用 {normalized_method}")
-        
-        return normalized_method
     
     def _load_trading_calendar(self, start_date: str, end_date: str):
         """加载交易日历数据（扩大范围，覆盖前一交易日查找需求）
@@ -552,6 +472,7 @@ class BacktestEngine:
             from datetime import timedelta
             extended_start = (datetime.datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=60)).strftime('%Y%m%d')
             end_date_str = end_date.replace('-', '')
+            logger.info(f"加载交易日历范围: {extended_start} 至 {end_date_str}")
             
             # 获取交易日历（只获取交易日）
             pro = ts.pro_api(tushare_token)
@@ -581,6 +502,11 @@ class BacktestEngine:
             trading_dates_sorted.sort()
             # 保存排序后的交易日列表，供_get_previous_trading_day使用
             self._sorted_trading_dates = trading_dates_sorted
+            
+            # 打印前10个和后10个交易日，用于调试
+            if trading_dates_sorted:
+                logger.info(f"前10个交易日: {trading_dates_sorted[:10]}")
+                logger.info(f"后10个交易日: {trading_dates_sorted[-10:]}")
             
             logger.info(f"成功加载交易日历数据，共 {len(self.trading_calendar_cache)} 个交易日")
             
@@ -624,20 +550,22 @@ class BacktestEngine:
         Returns:
             交易日期列表
         """
+        # 转换为日期对象
+        start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+        
         # 如果有排序好的交易日列表，直接筛选
         if hasattr(self, '_sorted_trading_dates') and self._sorted_trading_dates:
-            dates = [
-                datetime.datetime.strptime(d, '%Y-%m-%d').date()
-                for d in self._sorted_trading_dates
-                if start_date <= d <= end_date
-            ]
+            dates = []
+            for d_str in self._sorted_trading_dates:
+                d = datetime.datetime.strptime(d_str, '%Y-%m-%d').date()
+                if start_dt <= d <= end_dt:
+                    dates.append(d)
         else:
             # fallback：逐日遍历，仅过滤周末
-            start = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
-            end = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
             dates = []
-            current = start
-            while current <= end:
+            current = start_dt
+            while current <= end_dt:
                 if self._is_trading_day(current):
                     dates.append(current)
                 current += datetime.timedelta(days=1)
@@ -683,7 +611,6 @@ class BacktestEngine:
             attempts += 1
         
         logger.warning(f"未找到前一个交易日，返回: {date - datetime.timedelta(days=1)}")
-        return date - datetime.timedelta(days=1)
         return date - datetime.timedelta(days=1)
     
     def _get_stock_name(self, code: str) -> str:
@@ -735,6 +662,211 @@ class BacktestEngine:
         except Exception as e:
             logger.debug(f"生成股票详情链接失败 {code}: {str(e)}")
             return f"javascript:viewStockDetail('{code}')"
+    
+    def _load_support_methods_config(self):
+        """加载策略支撑位方法配置
+        
+        从 config/support_methods.yaml 读取策略与支撑位计算方法的映射关系。
+        
+        Returns:
+            dict: 策略名称 -> 支撑位配置的映射字典
+        """
+        try:
+            # 导入yaml模块
+            import yaml
+            # 构建配置文件路径
+            config_path = Path(__file__).parent.parent / "config" / "support_methods.yaml"
+            
+            if config_path.exists():
+                # 读取yaml配置文件
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                # 提取策略配置部分
+                strategies_config = config.get('strategies', {})
+                logger.info(f"加载支撑位方法配置: {len(strategies_config)} 个策略")
+                return strategies_config
+            else:
+                logger.warning(f"支撑位配置文件不存在: {config_path}")
+                return {}
+        except Exception as e:
+            logger.warning(f"加载支撑位方法配置失败: {str(e)}")
+            return {}
+    
+    def _get_support_method_for_strategy(self, strategy_name):
+        """获取策略的支撑位计算方法
+        
+        根据策略名称从配置中查找对应的支撑位计算方法。
+        
+        Args:
+            strategy_name: 策略名称（类名）
+            
+        Returns:
+            str: 支撑位计算方法（ma20/key_close_5/key_open/key_close）
+        """
+        # 从配置中查找策略对应的支撑位方法
+        strategy_config = self._support_methods_config.get(strategy_name, {})
+        # 配置为字典格式，提取support_method字段
+        if isinstance(strategy_config, dict):
+            return strategy_config.get('support_method', 'ma20')
+        # 配置为字符串格式，直接返回
+        elif isinstance(strategy_config, str):
+            return strategy_config
+        # 未找到配置，返回默认方法
+        return 'ma20'
+    
+    def _calculate_support_level(self, stock, strategy_name, selection_date):
+        """计算候选股票的支撑位
+        
+        在加入股票池时调用，根据策略的支撑位计算方法和关键日计算支撑位。
+        参考狩猎场功能（khunter_support_calculator.py）的4种计算方法：
+        - ma20: 20日均线
+        - key_close_5: 关键日收盘价 × 0.95
+        - key_open: 关键日开盘价
+        - key_close: 关键日收盘价
+        
+        Args:
+            stock: 股票信息（包含 signal 字段，signal 中包含 key_date）
+            strategy_name: 策略名称（类名）
+            selection_date: 选股日期
+            
+        Returns:
+            float: 支撑位价格，计算失败返回0.0
+        """
+        # stock_code: 股票代码，类型str，从stock中获取
+        stock_code = stock['stock_code']
+        
+        # 获取策略对应的支撑位计算方法
+        support_method = self._get_support_method_for_strategy(strategy_name)
+        
+        # 获取K线数据
+        df = self.stock_filtered_cache.get(stock_code)
+        if df is None:
+            logger.debug(f"支撑位计算: {stock_code} 无K线数据")
+            return 0.0
+        
+        # 日期切片：只取到选股日期为止的数据
+        date_str = selection_date.strftime('%Y-%m-%d')
+        df_to_date = df[df['date'] <= date_str].copy()
+        if df_to_date.empty:
+            logger.debug(f"支撑位计算: {stock_code} 选股日期 {date_str} 无数据")
+            return 0.0
+        
+        # 确保正序（日期从早到晚）
+        if len(df_to_date) > 1 and df_to_date['date'].iloc[0] > df_to_date['date'].iloc[1]:
+            df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+        
+        # 根据方法计算支撑位
+        if support_method == 'ma20':
+            # ma20: 20日均线
+            if len(df_to_date) >= 20:
+                ma20_value = round(df_to_date['close'].tail(20).mean(), 2)
+                logger.debug(f"支撑位计算: {stock_code} ma20={ma20_value}")
+                return ma20_value
+            
+        elif support_method in ['key_close_5', 'key_open', 'key_close']:
+            # 需要关键日的方法：从信号中提取key_date
+            signal = stock.get('signal', {})
+            key_date = signal.get('key_date') if isinstance(signal, dict) else None
+            
+            if key_date:
+                # 在K线数据中查找关键日
+                key_date_str = str(key_date)[:10]
+                key_date_data = df_to_date[df_to_date['date'].astype(str).str[:10] == key_date_str]
+                
+                if not key_date_data.empty:
+                    if support_method == 'key_close_5':
+                        # 关键日收盘价 × 0.95
+                        support = round(float(key_date_data.iloc[0]['close']) * 0.95, 2)
+                        logger.debug(f"支撑位计算: {stock_code} key_close_5={support} (关键日={key_date_str})")
+                        return support
+                    elif support_method == 'key_open':
+                        # 关键日开盘价
+                        support = round(float(key_date_data.iloc[0]['open']), 2)
+                        logger.debug(f"支撑位计算: {stock_code} key_open={support} (关键日={key_date_str})")
+                        return support
+                    elif support_method == 'key_close':
+                        # 关键日收盘价
+                        support = round(float(key_date_data.iloc[0]['close']), 2)
+                        logger.debug(f"支撑位计算: {stock_code} key_close={support} (关键日={key_date_str})")
+                        return support
+                else:
+                    logger.debug(f"支撑位计算: {stock_code} 关键日 {key_date_str} 未在K线数据中找到")
+            else:
+                logger.debug(f"支撑位计算: {stock_code} 策略 {strategy_name} 需要关键日但信号中无key_date")
+        
+        # fallback: 使用20日均线作为默认支撑位
+        if len(df_to_date) >= 20:
+            fallback_value = round(df_to_date['close'].tail(20).mean(), 2)
+            logger.debug(f"支撑位计算: {stock_code} fallback ma20={fallback_value}")
+            return fallback_value
+        
+        # 无法计算支撑位
+        logger.debug(f"支撑位计算: {stock_code} 数据不足，无法计算")
+        return 0.0
+    
+    def _check_pool_removal(self, current_date, config):
+        """检查股票池中需要移除的股票
+        
+        在每日选股之前执行，使用前一日收盘价与支撑位比较。
+        当前一日收盘价跌破支撑位超过阈值时，将该股票从候选池中移除。
+        
+        Args:
+            current_date: 当前交易日期
+            config: 回测配置
+            
+        Returns:
+            list: 移除的候选列表
+        """
+        # 检查是否启用移除机制
+        if not config.get('support_removal_enabled', True):
+            return []
+        
+        # 获取移除阈值，默认2%
+        removal_threshold = config.get('support_removal_threshold', 0.02)
+        removed_candidates = []
+        remaining_candidates = []
+        
+        # 获取前一个交易日（用于获取收盘价）
+        prev_date = self._get_previous_trading_day(current_date)
+        
+        for candidate in self.buy_candidate_pool:
+            # 提取股票信息
+            stock_code = candidate['stock']['stock_code']
+            stock_name = candidate['stock']['stock_name']
+            support_level = candidate.get('support_level', 0.0)
+            support_method = candidate.get('support_method', 'unknown')
+            
+            # 无法计算支撑位，保留在池中
+            if support_level <= 0:
+                remaining_candidates.append(candidate)
+                continue
+            
+            # 获取前一日收盘价
+            prev_close = self._get_stock_price(stock_code, prev_date, 'close')
+            
+            # 无法获取价格，保留在池中
+            if prev_close <= 0:
+                remaining_candidates.append(candidate)
+                continue
+            
+            # 判断前一日收盘价是否跌破支撑位超过阈值
+            if prev_close < support_level * (1 - removal_threshold):
+                removed_candidates.append(candidate)
+                # 计算跌破百分比
+                drop_pct = (prev_close - support_level) / support_level * 100
+                logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
+                           f"前一日收盘价={prev_close:.2f}, 支撑位={support_level:.2f}, "
+                           f"跌幅={drop_pct:.2f}%, 方法={support_method}")
+            else:
+                remaining_candidates.append(candidate)
+        
+        # 更新股票池
+        if removed_candidates:
+            logger.info(f"股票池移除: {len(removed_candidates)} 只, "
+                       f"剩余: {len(remaining_candidates)} 只")
+            self.buy_candidate_pool = remaining_candidates
+        
+        return removed_candidates
     
     def _preload_stock_data(self, start_date: str, end_date: str, strategy_name: str = None) -> int:
         """预加载所有股票数据到内存（性能优化）
@@ -861,8 +993,14 @@ class BacktestEngine:
             if not self.strategy_registry.strategies:
                 self.strategy_registry.auto_register_from_directory("strategy")
             
-            # 获取策略 - 策略注册时使用 self.name（如"启明星策略"）
-            strategy = self.strategy_registry.get_strategy(strategy_name)
+            # 获取策略 - 策略注册时使用类名（如ContinuousRisingWithVolumeStrategyV2）
+            # 需要先尝试映射为中文名称再转类名
+            mapped_name = get_english_name(strategy_name)
+            strategy = self.strategy_registry.get_strategy(mapped_name)
+            
+            if not strategy:
+                # 尝试直接用原始名称查找
+                strategy = self.strategy_registry.get_strategy(strategy_name)
             
             if not strategy:
                 raise ValueError(f"策略 {strategy_name} 不存在")
@@ -959,100 +1097,52 @@ class BacktestEngine:
         )
 
         return scored_stocks
-    
-    def _calculate_support_level(self, stock: Dict, key_date: datetime.date, method: str) -> float:
-        """计算支撑位置
+
+    def _select_and_score_stocks(self, strategy_name: str, date: datetime.date, config: Dict) -> List[Dict]:
+        """执行选股、评分、筛选，得到候选股票池
+        
+        封装选股流程，返回通过评分的候选股票列表。
         
         Args:
-            stock: 股票信息
-            key_date: 关键日期（策略识别出的形态日期，不是选股日期）
-            method: 支撑位置计算方法 ('ma20', 'key_close_5', 'key_open', 'key_close')
+            strategy_name: 策略名称
+            date: 选股日期
+            config: 回测配置
             
         Returns:
-            支撑位置价格
-            
-        说明：
-            key_date是策略识别出的关键日期，例如：
-            - W底策略：颈线突破日
-            - 趋势共振反转：RSI突破日
-            - 趋势加速拐点：放量长阳日
-            - 多方炮：第三根K线（确认日）
-            - 强势洗盘弱转强：反包阳线日
-            - 阻力位突破：阻力位突破日
-            
-            对于ma20方法：计算20日均线，与关键日无关，只基于历史数据
-            对于key_*方法：使用关键日期的价格作为支撑位
+            候选股票列表（已评分且通过筛选）
         """
-        try:
-            stock_code = stock['stock_code']
-            
-            # 标准化方法名称
-            method = self._normalize_support_method(method)
-            
-            # 获取股票数据（DataFrame格式）
-            df = self.stock_filtered_cache.get(stock_code)
-            if df is None or df.empty:
-                logger.warning(f"无法获取股票 {stock_code} 的数据")
-                return 0.0
-            
-            # 确保DataFrame包含必要的列
-            required_columns = ['date', 'open', 'high', 'low', 'close']
-            if not all(col in df.columns for col in required_columns):
-                logger.error(f"数据缺少必要的列: {required_columns}")
-                return 0.0
-            
-            # 确保数据按日期升序排列
-            df = df.sort_values('date', ascending=True).reset_index(drop=True)
-            
-            # 转换key_date为字符串格式（与DataFrame中的date列格式一致）
-            key_date_str = key_date.strftime('%Y-%m-%d') if isinstance(key_date, datetime.date) else str(key_date)
-            
-            # 日期切片：获取到关键日期的所有数据
-            # 将date列转换为字符串进行比较
-            df['date_str'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-            df_to_key_date = df[df['date_str'] <= key_date_str].copy()
-            if df_to_key_date.empty:
-                logger.warning(f"无法获取股票 {stock_code} 在 {key_date_str} 之前的数据")
-                return 0.0
-            
-            # 验证关键日期是否存在于数据中
-            if key_date_str not in df_to_key_date['date_str'].values:
-                logger.warning(f"关键日期 {key_date_str} 不在股票 {stock_code} 的数据中")
-                return 0.0
-            
-            # 计算支撑位
-            if method == 'ma20':
-                # 20日均线支撑位：与关键日无关，只基于历史数据计算
-                ma20 = df_to_key_date['close'].rolling(window=20).mean()
-                support_level = ma20.iloc[-1]
-                logger.debug(f"MA20支撑位: {stock_code} = {support_level}")
-            
-            elif method == 'key_close_5':
-                # 关键日收盘价下5%
-                key_close = df_to_key_date['close'].iloc[-1]
-                support_level = key_close * 0.95
-                logger.debug(f"KEY_CLOSE_5支撑位: {stock_code} {key_date_str} 收盘价={key_close} 支撑位={support_level}")
-            
-            elif method == 'key_open':
-                # 关键日开盘价
-                support_level = df_to_key_date['open'].iloc[-1]
-                logger.debug(f"KEY_OPEN支撑位: {stock_code} {key_date_str} = {support_level}")
-            
-            elif method == 'key_close':
-                # 关键日收盘价
-                support_level = df_to_key_date['close'].iloc[-1]
-                logger.debug(f"KEY_CLOSE支撑位: {stock_code} {key_date_str} = {support_level}")
-            
-            else:
-                logger.warning(f"不支持的支撑位计算方法: {method}，使用默认方法 'ma20'")
-                ma20 = df_to_key_date['close'].rolling(window=20).mean()
-                support_level = ma20.iloc[-1]
-            
-            return support_level
-            
-        except Exception as e:
-            logger.error(f"计算支撑位失败: {str(e)}")
-            return 0.0
+        logger.info(f"开始执行选股，策略: {strategy_name}，择时策略: {self.timing_strategy_name}，日期: {date}")
+        
+        # 执行选股
+        selected_stocks = self._execute_selection(strategy_name, date)
+        logger.info(f"选股完成，共选出 {len(selected_stocks)} 只股票")
+        
+        if not selected_stocks:
+            return []
+        
+        # 评分
+        logger.info(f"开始对 {len(selected_stocks)} 只股票进行评分")
+        scored_stocks = self._score_stocks(selected_stocks, strategy_name, date)
+        
+        # 记录每只股票的综合评分
+        logger.info("\n股票评分详情:")
+        for stock in scored_stocks:
+            logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 综合评分={stock['score']}，否决标志={stock.get('veto_flag', False)}")
+        
+        # 筛选：去除否决票且评分达标
+        score_threshold = config.get('score_threshold', 60)
+        candidate_stocks = [
+            stock for stock in scored_stocks 
+            if not stock.get('veto_flag', False) and stock['score'] >= score_threshold
+        ]
+        
+        logger.info(f"\n筛选后待买入股票数: {len(candidate_stocks)}")
+        if candidate_stocks:
+            logger.info("待买入股票列表:")
+            for stock in candidate_stocks:
+                logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 评分={stock['score']}")
+        
+        return candidate_stocks
     
     def _get_stock_price(self, stock_code: str, date: datetime.date, price_type: str) -> float:
         """获取股票价格
@@ -1060,12 +1150,20 @@ class BacktestEngine:
         Args:
             stock_code: 股票代码
             date: 日期
-            price_type: 价格类型 (open, close, high, low)
+            price_type: 价格类型 (open, close, high, low, prev_close)
             
         Returns:
             价格
         """
         try:
+            # 特殊处理：获取前一天收盘价
+            if price_type == 'prev_close':
+                # 获取前一天的日期
+                prev_date = self._get_previous_trading_day(date)
+                if prev_date:
+                    return self._get_stock_price(stock_code, prev_date, 'close')
+                return None
+            
             # 1. 优先从本地数据库获取
             date_str = date.strftime('%Y-%m-%d')
             sql = f"""
@@ -1150,95 +1248,9 @@ class BacktestEngine:
             logger.warning(f"获取股票 {stock_code} 价格失败: {str(e)}")
             return 10.0
     
-    def _extract_key_date(self, signal: Dict) -> Optional[datetime.date]:
-        """从选股信号中提取关键日期
-        
-        Args:
-            signal: 选股信号字典，可能包含以下字段：
-                - key_date: 关键日期（字符串，格式 YYYY-MM-DD）
-                - key_dates: 关键日期JSON数组
-                
-        Returns:
-            关键日期（datetime.date）或 None
-        """
-        try:
-            # 方式1：直接获取 key_date 字段
-            if 'key_date' in signal and signal['key_date']:
-                key_date_str = signal['key_date']
-                # 处理字符串格式
-                if isinstance(key_date_str, str):
-                    return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
-                # 处理datetime对象
-                elif isinstance(key_date_str, datetime.datetime):
-                    return key_date_str.date()
-                elif isinstance(key_date_str, datetime.date):
-                    return key_date_str
-            
-            # 方式2：从 key_dates JSON 数组中获取第一个
-            if 'key_dates' in signal and signal['key_dates']:
-                key_dates_str = signal['key_dates']
-                
-                # 如果是字符串，需要解析JSON
-                if isinstance(key_dates_str, str):
-                    try:
-                        key_dates_list = json.loads(key_dates_str)
-                    except json.JSONDecodeError:
-                        logger.warning(f"无法解析key_dates JSON: {key_dates_str}")
-                        return None
-                else:
-                    key_dates_list = key_dates_str
-                
-                # 获取第一个关键日期
-                if key_dates_list and len(key_dates_list) > 0:
-                    first_key_date = key_dates_list[0]
-                    # 处理字典格式
-                    if isinstance(first_key_date, dict):
-                        key_date_str = first_key_date.get('date')
-                    else:
-                        key_date_str = first_key_date
-                    
-                    if key_date_str:
-                        if isinstance(key_date_str, str):
-                            return datetime.datetime.strptime(key_date_str, '%Y-%m-%d').date()
-                        elif isinstance(key_date_str, datetime.datetime):
-                            return key_date_str.date()
-                        elif isinstance(key_date_str, datetime.date):
-                            return key_date_str
-            
-            # 如果没有找到关键日期，返回None
-            logger.debug(f"选股信号中没有关键日期")
-            return None
-            
-        except Exception as e:
-            logger.error(f"解析关键日期失败: {str(e)}")
-            return None
-    
-    def _is_buy_point(self, buy_price: float, support_level: float, config: Dict) -> bool:
-        """判断是否为买点
-        
-        Args:
-            buy_price: 买入价格
-            support_level: 支撑位置
-            config: 回测配置
-            
-        Returns:
-            是否为买点
-        """
-        if support_level <= 0:
-            return True
-        
-        # 计算买点区间
-        lower_percent = config.get('buy_point_lower', -1) / 100
-        upper_percent = config.get('buy_point_upper', 3) / 100
-        
-        lower_bound = support_level * (1 + lower_percent)
-        upper_bound = support_level * (1 + upper_percent)
-        
-        return lower_bound <= buy_price <= upper_bound
-    
     def _execute_buy(self, stock_code: str, stock_name: str, selection_date: datetime.date, 
                      buy_date: datetime.date, buy_price: float, buy_amount: float, 
-                     quantity: int, support_level: float) -> Dict:
+                     quantity: int) -> Dict:
         """执行买入操作
         
         Args:
@@ -1249,7 +1261,6 @@ class BacktestEngine:
             buy_price: 买入价格
             buy_amount: 买入金额
             quantity: 买入数量
-            support_level: 支撑位置
             
         Returns:
             买入记录
@@ -1272,12 +1283,15 @@ class BacktestEngine:
             'return_rate': None,
             'profit_loss': None,
             'hold_days': None,
-            'support_level': support_level,
-            'detail_url': stock_detail_url  # 添加股票详情链接
+            'detail_url': stock_detail_url
         }
     
     def _process_sell(self, positions: List[Dict], current_date: datetime.date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
         """处理卖出操作
+        
+        职责划分：
+        - 回测引擎负责：T+1检查、止盈止损执行
+        - 择时策略负责：买卖信号判断
         
         Args:
             positions: 持仓列表
@@ -1290,88 +1304,158 @@ class BacktestEngine:
         remaining_positions = []
         sell_records = []
         
+        # 获取卖出条件参数
+        take_profit = config.get('take_profit', 15)
+        stop_loss = config.get('stop_loss', -5)
+        hold_period = config.get('hold_period', 10)
+        
         for position in positions:
+            stock_code = position['stock_code']
+            stock_name = position['stock_name']
+            
             # 计算持有天数（基于交易日）
             buy_date_str = position['buy_date'].strftime('%Y-%m-%d')
             current_date_str = current_date.strftime('%Y-%m-%d')
             trading_days = self._get_trading_dates(buy_date_str, current_date_str)
-            # 持有天数 = 交易日数 - 1（不包括买入当天，因为T+1规则）
-            # 例如：买入日期2026-01-08，当日卖出日期2026-01-08，trading_days=[2026-01-08]，hold_days=0
-            # 这意味着当天买入的股票不能当天卖出
             hold_days = len(trading_days) - 1
             
-            # 获取当日开盘价
-            open_price = self._get_stock_price(position['stock_code'], current_date, 'open')
-            
-            # 计算收益率
+            # 获取当日开盘价和收益率
+            open_price = self._get_stock_price(stock_code, current_date, 'open')
             return_rate = (open_price - position['buy_price']) / position['buy_price'] * 100
             
-            # 检查是否需要卖出
+            # 根据是否有择时策略决定卖出规则描述
+            if self.timing_strategy:
+                sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 由策略决定卖出"
+            else:
+                sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 持有期={hold_period}天"
+            logger.info(f"检查持仓 - {stock_code} {stock_name}: 买入日期={buy_date_str}, "
+                       f"持有天数={hold_days}, 收益率={return_rate:.2f}%, {sell_rule}")
+            
+            # 初始化卖出决策
             sell_type = None
+            reduce_quantity = 0
+            sell_quantity = position['quantity']
             
-            # 获取卖出条件参数
-            take_profit = config.get('take_profit', 15)
-            stop_loss = config.get('stop_loss', -5)
-            hold_period = config.get('hold_period', 10)
-            
-            # 添加详细日志
-            logger.info(f"检查卖出条件 - {position['stock_code']} {position['stock_name']}: "
-                       f"买入日期={buy_date_str}, 当前日期={current_date_str}, "
-                       f"持有天数={hold_days}, 收益率={return_rate:.2f}%, "
-                       f"止盈阈值={take_profit}%, 止损阈值={stop_loss}%, 持有期={hold_period}天")
-            
-            # T+1规则：当天买入的股票不能当天卖出（hold_days必须 > 0）
+            # T+1规则：当天买入的股票不能当天卖出
             if hold_days > 0:
-                # 1. 止盈检查
+                # 1. 先检查止盈止损（优先级最高）
                 if return_rate >= take_profit:
                     sell_type = 'take_profit'
-                    logger.info(f"  ✓ 触发止盈条件: {position['stock_code']} 收益率 {return_rate:.2f}% >= {take_profit}%")
-                
-                # 2. 止损检查
+                    logger.info(f"  触发止盈: 收益率 {return_rate:.2f}% >= {take_profit}%")
                 elif return_rate <= stop_loss:
                     sell_type = 'stop_loss'
-                    logger.info(f"  ✓ 触发止损条件: {position['stock_code']} 收益率 {return_rate:.2f}% <= {stop_loss}%")
+                    logger.info(f"  触发止损: 收益率 {return_rate:.2f}% <= {stop_loss}%")
                 
-                # 3. 持有到期检查
-                elif hold_days >= hold_period:
-                    sell_type = 'hold_expired'
-                    logger.info(f"  ✓ 触发持有到期条件: {position['stock_code']} 持有天数 {hold_days} >= {hold_period}")
-                else:
-                    logger.info(f"  ✗ 未触发任何卖出条件: {position['stock_code']}")
+                # 2. 如果未触发止盈止损，调用择时策略获取信号
+                if not sell_type and self.timing_strategy:
+                    df = self.stock_filtered_cache.get(stock_code)
+                    if df is not None:
+                        date_str = current_date.strftime('%Y-%m-%d')
+                        df_to_date = df[df['date'] <= date_str].copy()
+                        if not df_to_date.empty:
+                            df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                            result = self.timing_strategy.get_timing_result(df_to_date, position, 0)
+                            
+                            if result.is_sell:
+                                if result.trade_type == 'reduce':
+                                    # 策略要求减仓
+                                    reduce_quantity = result.sell_quantity if result.sell_quantity > 0 else position['quantity'] // 2
+                                    if reduce_quantity >= position['quantity']:
+                                        # 减仓数量>=持仓，执行清仓
+                                        sell_type = 'strategy_sell'
+                                        logger.info(f"  策略信号: 清仓 - {result.message}")
+                                    else:
+                                        sell_type = 'strategy_reduce'
+                                        logger.info(f"  策略信号: 减仓{reduce_quantity}股 - {result.message}")
+                                else:
+                                    # 策略要求清仓
+                                    sell_type = 'strategy_sell'
+                                    sell_quantity = position['quantity']
+                                    logger.info(f"  策略信号: 清仓 - {result.message}")
+                
+                # 3. 持有到期检查（仅无择时策略时生效）
+                if not sell_type and not reduce_quantity:
+                    if hold_days >= hold_period:
+                        if not self.timing_strategy:
+                            sell_type = 'hold_expired'
+                            logger.info(f"  持有到期: {hold_days}天 >= {hold_period}天")
+                
+                if not sell_type and not reduce_quantity:
+                    logger.info(f"  无卖出信号，继续持有")
             else:
-                logger.info(f"  ✗ T+1规则限制，不能卖出: {position['stock_code']} (hold_days={hold_days})")
+                logger.info(f"  T+1限制，今日不能卖出")
             
+            # 执行卖出操作
             if sell_type:
-                # 执行卖出
-                sell_amount = open_price * position['quantity']
-                profit_loss = sell_amount - position['buy_amount']
+                # 执行清仓
+                sell_amount = open_price * sell_quantity
+                profit_loss = sell_amount - position['buy_amount'] * (sell_quantity / position['quantity'])
                 
-                # 创建卖出记录
-                sell_record = {
-                    'stock_code': position['stock_code'],
-                    'stock_name': position['stock_name'],
-                    'selection_date': None,  # 卖出记录无选入日期
-                    'buy_date': position['buy_date'],
-                    'buy_price': position['buy_price'],
-                    'buy_amount': position['buy_amount'],
-                    'quantity': position['quantity'],
-                    'sell_date': current_date,
-                    'sell_price': open_price,
-                    'sell_amount': sell_amount,
-                    'sell_type': sell_type,
-                    'return_rate': return_rate,
-                    'profit_loss': profit_loss,
-                    'hold_days': hold_days,
-                    'support_level': position['support_level'],
-                    'detail_url': self._generate_stock_detail_url(position['stock_code'])  # 添加股票详情链接
-                }
-                
+                sell_record = self._create_sell_record(position, current_date, open_price, 
+                                                       sell_quantity, sell_amount, return_rate, hold_days, sell_type)
                 sell_records.append(sell_record)
+                logger.info(f"  【卖出】{stock_code}: 类型={sell_type}, 价格={open_price}, "
+                           f"数量={sell_quantity}, 金额={sell_amount:.2f}, 收益率={return_rate:.2f}%")
+                
+            elif reduce_quantity > 0:
+                # 执行减仓
+                reduce_amount = open_price * reduce_quantity
+                remaining_quantity = position['quantity'] - reduce_quantity
+                remaining_ratio = remaining_quantity / position['quantity']
+                
+                reduce_record = self._create_sell_record(position, current_date, open_price,
+                                                          reduce_quantity, reduce_amount, return_rate, hold_days, 'strategy_reduce')
+                sell_records.append(reduce_record)
+                
+                # 更新持仓（保留剩余部分）
+                position['quantity'] = remaining_quantity
+                position['buy_amount'] = position['buy_amount'] * remaining_ratio
+                position['buy_price'] = position['buy_amount'] / remaining_quantity if remaining_quantity > 0 else 0
+                
+                remaining_positions.append(position)
+                logger.info(f"  【减仓】{stock_code}: 减仓数量={reduce_quantity}, 剩余数量={remaining_quantity}")
             else:
                 # 继续持有
                 remaining_positions.append(position)
         
         return remaining_positions, sell_records
+    
+    def _create_sell_record(self, position: Dict, sell_date: datetime.date, sell_price: float,
+                            quantity: int, sell_amount: float, return_rate: float, hold_days: int, 
+                            sell_type: str) -> Dict:
+        """创建卖出记录
+        
+        Args:
+            position: 持仓信息
+            sell_date: 卖出日期
+            sell_price: 卖出价格
+            quantity: 卖出数量
+            sell_amount: 卖出金额
+            return_rate: 收益率
+            hold_days: 持有天数
+            sell_type: 卖出类型
+            
+        Returns:
+            卖出记录字典
+        """
+        return {
+            'stock_code': position['stock_code'],
+            'stock_name': position['stock_name'],
+            'selection_date': None,
+            'buy_date': position['buy_date'],
+            'buy_price': position['buy_price'],
+            'buy_amount': position['buy_amount'] * (quantity / position['quantity']),
+            'quantity': quantity,
+            'sell_date': sell_date,
+            'sell_price': sell_price,
+            'sell_amount': sell_amount,
+            'sell_type': sell_type,
+            'return_rate': return_rate,
+            'profit_loss': sell_amount - position['buy_amount'] * (quantity / position['quantity']),
+            'hold_days': hold_days,
+            'detail_url': self._generate_stock_detail_url(position['stock_code']),
+            'trade_type': 'sell' if quantity >= position['quantity'] else 'reduce'
+        }
     
     def _calculate_performance(self, trades: List[Dict], initial_capital: float, 
                               final_capital: float, dates: List[datetime.date], 
