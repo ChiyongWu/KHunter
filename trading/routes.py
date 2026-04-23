@@ -422,6 +422,8 @@ def run_backtest():
             'start_date': start_date,
             'end_date': end_date,
             'total_trades': result.get('performance', {}).get('total_trades', 0),
+            'sold_trades': result.get('performance', {}).get('sold_trades', 0),
+            'holding_trades': result.get('performance', {}).get('holding_trades', 0),
             'win_trades': result.get('performance', {}).get('win_trades', 0),
             'loss_trades': result.get('performance', {}).get('loss_trades', 0),
             'win_rate': result.get('performance', {}).get('win_rate', 0),
@@ -987,6 +989,9 @@ def khunter_calculate():
         tracking_days = data.get('tracking_days', 10)
         timing_strategy = data.get('timing_strategy', 'support')
         
+        # 1a. 记录请求参数，便于调试前端传参
+        logger.info(f"狩猎场计算请求: hunting_date={hunting_date}, tracking_days={tracking_days}, timing_strategy={timing_strategy}")
+        
         # 2. 调用 API 计算
         result = khunter_api.calculate(hunting_date, tracking_days, timing_strategy)
         
@@ -1298,7 +1303,7 @@ def export_trading_plan():
         ws = wb.active
         ws.title = "交易计划"
 
-        headers = ['序号', '股票代码', '股票名称', '当前价格', '买入价格区间', '仓位(%)', '止损', '止盈', '持有日期']
+        headers = ['序号', '股票代码', '股票名称', '当前价格', '买入价格区间', '仓位(%)', '止损', '止盈', '择时策略']
         header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
         header_font = Font(bold=True, color="FFFFFF")
 

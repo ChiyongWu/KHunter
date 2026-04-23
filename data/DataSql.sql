@@ -629,7 +629,11 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     end_date TEXT NOT NULL,
     -- end_date: 回测结束日期，类型TEXT，必填，格式YYYY-MM-DD
     total_trades INTEGER DEFAULT 0,
-    -- total_trades: 总交易次数，类型INTEGER，默认0
+    -- total_trades: 总交易次数，类型INTEGER，默认0（含持仓和已卖出）
+    sold_trades INTEGER DEFAULT 0,
+    -- sold_trades: 已卖出交易次数，类型INTEGER，默认0
+    holding_trades INTEGER DEFAULT 0,
+    -- holding_trades: 持仓中交易次数，类型INTEGER，默认0（含虚拟卖出）
     win_trades INTEGER DEFAULT 0,
     -- win_trades: 盈利交易次数，类型INTEGER，默认0
     loss_trades INTEGER DEFAULT 0,
@@ -695,7 +699,7 @@ CREATE TABLE IF NOT EXISTS backtest_trade (
     support_level REAL,
     -- support_level: 支撑位置，类型REAL，可选
     trade_type TEXT DEFAULT 'normal',
-    -- trade_type: 交易类型，类型TEXT，默认normal，可选值buy/add/sell/reduce
+    -- trade_type: 交易类型，类型TEXT，默认normal，可选值buy/add/sell/reduce/holding
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     -- created_at: 创建时间，类型DATETIME，默认当前时间
     FOREIGN KEY (result_id) REFERENCES backtest_result(id) ON DELETE CASCADE
