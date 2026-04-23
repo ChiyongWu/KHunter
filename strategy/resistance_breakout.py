@@ -78,7 +78,7 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         criteria.append(f"1. 放量长阳日：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
         criteria.append(f"2. 阻力位突破：长阳日收盘价突破该日前{lookback_days}日最高价的{100+breakout_ratio:.0f}%以上")
         criteria.append(f"3. 高点间隔：长阳日与阻力高点日相隔不少于30个交易日")
-        criteria.append(f"4. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
+        criteria.append(f"4. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日收盘价的95%")
         
         return criteria
 
@@ -222,9 +222,10 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         """检查回踩支撑"""
         n = len(df)
 
-        # 突破日开盘价作为支撑位
-        breakout_open = df['open'].iloc[breakout_pos]
-        if breakout_open <= 0 or pd.isna(breakout_open):
+        # 突破日收盘价的95%作为支撑位（允许回调不超过5%）
+        breakout_close = df['close'].iloc[breakout_pos]
+        support_level = breakout_close * 0.95
+        if breakout_close <= 0 or pd.isna(breakout_close):
             return False
 
         # 如果突破日就是最后一天，无需检查回踩
@@ -237,8 +238,8 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             return True
         min_low = hold_lows.min()
 
-        # 最低价不能跌破突破日开盘价
-        return bool(min_low >= breakout_open)
+        # 最低价不能跌破突破日收盘价的95%
+        return bool(min_low >= support_level)
 
     def _generate_signal(self, df, latest, breakout_pos) -> dict:
         """生成选股信号"""

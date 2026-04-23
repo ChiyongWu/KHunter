@@ -1165,20 +1165,20 @@ strategies:
         min: 3
         type: int
       max_adjust_days:
-        default: 4
+        default: 5
         description: 缩量调整最大天数
         display_name: 缩量调整最大天数
         group: 调整参数
         max: 7
-        min: 2
+        min: 3
         type: int
       min_adjust_days:
-        default: 2
+        default: 3
         description: 缩量调整最小天数
         display_name: 缩量调整最小天数
         group: 调整参数
         max: 5
-        min: 2
+        min: 3
         type: int
     param_groups:
     - description: 控制连续阳线判断的参数
@@ -1198,5 +1198,5 @@ strategies:
       key_day_rise_min: 0.07
       key_day_offset_min: 3
       key_day_offset_max: 4
-      max_adjust_days: 4
-      min_adjust_days: 2
+      max_adjust_days: 5
+      min_adjust_days: 3
