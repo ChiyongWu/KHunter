@@ -1548,13 +1548,6 @@ class BacktestEngine:
         
         # 计算基本指标
         total_trades = len(completed_trades)
-        
-        # 区分实际卖出和持仓交易
-        sold_trades = [t for t in completed_trades if t.get('trade_type') != 'holding']
-        holding_trades = [t for t in completed_trades if t.get('trade_type') == 'holding']
-        sold_count = len(sold_trades)
-        holding_count = len(holding_trades)
-        
         win_trades = sum(1 for t in completed_trades if t['return_rate'] > 0)
         loss_trades = sum(1 for t in completed_trades if t['return_rate'] < 0)
         win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
@@ -1568,7 +1561,7 @@ class BacktestEngine:
         max_return = max(returns) if returns else 0
         min_return = min(returns) if returns else 0
         
-        # 计算盈利因子（使用所有交易）
+        # 计算盈利因子
         winning_returns = [t['return_rate'] for t in completed_trades if t['return_rate'] > 0]
         losing_returns = [abs(t['return_rate']) for t in completed_trades if t['return_rate'] < 0]
         total_win = sum(winning_returns) if winning_returns else 0
@@ -1593,8 +1586,6 @@ class BacktestEngine:
         
         return {
             'total_trades': total_trades,
-            'sold_trades': sold_count,      # 实际卖出的交易数
-            'holding_trades': holding_count,  # 持仓中的交易数（含虚拟卖出）
             'win_trades': win_trades,
             'loss_trades': loss_trades,
             'win_rate': win_rate,
