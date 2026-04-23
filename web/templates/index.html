@@ -847,8 +847,8 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <label for="timing-strategy" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">择时策略</label>
-                                    <select id="timing-strategy" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:150px;">
+                                    <label for="backtest-timing-strategy" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">择时策略</label>
+                                    <select id="backtest-timing-strategy" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:150px;">
                                         <option value="turtle">海龟策略</option>
                                         <option value="rsi">RSI策略</option>
                                         <option value="bollinger">布林带策略</option>
@@ -1465,10 +1465,10 @@
                                 <div class="form-group" style="display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 200px;">
                                     <label for="timing-strategy" style="white-space: nowrap;">择时策略</label>
                                     <select id="timing-strategy" class="form-control">
+                                        <option value="support" selected>支撑位策略</option>
                                         <option value="turtle">海龟策略</option>
                                         <option value="rsi">RSI策略</option>
                                         <option value="bollinger">布林带策略</option>
-                                        <option value="support" selected>支撑位策略</option>
                                     </select>
                                 </div>
                                 
@@ -1832,11 +1832,12 @@
                                     <th>仓位</th>
                                     <th>止损</th>
                                     <th>止盈</th>
-                                    <th>持有日期</th>
+                                    <th>择时策略</th>
                                 </tr>
                             </thead>
                             <tbody id="plan-tbody">
                                 <tr><td colspan="9" class="placeholder">加载中...</td></tr>
+
                             </tbody>
                         </table>
                     </div>

@@ -243,7 +243,7 @@ class FundamentalScorer:
             )
             # 检查返回数据是否有效
             if df is not None and not df.empty:
-                logger.info(
+                logger.debug(
                     f"获取财务指标数据成功: {stock_code}, {len(df)} 条记录"
                 )
                 # 写入缓存
@@ -410,7 +410,7 @@ class FundamentalScorer:
         返回:
             Tuple[float, FundamentalDetail]: (基本面得分, 基本面详情对象)
         """
-        logger.info(f"开始计算基本面得分: {stock_code}, 日期: {score_date}")
+        logger.debug(f"开始计算基本面得分: {stock_code}, 日期: {score_date}")
 
         # 初始化详情对象
         detail = FundamentalDetail()
@@ -441,7 +441,7 @@ class FundamentalScorer:
         total_score = max(-100, min(100, 50 + profit_score + roe_score + ocf_score))
 
         # 记录最终得分
-        logger.info(
+        logger.debug(
             f"股票 {stock_code} 基本面得分: {total_score} "
             f"(基准分=50, 净利润增速={profit_score}, ROE={roe_score}, "
             f"经营现金流={ocf_score})"

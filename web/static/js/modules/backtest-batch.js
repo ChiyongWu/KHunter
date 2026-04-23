@@ -157,7 +157,7 @@ class BacktestUIManager {
     this.elements = {
       // 配置表单
       strategySelect: document.getElementById('strategy-select'),
-      timingStrategy: document.getElementById('timing-strategy'),
+      timingStrategy: document.getElementById('backtest-timing-strategy'),
       startDate: document.getElementById('start-date'),
       endDate: document.getElementById('end-date'),
       addTaskBtn: document.getElementById('add-task-btn'),

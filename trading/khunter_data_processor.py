@@ -278,7 +278,7 @@ class KHunterDataProcessor:
             no_score_count = sum(1 for r in records if r.get('score') is None)
             below_threshold_count = len(records) - len(filtered) - no_score_count
             
-            logger.debug(
+            logger.info(
                 f"按分数阈值过滤: {len(records)} -> {len(filtered)} 条 "
                 f"(阈值: {score_threshold}, 无评分: {no_score_count}, 低于阈值: {below_threshold_count})"
             )
@@ -377,7 +377,7 @@ class KHunterDataProcessor:
                 'timing_signal': buy_point_result.get('message', '价格在支撑位区间')
             }
             
-            logger.debug(
+            logger.info(
                 f"{stock_code} 符合买点条件: "
                 f"支撑位={support_level} 当前价={current_price} "
                 f"价格差百分比={buy_point_result['price_diff_percent']}%"
@@ -435,11 +435,25 @@ class KHunterDataProcessor:
             
             # 6. 判断是否发出买入信号
             if not timing_result.is_buy:
-                logger.debug(
+                logger.info(
                     f"{stock_code} {timing_strategy_name}策略未发出买入信号: "
                     f"{timing_result.message}"
                 )
                 return None
+            
+            # 6a. 海龟策略额外过滤：狩猎日收盘价超过关键日收盘价105%则舍弃
+            # 避免选入已经涨太多的股票，保留距离关键日涨幅不大的首次买点机会
+            if timing_strategy_name == 'turtle':
+                key_date = self._extract_key_date(record)
+                if key_date:
+                    key_date_close = self._get_key_date_close(stock_code, key_date)
+                    if key_date_close and current_price > key_date_close * 1.05:
+                        price_ratio = round((current_price / key_date_close - 1) * 100, 2)
+                        logger.info(
+                            f"{stock_code} 海龟策略过滤: 狩猎日收盘价={current_price} "
+                            f"关键日收盘价={key_date_close} 涨幅={price_ratio}% > 5%，舍弃"
+                        )
+                        return None
             
             # 7. 获取支撑位（如果有）
             support_level = timing_result.support_level if timing_result.support_level > 0 else current_price
@@ -660,6 +674,64 @@ class KHunterDataProcessor:
         
         except Exception as e:
             logger.error(f"获取当前价格失败: {stock_code} - {str(e)}")
+            return None
+    
+    def _get_key_date_close(
+        self,
+        stock_code: str,
+        key_date: str
+    ) -> Optional[float]:
+        """
+        获取关键日收盘价
+        
+        参数：
+            stock_code: 股票代码
+            key_date: 关键日期（YYYY-MM-DD）
+        
+        返回：
+            float: 关键日收盘价，获取失败返回None
+        """
+        # stock_code: 股票代码，类型str，必填
+        # key_date: 关键日期，类型str，必填
+        try:
+            # 1. 查询关键日的收盘价
+            sql = """
+            SELECT close FROM stock_kline
+            WHERE code = ? AND date = ?
+            """
+            
+            # 2. 执行查询
+            result = self.db_manager.query_one(sql, (stock_code, key_date))
+            
+            # 3. 如果精确匹配到，返回收盘价
+            if result and result.get('close'):
+                return float(result['close'])
+            
+            # 4. 精确匹配失败，尝试查找最接近关键日的交易日
+            sql = """
+            SELECT close, date FROM stock_kline
+            WHERE code = ? AND date <= ?
+            ORDER BY date DESC
+            LIMIT 1
+            """
+            
+            # 5. 执行查询
+            result = self.db_manager.query_one(sql, (stock_code, key_date))
+            
+            # 6. 如果找到最近的交易日，返回收盘价
+            if result and result.get('close'):
+                logger.debug(
+                    f"{stock_code} 关键日{key_date}无K线数据，"
+                    f"使用最近交易日{result['date']}的收盘价"
+                )
+                return float(result['close'])
+            
+            # 7. 均未找到，返回None
+            logger.warning(f"{stock_code} 无法获取关键日{key_date}的收盘价")
+            return None
+        
+        except Exception as e:
+            logger.error(f"获取关键日收盘价失败: {stock_code} - {str(e)}")
             return None
     
     def _check_cache(self, hunting_date: str, timing_strategy: str = 'support') -> Optional[List[Dict]]:

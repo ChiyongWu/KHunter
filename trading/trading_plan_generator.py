@@ -19,7 +19,6 @@ class TradingPlanGenerator:
     """
 
     DEFAULT_POSITION_RATIO = 5
-    DEFAULT_HOLD_DAYS = 10
     STOP_LOSS_PERCENT = 0.05
     TAKE_PROFIT_PERCENT = 0.20
 
@@ -288,6 +287,16 @@ class TradingPlanGenerator:
         current_price = float(stock_data.get('current_price', support_level))
         buy_plan = self._calculate_buy_plan(current_price)
         
+        # 择时策略中文名称映射
+        timing_strategy_display = {
+            'turtle': '海龟策略',
+            'rsi': 'RSI策略',
+            'bollinger': '布林带策略',
+            'support': '支撑位策略'
+        }
+        timing_strategy = stock_data.get('timing_strategy', '')
+        timing_strategy_name = timing_strategy_display.get(timing_strategy, timing_strategy)
+        
         return {
             'plan_date': plan_date,
             'hunting_date': hunting_date,
@@ -300,7 +309,7 @@ class TradingPlanGenerator:
             'current_price': current_price,
             'stop_loss_price': self._calculate_stop_loss(support_level),
             'take_profit_price': self._calculate_take_profit(support_level),
-            'hold_days': self.DEFAULT_HOLD_DAYS,
+            'timing_strategy': timing_strategy_name,
             'remark': '',
             'rank': stock_data.get('rank', 0)
         }

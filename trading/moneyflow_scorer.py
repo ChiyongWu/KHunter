@@ -315,7 +315,7 @@ class MoneyflowScorer:
             )
             # 检查返回数据是否有效
             if df is not None and not df.empty:
-                logger.info(
+                logger.debug(
                     f"获取资金流向数据成功: {stock_code}, {len(df)} 条记录"
                 )
                 # 写入缓存
@@ -366,7 +366,7 @@ class MoneyflowScorer:
             )
             # 检查返回数据
             if df is not None and not df.empty:
-                logger.info(f"获取北向资金数据成功: {stock_code}, {len(df)} 条")
+                logger.debug(f"获取北向资金数据成功: {stock_code}, {len(df)} 条")
                 # 写入缓存
                 self._cache.set(cache_key, df)
                 return df
@@ -632,12 +632,12 @@ class MoneyflowScorer:
         返回:
             Tuple[float, MoneyflowDetail]: (资金面得分, 资金面详情对象)
         """
-        logger.info(f"开始计算资金面得分: {stock_code}, 日期: {score_date}")
+        logger.debug(f"开始计算资金面得分: {stock_code}, 日期: {score_date}")
 
         # 检查是否为交易日
         from utils.trade_date_utils import is_trading_day
         if not is_trading_day(score_date):
-            logger.info(f"日期 {score_date} 不是交易日，跳过资金面评分")
+            logger.debug(f"日期 {score_date} 不是交易日，跳过资金面评分")
             detail = MoneyflowDetail()
             return 0, detail
 
@@ -710,7 +710,7 @@ class MoneyflowScorer:
         total_score = round(total_score, 1)
 
         # 记录最终得分
-        logger.info(
+        logger.debug(
             f"股票 {stock_code} 资金面得分: {total_score} "
             f"(主力={main_score}, 大单={large_ratio_score}, "
             f"北向={north_score}, 方向={direction_score})"

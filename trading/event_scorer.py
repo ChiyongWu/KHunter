@@ -336,7 +336,7 @@ class EventScorer:
                 name = str(df.iloc[0].get("name", ""))
                 # 判断名称中是否包含 ST 标识
                 is_st = "ST" in name.upper()
-                logger.info(f"股票 {stock_code} ST状态: {is_st}, 名称: {name}")
+                logger.debug(f"股票 {stock_code} ST状态: {is_st}, 名称: {name}")
                 # 写入缓存
                 self._cache.set(cache_key, is_st)
                 return is_st
@@ -399,7 +399,7 @@ class EventScorer:
                 if event:
                     events.append(event)
 
-            logger.info(f"业绩预告事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"业绩预告事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"业绩预告查询失败: {stock_code}, {e}")
 
@@ -511,7 +511,7 @@ class EventScorer:
                 if event:
                     events.append(event)
 
-            logger.info(f"股东增减持事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"股东增减持事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"股东增减持查询失败: {stock_code}, {e}")
 
@@ -604,7 +604,7 @@ class EventScorer:
                     "score": POSITIVE_SCORES["股票回购"],
                     "date": ann_date,
                 })
-            logger.info(f"股票回购事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"股票回购事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"股票回购查询失败: {stock_code}, {e}")
 
@@ -650,7 +650,7 @@ class EventScorer:
                 if premium < -BLOCK_TRADE_DISCOUNT_THRESHOLD:
                     events.append({"type": "大宗交易折价", "score": NEGATIVE_SCORES["大宗交易折价"],
                                    "date": trade_date, "premium": premium})
-            logger.info(f"大宗交易事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"大宗交易事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"大宗交易查询失败: {stock_code}, {e}")
         self._cache.set(cache_key, events)
@@ -698,7 +698,7 @@ class EventScorer:
                         elif net_buy < 0:
                             events.append({"type": "龙虎榜净卖出", "score": NEGATIVE_SCORES["龙虎榜净卖出"], "date": trade_date_str})
                 current_dt += timedelta(days=1)
-            logger.info(f"龙虎榜事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"龙虎榜事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"龙虎榜查询失败: {stock_code}, {e}")
         self._cache.set(cache_key, events)
@@ -739,7 +739,7 @@ class EventScorer:
             for _, row in df.iterrows():
                 ann_date = str(row.get("ann_date", ""))
                 events.append({"type": "异常波动", "score": NEGATIVE_SCORES["异常波动"], "date": ann_date})
-            logger.info(f"异常波动事件: {stock_code}, {len(events)} 条")
+            logger.debug(f"异常波动事件: {stock_code}, {len(events)} 条")
         except Exception as e:
             logger.error(f"异常波动查询失败: {stock_code}, {e}")
         self._cache.set(cache_key, events)
@@ -805,7 +805,7 @@ class EventScorer:
         返回:
             Tuple[float, EventDetail]: (事件驱动得分, 事件详情对象)
         """
-        logger.info(f"开始计算事件驱动得分: {stock_code}, 日期: {score_date}")
+        logger.debug(f"开始计算事件驱动得分: {stock_code}, 日期: {score_date}")
         detail = EventDetail()
         formatted_date = self._format_date(score_date)
         # 先检查一票否决条件
@@ -828,7 +828,7 @@ class EventScorer:
         positive_total = sum(e.get("score", 0) for e in detail.positive_events)
         negative_total = sum(e.get("score", 0) for e in detail.negative_events)
         total_score = max(-100, min(100, 50 + positive_total + negative_total))
-        logger.info(f"股票 {stock_code} 事件驱动得分: {total_score} (基准分=50, 正面={positive_total}, 负面={negative_total})")
+        logger.debug(f"股票 {stock_code} 事件驱动得分: {total_score} (基准分=50, 正面={positive_total}, 负面={negative_total})")
         return total_score, detail
 
     def _collect_all_events(self, stock_code: str, score_date: str) -> List[dict]:

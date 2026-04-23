@@ -38,7 +38,7 @@ let backtestConfig = {
  * 切换支撑位置选择框的启用/禁用状态
  */
 function toggleSupportLevel() {
-    const timingStrategy = document.getElementById('timing-strategy');
+    const timingStrategy = document.getElementById('backtest-timing-strategy');
     const supportLevel = document.getElementById('support-level');
     
     if (timingStrategy && supportLevel) {
@@ -284,7 +284,7 @@ async function runBacktest() {
         const startDateInput = document.getElementById('start-date');
         const endDateInput = document.getElementById('end-date');
         const supportLevelSelect = document.getElementById('support-level');
-        const timingStrategySelect = document.getElementById('timing-strategy');
+        const timingStrategySelect = document.getElementById('backtest-timing-strategy');
         const backtestEngineSelect = document.getElementById('backtest-engine');
         
         // 验证表单数据

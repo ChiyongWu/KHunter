@@ -1515,6 +1515,8 @@ class BacktestEngine:
                               capital_history: List[float]) -> Dict:
         """计算绩效指标
         
+        统计所有 sell_date is not None 的交易（包括已卖出和持仓虚拟交易）
+        
         Args:
             trades: 交易记录
             initial_capital: 初始资金
@@ -1525,13 +1527,13 @@ class BacktestEngine:
         Returns:
             绩效指标字典
         """
-        # 过滤出已完成的交易（有卖出记录）
-        completed_trades = [t for t in trades if t['sell_date'] is not None]
+        # 过滤出有卖出日期的交易（包括实际卖出和持仓虚拟卖出）
+        completed_trades = [t for t in trades if t.get('sell_date') is not None]
         
         if not completed_trades:
             # 即使没有完成交易，也要计算总收益率
             total_return = ((final_capital / initial_capital) - 1) * 100
-            total_return = round(total_return, 2)  # 保留两位小数
+            total_return = round(total_return, 2)
             return {
                 'total_trades': 0,
                 'win_trades': 0,
@@ -1548,22 +1550,22 @@ class BacktestEngine:
         
         # 计算基本指标
         total_trades = len(completed_trades)
-        win_trades = sum(1 for t in completed_trades if t['return_rate'] > 0)
-        loss_trades = sum(1 for t in completed_trades if t['return_rate'] < 0)
+        win_trades = sum(1 for t in completed_trades if t.get('return_rate', 0) > 0)
+        loss_trades = sum(1 for t in completed_trades if t.get('return_rate', 0) < 0)
         win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
         
         returns = [t['return_rate'] for t in completed_trades]
         avg_return = np.mean(returns) if returns else 0
         total_return = ((final_capital / initial_capital) - 1) * 100
-        total_return = round(total_return, 2)  # 保留两位小数
+        total_return = round(total_return, 2)
         
         # 计算最大和最小单笔收益
         max_return = max(returns) if returns else 0
         min_return = min(returns) if returns else 0
         
         # 计算盈利因子
-        winning_returns = [t['return_rate'] for t in completed_trades if t['return_rate'] > 0]
-        losing_returns = [abs(t['return_rate']) for t in completed_trades if t['return_rate'] < 0]
+        winning_returns = [t['return_rate'] for t in completed_trades if t.get('return_rate', 0) > 0]
+        losing_returns = [abs(t['return_rate']) for t in completed_trades if t.get('return_rate', 0) < 0]
         total_win = sum(winning_returns) if winning_returns else 0
         total_loss = sum(losing_returns) if losing_returns else 1
         profit_factor = total_win / total_loss if total_loss > 0 else 0

@@ -422,8 +422,6 @@ def run_backtest():
             'start_date': start_date,
             'end_date': end_date,
             'total_trades': result.get('performance', {}).get('total_trades', 0),
-            'sold_trades': result.get('performance', {}).get('sold_trades', 0),
-            'holding_trades': result.get('performance', {}).get('holding_trades', 0),
             'win_trades': result.get('performance', {}).get('win_trades', 0),
             'loss_trades': result.get('performance', {}).get('loss_trades', 0),
             'win_rate': result.get('performance', {}).get('win_rate', 0),

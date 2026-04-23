@@ -243,7 +243,7 @@ function showPlanModal(planData) {
             const positionRatio = plan.position_ratio != null ? plan.position_ratio : '-';
             const stopLoss = plan.stop_loss_price != null ? plan.stop_loss_price.toFixed(2) : '-';
             const takeProfit = plan.take_profit_price != null ? plan.take_profit_price.toFixed(2) : '-';
-            const holdDays = plan.hold_days != null ? plan.hold_days : '-';
+            const timingStrategy = plan.timing_strategy || '-';
             
             const row = document.createElement('tr');
             row.innerHTML = `
@@ -255,7 +255,7 @@ function showPlanModal(planData) {
                 <td>${positionRatio}%</td>
                 <td>${stopLoss}</td>
                 <td>${takeProfit}</td>
-                <td>${holdDays}天</td>
+                <td>${timingStrategy}</td>
             `;
             tbody.appendChild(row);
         });

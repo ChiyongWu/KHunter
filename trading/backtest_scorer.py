@@ -297,7 +297,7 @@ class BacktestScoreCalculator:
                 total_weight += weight
             
             score_obj.technical_score = total_weight
-            logger.info(f"股票 {stock_code} 技术面评分: {total_weight}, 命中策略: {hit_strategies}")
+            logger.debug(f"股票 {stock_code} 技术面评分: {total_weight}, 命中策略: {hit_strategies}")
             
             # 检查一票否决
             if TECH_VETO_ENABLED and hit_strategies:

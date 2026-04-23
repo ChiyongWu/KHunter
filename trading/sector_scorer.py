@@ -337,7 +337,7 @@ class SectorScorer:
                         "name": sec_name,
                     })
 
-            logger.info(
+            logger.debug(
                 f"获取个股板块映射成功: {stock_code}, "
                 f"{len(sectors)} 个板块, "
                 f"有名称: {sum(1 for s in sectors if s['name'])} 个"
@@ -379,7 +379,7 @@ class SectorScorer:
                             "name": name,
                             "type": sec_type,
                         }
-            logger.info(f"获取板块名称映射: {len(name_map)} 个板块")
+            logger.debug(f"获取板块名称映射: {len(name_map)} 个板块")
             # 写入缓存
             self._cache.set(cache_key, name_map)
             return name_map
@@ -417,7 +417,7 @@ class SectorScorer:
             )
             # 检查返回数据是否有效
             if df is not None and not df.empty:
-                logger.info(
+                logger.debug(
                     f"获取板块行情成功: {trade_date}, {len(df)} 个板块"
                 )
                 # 写入缓存
@@ -462,7 +462,7 @@ class SectorScorer:
             )
             # 检查返回数据是否有效
             if df is not None and not df.empty:
-                logger.info(
+                logger.debug(
                     f"获取板块资金流向成功: {trade_date}, {len(df)} 个板块"
                 )
                 # 写入缓存
@@ -645,11 +645,6 @@ class SectorScorer:
         # 3. 计算综合得分（加上基准分）
         total_score = BASE_SCORE + rank_score + moneyflow_score
 
-        # 记录板块得分日志
-        logger.info(
-            f"板块 {sector_name}({sector_code}) 得分: {total_score} "
-            f"(基准分={BASE_SCORE}, 排名={rank_score}, 资金={moneyflow_score})"
-        )
         return total_score, detail
 
     # ============================================================
@@ -674,12 +669,12 @@ class SectorScorer:
         返回:
             Tuple[float, SectorDetail]: (板块强度得分, 板块详情对象)
         """
-        logger.info(f"开始计算板块强度得分: {stock_code}, 日期: {score_date}")
+        logger.debug(f"开始计算板块强度得分: {stock_code}, 日期: {score_date}")
 
         # 检查是否为交易日
         from utils.trade_date_utils import is_trading_day
         if not is_trading_day(score_date):
-            logger.info(f"日期 {score_date} 不是交易日，跳过板块强度评分")
+            logger.debug(f"日期 {score_date} 不是交易日，跳过板块强度评分")
             detail = SectorDetail()
             return 0, detail
 
@@ -719,8 +714,8 @@ class SectorScorer:
             sector_score, sector_detail = self._calculate_sector_score(
                 sector_code, sector_name, dates
             )
-            # 记录板块得分
-            logger.info(
+            # 记录板块得分（debug级别）
+            logger.debug(
                 f"板块 {sector_name}({sector_code}) 得分: {sector_score}"
             )
             # 更新最高分板块（跳过无有效数据的板块：排名和资金都为0说明无数据）
@@ -747,7 +742,7 @@ class SectorScorer:
             return VETO_SCORE, best_detail
 
         # 记录最终得分
-        logger.info(
+        logger.debug(
             f"股票 {stock_code} 板块强度得分: {best_score} "
             f"(最优板块: {best_detail.sector_name})"
         )
