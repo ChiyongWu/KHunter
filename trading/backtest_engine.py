@@ -6,6 +6,7 @@
 import sqlite3
 import datetime
 import logging
+import threading
 import numpy as np
 import pandas as pd
 import json
@@ -24,6 +25,9 @@ from utils.strategy_name_mapper import get_english_name
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# 回测全局锁，确保同一时刻只有一个回测任务执行，避免日志交错和资源竞争
+_backtest_lock = threading.Lock()
 
 
 class BacktestEngine:
@@ -82,6 +86,12 @@ class BacktestEngine:
         Returns:
             回测结果字典
         """
+        # 获取回测锁，确保同一时刻只有一个回测任务执行
+        if not _backtest_lock.acquire(blocking=False):
+            logger.warning(f"回测任务正在执行中，策略 {strategy_name} 等待...")
+            _backtest_lock.acquire(blocking=True)
+            logger.info(f"获取回测锁，开始执行策略: {strategy_name}")
+        
         try:
             logger.info(f"开始回测策略: {strategy_name}")
             
@@ -133,6 +143,11 @@ class BacktestEngine:
             trades = []     # 交易记录
             capital_history = [initial_capital]  # 资金历史
             dates = []      # 回测日期列表
+            
+            # 回测配置：同一只股票最大买入次数
+            max_buy_count_per_stock = config.get('max_buy_count_per_stock', 4)
+            # 股票累计买入次数计数器 {stock_code: buy_count}
+            stock_buy_count = {}
             
             for i, current_date in enumerate(date_range):
                 logger.info(f"\n============================================================")
@@ -261,6 +276,13 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
+                    # 检查同一股票最大买入次数
+                    current_buy_count = stock_buy_count.get(stock_code, 0)
+                    if current_buy_count >= max_buy_count_per_stock:
+                        logger.info(f"股票 {stock_code} 已买入{current_buy_count}次，达到最大买入次数{max_buy_count_per_stock}，跳过")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
                     # 检查当日最大买入限制
                     if daily_buys >= max_daily_buys:
                         logger.info(f"达到当日最大买入限制: {max_daily_buys}")
@@ -366,6 +388,8 @@ class BacktestEngine:
                     trades.append(buy_record)
                     daily_buys += 1
                     today_bought_stocks.add(stock_code)
+                    # 更新该股票的累计买入次数
+                    stock_buy_count[stock_code] = stock_buy_count.get(stock_code, 0) + 1
                     
                     # 买入成功仍保留在股票池中
                     remaining_candidates.append(candidate)
@@ -407,9 +431,9 @@ class BacktestEngine:
                 capital_history.append(total_assets)
                 dates.append(current_date)
             
-            # 4. 结束结算：计算剩余持仓市值
+            # 4. 结束结算：计算剩余持仓市值，同时创建虚拟交易记录纳入胜率计算
             if positions:
-                logger.info("计算剩余持仓市值")
+                logger.info("计算剩余持仓市值并创建持仓交易记录")
                 final_date = date_range[-1]
                 for position in positions:
                     # 计算当前市值（最后一日收盘价）
@@ -417,6 +441,32 @@ class BacktestEngine:
                     current_value = current_price * position['quantity']
                     current_capital += current_value
                     logger.info(f"剩余持仓: {position['stock_code']} {position['stock_name']}, 市值: {current_value:.2f}")
+                    
+                    # 计算持仓收益率（从买入到回测结束）
+                    buy_price = position['buy_price']
+                    return_rate = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0
+                    hold_days = (final_date - position['buy_date']).days if isinstance(position['buy_date'], datetime.date) else 0
+                    
+                    # 创建持仓交易记录（以回测结束日期作为"虚拟卖出日期"）
+                    position_trade = {
+                        'stock_code': position['stock_code'],
+                        'stock_name': position['stock_name'],
+                        'buy_date': position['buy_date'],
+                        'sell_date': final_date,  # 虚拟卖出日期（回测结束日）
+                        'buy_price': buy_price,
+                        'sell_price': current_price,
+                        'quantity': position['quantity'],
+                        'profit': current_value - position['buy_amount'],
+                        'return_rate': return_rate,
+                        'profit_loss': current_value - position['buy_amount'],
+                        'hold_days': hold_days,
+                        'detail_url': self._generate_stock_detail_url(position['stock_code']),
+                        'trade_type': 'holding'  # 标记为持仓（未实际卖出）
+                    }
+                    trades.append(position_trade)
+                    logger.info(f"  持仓交易记录: {position['stock_code']} {position['stock_name']}, "
+                               f"买入价={buy_price:.2f}, 当前价={current_price:.2f}, "
+                               f"收益率={return_rate:.2f}%, 持有天数={hold_days}")
             
             # 5. 计算绩效指标
             final_capital = current_capital
@@ -443,6 +493,9 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"回测失败: {str(e)}")
             raise
+        finally:
+            # 释放回测锁，允许下一个任务执行
+            _backtest_lock.release()
     
     def _load_trading_calendar(self, start_date: str, end_date: str):
         """加载交易日历数据（扩大范围，覆盖前一交易日查找需求）
