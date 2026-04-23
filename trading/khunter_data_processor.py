@@ -575,35 +575,33 @@ class KHunterDataProcessor:
         """
         # records: 处理后的记录列表，类型List[Dict]，必填
         try:
-            # 1. 按 (stock_code, strategy_name) 分组，进行去重
-            # 这样可以保留同一股票同一策略在不同日期的最佳记录
-            stock_strategy_dict = {}
+            # 1. 按 stock_code 分组，进行去重
+            # 这样可以确保每只股票只显示一次，不管它被多少个策略选中
+            stock_dict = {}
             for record in records:
                 stock_code = record.get('stock_code')
-                strategy_name = record.get('strategy_name')
-                key = f"{stock_code}_{strategy_name}"
                 
-                # 2. 如果该组合还没有记录，直接添加
-                if key not in stock_strategy_dict:
-                    stock_strategy_dict[key] = record
+                # 2. 如果该股票还没有记录，直接添加
+                if stock_code not in stock_dict:
+                    stock_dict[stock_code] = record
                 else:
-                    # 3. 如果该组合已有记录，比较分数
-                    existing_record = stock_strategy_dict[key]
+                    # 3. 如果该股票已有记录，比较分数
+                    existing_record = stock_dict[stock_code]
                     existing_score = existing_record.get('score', 0)
                     new_score = record.get('score', 0)
                     
                     # 4. 分数较高的保留
                     if new_score > existing_score:
-                        stock_strategy_dict[key] = record
+                        stock_dict[stock_code] = record
                     # 5. 分数相同时，保留最近日期的一条
                     elif new_score == existing_score:
                         existing_date = existing_record.get('hunting_date', '')
                         new_date = record.get('hunting_date', '')
                         if new_date > existing_date:
-                            stock_strategy_dict[key] = record
+                            stock_dict[stock_code] = record
             
             # 6. 转换为列表
-            deduped_records = list(stock_strategy_dict.values())
+            deduped_records = list(stock_dict.values())
             
             # 7. 按评分倒序排列
             sorted_records = sorted(

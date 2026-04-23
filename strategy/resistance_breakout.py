@@ -77,7 +77,8 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         
         criteria.append(f"1. 放量长阳日：最近{max_search_days}个交易日内出现涨幅>={min_change_pct:.0f}%的阳线，且成交量是前{volume_ma_period}日均量的{volume_ratio:.1f}倍以上")
         criteria.append(f"2. 阻力位突破：长阳日收盘价突破该日前{lookback_days}日最高价的{100+breakout_ratio:.0f}%以上")
-        criteria.append(f"3. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
+        criteria.append(f"3. 高点间隔：长阳日与阻力高点日相隔不少于30个交易日")
+        criteria.append(f"4. 回踩支撑：从长阳日到今天，所有天的最低价不跌破长阳日开盘价")
         
         return criteria
 
@@ -164,6 +165,9 @@ class ResistanceBreakoutStrategy(BaseStrategy):
         vol_period = self.params['volume_ma_period']
         max_search = self.params['max_search_days']
         n = len(df)
+        
+        # 新增：阻力高点间隔天数
+        min_resistance_gap = 30
 
         # 搜索范围：最近max_search_days天
         latest_candidate = n - 1
@@ -200,6 +204,13 @@ class ResistanceBreakoutStrategy(BaseStrategy):
             if resistance <= 0:
                 continue
             if day_close < resistance * (1 + ratio):
+                continue
+            
+            # 条件4：长阳日与阻力高点日相隔不少于min_resistance_gap交易日
+            # 找到前lookback日内最高价出现的位置
+            resistance_high_idx = df['high'].iloc[res_start:idx].idxmax()
+            gap_days = idx - resistance_high_idx
+            if gap_days < min_resistance_gap:
                 continue
 
             # 找到突破日
