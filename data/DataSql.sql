@@ -594,10 +594,10 @@ CREATE TABLE IF NOT EXISTS backtest_config (
     -- score_threshold: 评分阈值，类型REAL，默认60，范围0-100
     hold_period INTEGER DEFAULT 10,
     -- hold_period: 持有周期，类型INTEGER，默认10，单位交易日
-    stop_loss REAL DEFAULT -5,
-    -- stop_loss: 止损比例，类型REAL，默认-5，单位百分比
-    take_profit REAL DEFAULT 15,
-    -- take_profit: 止盈比例，类型REAL，默认15，单位百分比
+    stop_loss REAL DEFAULT -7,
+    -- stop_loss: 止损比例，类型REAL，默认-7，单位百分比
+    take_profit REAL DEFAULT 21,
+    -- take_profit: 止盈比例，类型REAL，默认21，单位百分比
     initial_capital REAL DEFAULT 1000000,
     -- initial_capital: 初始资金，类型REAL，默认1000000，单位元
     buy_amount REAL DEFAULT 100000,

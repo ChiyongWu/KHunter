@@ -114,3 +114,30 @@ def get_trading_days_between(start_date: str, end_date: str) -> int:
     except Exception as e:
         logger.error(f"计算交易日天数时出错: {e}")
         return 0
+
+
+def get_previous_trading_day(date_str: str) -> str:
+    """
+    获取指定日期的前一个交易日
+
+    参数:
+        date_str: 日期字符串，支持 YYYY-MM-DD 格式
+    返回:
+        str: 前一个交易日，格式为 YYYY-MM-DD
+    """
+    try:
+        # 解析日期
+        date = datetime.strptime(date_str, '%Y-%m-%d')
+        
+        # 向前查找前一个交易日
+        current = date - timedelta(days=1)
+        while True:
+            current_str = current.strftime('%Y-%m-%d')
+            if is_trading_day(current_str):
+                logger.debug(f"{date_str} 的前一个交易日是 {current_str}")
+                return current_str
+            current -= timedelta(days=1)
+    except Exception as e:
+        logger.error(f"获取前一个交易日时出错: {e}")
+        # 返回默认值
+        return date_str

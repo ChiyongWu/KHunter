@@ -274,3 +274,26 @@ class TradingTimeValidator:
         except Exception as e:
             logger.error(f"获取上次更新日期失败: {str(e)}")
             return ""
+
+
+def is_market_closed() -> bool:
+    """
+    检查当前是否已收盘
+
+    返回值:
+        bool: 是否已收盘
+    """
+    # 获取当前时间
+    now = datetime.now()
+    current_hour = now.hour
+    current_minute = now.minute
+    current_time_minutes = current_hour * 60 + current_minute
+    
+    # 交易时间结束时间（15:00）
+    trading_end_minutes = 15 * 60 + 0
+    
+    # 判断是否已收盘
+    if current_time_minutes >= trading_end_minutes:
+        return True
+    else:
+        return False

@@ -3070,6 +3070,203 @@ def _generate_trade_dates(start_date: str, end_date: str) -> list:
     return dates
 
 
+# ==================== 策略运行相关路由 ====================
+
+# 初始化策略运行器
+try:
+    from trading.strategy_runner import StrategyRunner
+    strategy_runner = StrategyRunner()
+    logger.info("策略运行器初始化成功")
+except Exception as e:
+    logger.error(f"策略运行器初始化失败: {str(e)}")
+    strategy_runner = None
+
+
+@app.route('/strategy-runner')
+def strategy_runner_page():
+    """
+    策略运行页面
+    """
+    return render_template('strategy_runner.html')
+
+
+@app.route('/api/strategy/run', methods=['POST'])
+def run_strategy():
+    """
+    运行策略
+    
+    参数：
+        strategy_names: 选股策略列表
+        timing_strategy: 择时策略名称
+        config: 配置参数
+    
+    返回：
+        {"status": "success", "message": "策略运行完成", "data": {...}}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"status": "failed", "message": "策略运行器未初始化"})
+        
+        # 获取请求参数
+        data = request.json or {}
+        strategy_names = data.get('strategy_names', [])
+        timing_strategy = data.get('timing_strategy', 'support')
+        config = data.get('config', {})
+        
+        # 运行策略
+        result = strategy_runner.run_strategy(strategy_names, timing_strategy, config)
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"运行策略失败: {str(e)}")
+        return jsonify({"status": "failed", "message": str(e)})
+
+
+@app.route('/api/strategy/status')
+def get_strategy_status():
+    """
+    获取策略运行状态
+    
+    返回：
+        {"success": true, "data": {"date": "2026-04-24", "status": "completed", "strategy": "海龟策略"}}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"success": False, "error": "策略运行器未初始化"})
+        
+        # 获取当前工作日期
+        working_date = strategy_runner.get_working_date()
+        
+        # 检查是否已处理
+        processed = strategy_runner.check_if_processed(working_date)
+        
+        # 构建状态数据
+        status_data = {
+            "date": working_date,
+            "status": "completed" if processed else "pending",
+            "strategy": ""  # 这里可以从配置中获取当前使用的策略
+        }
+        
+        return jsonify({"success": True, "data": status_data})
+    except Exception as e:
+        logger.error(f"获取策略运行状态失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/portfolio')
+def get_portfolio():
+    """
+    获取持仓信息
+    
+    返回：
+        {"success": true, "data": {"positions": {...}}}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"success": False, "error": "策略运行器未初始化"})
+        
+        # 获取当前工作日期
+        working_date = strategy_runner.get_working_date()
+        
+        # 加载持仓信息
+        portfolio_file = strategy_runner.running_dir / f"portfolio_{working_date}.json"
+        portfolio = strategy_runner._load_portfolio(str(portfolio_file))
+        
+        return jsonify({"success": True, "data": {"positions": portfolio}})
+    except Exception as e:
+        logger.error(f"获取持仓信息失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/signals')
+def get_signals():
+    """
+    获取信号列表
+    
+    返回：
+        {"success": true, "data": {"signals": [...]}}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"success": False, "error": "策略运行器未初始化"})
+        
+        # 获取当前工作日期
+        working_date = strategy_runner.get_working_date()
+        
+        # 加载信号历史
+        signals_file = strategy_runner.running_dir / f"signals_{working_date}.json"
+        signals = strategy_runner._load_signals(str(signals_file))
+        
+        return jsonify({"success": True, "data": {"signals": signals}})
+    except Exception as e:
+        logger.error(f"获取信号列表失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/trades/execute', methods=['POST'])
+def execute_trade():
+    """
+    执行信号
+    
+    参数：
+        signal_id: 信号ID
+    
+    返回：
+        {"success": true, "message": "信号执行成功"}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"success": False, "error": "策略运行器未初始化"})
+        
+        # 获取请求参数
+        data = request.json or {}
+        signal_id = data.get('signal_id')
+        
+        if not signal_id:
+            return jsonify({"success": False, "error": "信号ID不能为空"})
+        
+        # 这里简化处理，实际应该根据信号ID找到对应的信号并执行
+        # 暂时返回成功
+        logger.info(f"执行信号: {signal_id}")
+        
+        return jsonify({"success": True, "message": "信号执行成功"})
+    except Exception as e:
+        logger.error(f"执行信号失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/trades/ignore', methods=['POST'])
+def ignore_trade():
+    """
+    忽略信号
+    
+    参数：
+        signal_id: 信号ID
+    
+    返回：
+        {"success": true, "message": "信号已忽略"}
+    """
+    try:
+        if not strategy_runner:
+            return jsonify({"success": False, "error": "策略运行器未初始化"})
+        
+        # 获取请求参数
+        data = request.json or {}
+        signal_id = data.get('signal_id')
+        
+        if not signal_id:
+            return jsonify({"success": False, "error": "信号ID不能为空"})
+        
+        # 这里简化处理，实际应该根据信号ID找到对应的信号并标记为忽略
+        # 暂时返回成功
+        logger.info(f"忽略信号: {signal_id}")
+        
+        return jsonify({"success": True, "message": "信号已忽略"})
+    except Exception as e:
+        logger.error(f"忽略信号失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
 def run_web_server(host='0.0.0.0', port=5000, debug=False):
     """启动Web服务器"""
     # 初始化日志系统

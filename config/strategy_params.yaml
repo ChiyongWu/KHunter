@@ -1200,3 +1200,137 @@ strategies:
       key_day_offset_max: 4
       max_adjust_days: 5
       min_adjust_days: 3
+
+  TurtleStrategy:
+    support_method: ma20
+    color: '#06b6d4'
+    description: 海龟策略，基于唐奇安通道的趋势跟踪系统，通过突破N日高点入场，N日低点或ATR止损出场
+    display_name: 海龟策略
+    icon: 🐢
+    param_details:
+      n1:
+        default: 6
+        description: 入场通道周期，突破此周期的最高价入场
+        display_name: 入场通道周期
+        group: 通道参数
+        max: 20
+        min: 5
+        type: int
+      n2:
+        default: 20
+        description: 出场通道周期，跌破此周期的最低价出场
+        display_name: 出场通道周期
+        group: 通道参数
+        max: 55
+        min: 10
+        type: int
+      atr_period:
+        default: 10
+        description: ATR计算周期
+        display_name: ATR周期
+        group: ATR参数
+        max: 30
+        min: 5
+        type: int
+      entry_atr:
+        default: 0.02
+        description: 入场ATR比例，用于计算仓位
+        display_name: 入场ATR比例
+        group: 仓位参数
+        max: 0.05
+        min: 0.01
+        type: float
+      add_atr:
+        default: 0.5
+        description: 加仓ATR间隔，价格每上涨此ATR倍数加仓一次
+        display_name: 加仓ATR间隔
+        group: 加仓参数
+        max: 2.0
+        min: 0.25
+        type: float
+      exit_atr:
+        default: 2.0
+        description: 出场ATR止损倍数，跌破入场价-此倍数*ATR止损
+        display_name: ATR止损倍数
+        group: 止损参数
+        max: 4.0
+        min: 1.0
+        type: float
+      base_position_amount:
+        default: 50000
+        description: 底仓金额（元）
+        display_name: 底仓金额(元)
+        group: 仓位参数
+        max: 100000
+        min: 10000
+        type: int
+      preset:
+        default: classic
+        description: 预设配置模式，classic为经典海龟(20/10)，short为短线海龟(10/5)，ultra_short为超短海龟(6/3)
+        display_name: 预设模式
+        group: 预设参数
+        options:
+        - classic
+        - short
+        - ultra_short
+        type: string
+    param_groups:
+    - description: 选择预设配置模式或自定义参数
+      name: 预设参数
+    - description: 控制唐奇安通道计算的参数
+      name: 通道参数
+    - description: 控制ATR指标计算的参数
+      name: ATR参数
+    - description: 控制止损止盈的参数
+      name: 止损参数
+    - description: 控制加仓条件的参数
+      name: 加仓参数
+    - description: 控制仓位的参数
+      name: 仓位参数
+    presets:
+      classic:
+        description: 经典海龟，20日入场/10日离场，适合趋势明显的品种
+        display_name: 经典海龟(20/10)
+        icon: 🐢
+        params:
+          n_entry: 20
+          n_exit: 10
+          atr_period: 20
+          entry_atr: 0.02
+          add_atr: 0.5
+          exit_atr: 2.0
+          base_position_amount: 50000
+      short:
+        description: 短线海龟，10日入场/5日离场，反应更灵敏
+        display_name: 短线海龟(10/5)
+        icon: ⚡
+        params:
+          n_entry: 10
+          n_exit: 5
+          atr_period: 10
+          entry_atr: 0.02
+          add_atr: 0.5
+          exit_atr: 2.0
+          base_position_amount: 50000
+      ultra_short:
+        description: 超短海龟，6日入场/3日离场，适合强势股高频交易
+        display_name: 超短海龟(6/3)
+        icon: 🚀
+        params:
+          n_entry: 6
+          n_exit: 3
+          atr_period: 6
+          entry_atr: 0.02
+          add_atr: 0.5
+          exit_atr: 2.0
+          base_position_amount: 50000
+    params:
+      preset: ultra_short
+      n_entry: 6
+      n_exit: 6
+      atr_period: 6
+      entry_atr: 0.02
+      add_atr: 0.5
+      exit_atr: 2.0
+      base_position_amount: 50000
+
