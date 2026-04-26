@@ -165,7 +165,9 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
 
     def quick_filter(self, df):
         """
-        快速过滤：检查前3-4天内是否有足够涨幅的阳线
+        快速过滤：检查距今3-4天的位置是否有倍量阳线
+        
+        参考涨停回马枪策略的做法，快速过滤只做初步筛选
         
         注意：数据是倒序的（最新在前），需要正确处理
 
@@ -177,13 +179,15 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         if len(df) < required_days:
             return False
 
-        # 检查前3-4天内是否有足够涨幅的阳线
+        # 快速过滤：检查距今3-4天的位置是否有足够涨幅的阳线
         # 对于倒序数据（最新在前）：
         # - index=0 是今天
         # - index=1 是昨天
         # - index=3 是距今3天
         # - index=4 是距今4天
-        # 需要检查距今3-4天范围内的所有日期
+        # 
+        # 快速过滤的目的是初步筛选，排除完全没有倍量阳线的股票
+        # 详细的条件检查（连续阳线、缩量等）在select_stocks中进行
         
         for offset in range(self.key_day_offset_min, self.key_day_offset_max + 1):
             key_day_idx = offset
@@ -214,7 +218,7 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
     def select_stocks(self, df, stock_name=''):
         """
         选股逻辑
-        :param df: 股票K线数据
+        :param df: 股票K线数据（倒序，最新在前）
         :param stock_name: 股票名称
         :return: 选股信号
         """
@@ -227,18 +231,19 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         if not self.quick_filter(df):
             return []
 
-        # 第二步：计算指标（包括排序）
+        # 第二步：计算指标（会自动处理数据顺序，最后恢复原始倒序）
         df = self.calculate_indicators(df)
 
         # 第三步：遍历可能的关键日（距今3-4天范围内）
-        # 在升序数据中：
-        # - 索引0是最老的数据
-        # - 索引len-1是最新数据（今天/选股日）
-        # - key_day_offset_min/max 表示关键日到今天的天数
+        # 注意：数据是倒序的（最新在前）
+        # - index=0 是今天（最新）
+        # - index=1 是昨天
+        # - index=3 是距今3天
+        # - index=4 是距今4天
 
         for key_day_offset in range(self.key_day_offset_min, self.key_day_offset_max + 1):
-            # 关键日索引（从后往前数）
-            key_day_idx = len(df) - 1 - key_day_offset
+            # 关键日索引（倒序数据中的距今N天）
+            key_day_idx = key_day_offset
 
             if key_day_idx < 0 or key_day_idx >= len(df):
                 continue
@@ -259,39 +264,34 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                 if not key_day.get('均线多头', False):
                     continue
 
-            # 【条件4】检查连续阳线：找到包含关键日的连续阳线序列，总共>=3天即可
-            # 注意：数据是升序（最老在前），索引越大日期越近
-
+            # 【条件4】检查连续阳线：关键日之前有≥3天连续阳线
+            # 注意：数据是倒序（最新在前），索引越大日期越早
+            # 关键日之前 = 索引更大的位置
+            
             # 向前（更早日期）检查连续阳线
-            before_start_idx = key_day_idx
-            for i in range(1, self.max_consecutive_阳 + 1):
-                check_idx = key_day_idx - i
-                if check_idx >= 0 and df.iloc[check_idx].get('is_阳线', False):
-                    before_start_idx = check_idx
-                else:
-                    break
-
-            # 向后（更近日期）检查连续阳线
-            after_end_idx = key_day_idx
+            consecutive_阳_days = 0
             for i in range(1, self.max_consecutive_阳 + 1):
                 check_idx = key_day_idx + i
                 if check_idx < len(df) and df.iloc[check_idx].get('is_阳线', False):
-                    after_end_idx = check_idx
+                    consecutive_阳_days += 1
                 else:
                     break
-
-            # 计算包含关键日的连续阳线总天数
-            consecutive_阳_days = after_end_idx - before_start_idx + 1
 
             # 检查连续阳线天数是否满足要求（≥3天）
             if consecutive_阳_days < self.min_consecutive_阳:
                 continue
 
             # 【条件5】检查连续阳线期间累计涨幅不超过阈值
-            # 从最老的阳线到最新的阳线计算涨幅
-            start_price = df.iloc[before_start_idx]['close']  # 连续阳线起始日收盘价
-            end_price = df.iloc[after_end_idx]['close']  # 连续阳线结束日收盘价
-            rally_pct = (end_price - start_price) / start_price
+            # 从最早的阳线到关键日计算涨幅
+            # 注意：倒序数据中，索引越大日期越早
+            if consecutive_阳_days > 0:
+                # 最早的阳线位置
+                start_idx = key_day_idx + consecutive_阳_days
+                start_price = df.iloc[start_idx]['close']  # 最早阳线的收盘价
+                end_price = key_day['close']  # 关键日的收盘价
+                rally_pct = (end_price - start_price) / start_price
+            else:
+                rally_pct = 0
 
             if rally_pct > self.max_rally_pct:
                 continue
@@ -301,34 +301,54 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             key_day_volume = key_day['volume']
 
             # 在关键日后检查缩量调整
-            # 注意：数据是升序（最老在前），所以索引越大日期越近
+            # 注意：数据是倒序（最新在前），所以索引越小日期越近
             # key_day_idx 是距今3-4天的位置
-            # key_day_idx + shrink_offset 检查的是更近的日期（索引更大=日期更近）
+            # key_day_idx - shrink_offset 检查的是更近的日期（索引更小=日期更近）
+            # 逻辑：在关键日后的max_adjust_days天内，找到连续的缩量天数
+            # 不要求第一天就缩量，只要在这个时间窗口内有连续的缩量即可
+            
             valid_shrink_days = 0
             ma5_broken = False
+            found_shrink_sequence = False
 
-            for shrink_offset in range(1, self.max_adjust_days + 1):
-                shrink_day_idx = key_day_idx + shrink_offset
-
-                # 检查缩量日是否存在（索引必须<len(df)）
-                if shrink_day_idx >= len(df):
+            # 遍历关键日后的每一天，寻找缩量序列
+            for start_offset in range(1, self.max_adjust_days + 1):
+                start_idx = key_day_idx - start_offset
+                
+                if start_idx < 0:
                     break
-
-                shrink_day = df.iloc[shrink_day_idx]
-
-                # 检查是否缩量（成交量小于关键日）
-                if shrink_day['volume'] >= key_day_volume:
+                
+                # 从这一天开始，检查是否有连续的缩量
+                temp_shrink_days = 0
+                temp_ma5_broken = False
+                
+                for shrink_offset in range(start_offset, self.max_adjust_days + 1):
+                    shrink_day_idx = key_day_idx - shrink_offset
+                    
+                    if shrink_day_idx < 0:
+                        break
+                    
+                    shrink_day = df.iloc[shrink_day_idx]
+                    
+                    # 检查是否缩量（成交量小于关键日）
+                    if shrink_day['volume'] >= key_day_volume:
+                        break
+                    
+                    # 检查是否跌破MA5（回调不破5日线）
+                    if shrink_day['close'] < shrink_day['ma5']:
+                        temp_ma5_broken = True
+                        break
+                    
+                    temp_shrink_days += 1
+                
+                # 如果找到足够的缩量天数，记录下来
+                if temp_shrink_days >= self.min_adjust_days and not temp_ma5_broken:
+                    valid_shrink_days = temp_shrink_days
+                    found_shrink_sequence = True
                     break
-
-                # 检查是否跌破MA5（回调不破5日线）
-                if shrink_day['close'] < shrink_day['ma5']:
-                    ma5_broken = True
-                    break
-
-                valid_shrink_days += 1
 
             # 检查是否满足缩量调整天数要求（≥3天）且未跌破MA5
-            if valid_shrink_days < self.min_adjust_days or ma5_broken:
+            if not found_shrink_sequence:
                 continue
 
             # 所有条件都满足，返回选股信号
