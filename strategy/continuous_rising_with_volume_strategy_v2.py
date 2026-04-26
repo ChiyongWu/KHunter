@@ -179,7 +179,7 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         if len(df) < required_days:
             return False
 
-        # 快速过滤：检查距今3-4天的位置是否有足够涨幅的阳线
+        # 快速过滤：检查距今3-4天的位置是否有倍量阳线
         # 对于倒序数据（最新在前）：
         # - index=0 是今天
         # - index=1 是昨天
@@ -210,7 +210,20 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             prev_close = prev_day['close']
             if prev_close > 0:
                 rise_ratio = (key_day['close'] - prev_close) / prev_close
-                if rise_ratio >= self.key_day_rise_min:
+                if rise_ratio < self.key_day_rise_min:
+                    continue
+            else:
+                continue
+            
+            # 检查是否倍量（成交量 > 前5日均量 × 倍量阈值）
+            # 计算前5日平均成交量（不包括当日）
+            # 注意：数据是倒序的，所以索引越大日期越早
+            start_idx = key_day_idx + 1
+            end_idx = min(key_day_idx + 6, len(df))
+            
+            if start_idx < end_idx:
+                avg_volume = df.iloc[start_idx:end_idx]['volume'].mean()
+                if avg_volume > 0 and key_day['volume'] > avg_volume * self.volume_multiplier:
                     return True
 
         return False
@@ -259,10 +272,10 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             if not key_day.get('站上MA5', False):
                 continue
 
-            # 【条件3】趋势过滤：均线多头排列
-            if self.enable_ma_filter:
-                if not key_day.get('均线多头', False):
-                    continue
+            # 【条件3】趋势过滤：均线多头排列（强制条件）
+            # 注意：均线多头是强制条件，必须满足
+            if not key_day.get('均线多头', False):
+                continue
 
             # 【条件4】检查连续阳线：包含关键日在内，总共≥3天连续阳线
             # 注意：数据是倒序（最新在前），索引越大日期越早
