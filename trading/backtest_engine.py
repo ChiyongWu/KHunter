@@ -908,33 +908,28 @@ class BacktestEngine:
         return 0.0
     
     # 策略移除模式配置
-    # immediate: 买入后立即验证趋势
-    # gradual: 持有N天后开始验证趋势
-    # never: 完全不验证趋势（由卖出规则处理）
+    # 所有策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
+    # min_hold_days: 持有多少天后开始趋势验证
+    # - 0: 买入后立即验证趋势
+    # - N: 持有N天后才验证趋势
     STRATEGY_REMOVAL_CONFIG = {
         'ImmortalGuidanceStrategy': {
-            'mode': 'immediate',
-            'min_hold_days': 0
+            'min_hold_days': 0  # 买入后立即验证趋势
         },
         'ContinuousRisingWithVolumeStrategyV2': {
-            'mode': 'gradual',
-            'min_hold_days': 3
+            'min_hold_days': 3  # 持有3天后验证趋势
         },
         'TurtleStrategy': {
-            'mode': 'never',
-            'min_hold_days': 0
+            'min_hold_days': 10  # 海龟策略：持有10天后验证趋势
         },
         'SupportStrategy': {
-            'mode': 'never',
-            'min_hold_days': 0
+            'min_hold_days': 10  # 支撑位策略：持有10天后验证趋势
         },
         'ResistBreakoutStrategy': {
-            'mode': 'gradual',
-            'min_hold_days': 2
+            'min_hold_days': 2  # 持有2天后验证趋势
         },
         'BottomTrendInflectionStrategy': {
-            'mode': 'gradual',
-            'min_hold_days': 5
+            'min_hold_days': 5  # 持有5天后验证趋势
         },
     }
 
@@ -945,28 +940,23 @@ class BacktestEngine:
             strategy_name: 策略名称
             
         Returns:
-            移除配置字典，包含 mode 和 min_hold_days
+            移除配置字典，包含 min_hold_days
         """
         return self.STRATEGY_REMOVAL_CONFIG.get(strategy_name, {
-            'mode': 'gradual',
-            'min_hold_days': 2
+            'min_hold_days': 2  # 默认持有2天后验证趋势
         })
 
     def _check_pool_removal(self, current_date, config):
         """检查股票池中需要移除的股票
         
         移除条件（满足任一即移除）：
-        1. 破支撑位：前一日收盘价 < 支撑位 × 0.98
-        2. 收盘价 < MA10
-        3. 20日线性回归斜率 <= 0
-        4. 20日R²拟合度 < 0.3
+        1. 破支撑位：前一日收盘价 < 支撑位 × 0.98（始终生效）
+        2. 不满足上升趋势条件（持有 min_hold_days 天后生效）
         
-        注意：
-        - 破支撑位移除始终生效
-        - 趋势验证根据策略模式决定是否生效：
-          - immediate: 买入后立即验证趋势
-          - gradual: 持有 min_hold_days 天后才开始验证趋势
-          - never: 完全不验证趋势
+        趋势验证条件：
+        - 收盘价 >= MA10
+        - 20日线性回归斜率 > 0
+        - 20日R²拟合度 >= 0.3
         
         Args:
             current_date: 当前交易日期
@@ -990,7 +980,6 @@ class BacktestEngine:
             
             # 获取策略的移除配置
             removal_config = self._get_strategy_removal_config(strategy_name)
-            removal_mode = removal_config.get('mode', 'gradual')
             min_hold_days = removal_config.get('min_hold_days', 2)
             
             # 计算持有天数
@@ -1027,44 +1016,33 @@ class BacktestEngine:
             removal_reasons = []
             should_remove = False
             
-            # 条件1: 破支撑位移除（始终检查）
+            # 条件1: 破支撑位移除（始终生效）
             support_level = candidate.get('support_level', 0.0)
             if support_level > 0 and prev_close > 0:
-                # 跌破支撑位超过2%则移除
                 if prev_close < support_level * 0.98:
                     should_remove = True
                     drop_pct = (prev_close - support_level) / support_level * 100
                     removal_reasons.append(f"跌破支撑位{support_level:.2f}{drop_pct:.1f}%")
             
-            # 条件2: 趋势验证移除（根据策略模式决定是否检查）
-            trend_verified = False
-            if removal_mode != 'never':
-                # 渐进模式：持有天数不足则跳过趋势验证
-                if removal_mode == 'gradual' and hold_days < min_hold_days:
-                    trend_verified = True  # 观察期内，跳过验证
-                else:
-                    # 执行趋势验证
-                    ma10 = df_to_date['close'].tail(10).mean()
-                    prices = df_to_date['close'].tail(20).values
-                    x = np.arange(len(prices))
-                    slope, _, r_value, _, _ = stats.linregress(x, prices)
-                    r_squared = r_value ** 2
-                    
-                    # 判断是否满足上升趋势条件
-                    if prev_close >= ma10 and slope > 0 and r_squared >= 0.3:
-                        trend_verified = True
-                    else:
-                        # 不满足上升趋势，移除
-                        should_remove = True
-                        if prev_close < ma10:
-                            removal_reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
-                        if slope <= 0:
-                            removal_reasons.append(f"斜率{slope:.4f}<=0")
-                        if r_squared < 0.3:
-                            removal_reasons.append(f"R²{r_squared:.4f}<0.3")
-            else:
-                # never模式，跳过趋势验证
-                trend_verified = True
+            # 条件2: 趋势验证移除（持有 min_hold_days 天后生效）
+            if hold_days >= min_hold_days:
+                ma10 = df_to_date['close'].tail(10).mean()
+                prices = df_to_date['close'].tail(20).values
+                x = np.arange(len(prices))
+                slope, _, r_value, _, _ = stats.linregress(x, prices)
+                r_squared = r_value ** 2
+                
+                # 判断是否满足上升趋势条件
+                trend_ok = (prev_close >= ma10 and slope > 0 and r_squared >= 0.3)
+                
+                if not trend_ok:
+                    should_remove = True
+                    if prev_close < ma10:
+                        removal_reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
+                    if slope <= 0:
+                        removal_reasons.append(f"斜率{slope:.4f}<=0")
+                    if r_squared < 0.3:
+                        removal_reasons.append(f"R²{r_squared:.4f}<0.3")
             
             # 决定是否移除
             if should_remove:
