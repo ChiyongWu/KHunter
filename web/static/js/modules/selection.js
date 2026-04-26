@@ -189,10 +189,23 @@ export async function executeSelectionWithStrategies(strategies, logic = 'or', s
         if (result.success) {
             console.log('选股成功，数据类型:', typeof result.data);
             console.log('选股结果键:', Object.keys(result.data || {}));
-            // 缓存选股结果，供手动保存使用
+            // 缓存选股结果，供手动保存和导出使用
             lastSelectionResults = result.data;
             lastSelectionTime = result.time;
-            // 显示保存按钮
+            lastSelectionDate = result.selection_date || result.time.split(' ')[0];  // 缓存选股日期
+            
+            // 显示选股日期
+            const selectionDateEl = document.getElementById('selection-date');
+            if (selectionDateEl) {
+                selectionDateEl.textContent = `选股日期: ${lastSelectionDate}`;
+            }
+            
+            // 显示导出和保存按钮
+            const exportBtn = document.getElementById('export-selection-btn');
+            if (exportBtn) {
+                exportBtn.style.display = '';
+                exportBtn.disabled = false;
+            }
             const saveBtn = document.getElementById('save-selection-btn');
             if (saveBtn) {
                 saveBtn.style.display = '';
@@ -390,6 +403,132 @@ export async function saveSelectionResults() {
         btn.disabled = false;
     }
 }
+
+/**
+ * 导出选股结果为Excel
+ */
+export async function exportSelectionResults() {
+    // 检查是否有可导出的数据
+    if (!lastSelectionResults || !lastSelectionTime) {
+        alert('没有可导出的选股结果，请先执行选股');
+        return;
+    }
+    
+    const btn = document.getElementById('export-selection-btn');
+    if (!btn) return;
+    
+    // 按钮状态：导出中
+    btn.disabled = true;
+    btn.innerHTML = '<span class="icon">⏳</span> 导出中...';
+    
+    try {
+        // 收集所有股票数据
+        const allStocks = [];
+        const strategyNames = [];
+        
+        for (const [strategyName, signals] of Object.entries(lastSelectionResults)) {
+            // 跳过特殊字段
+            if (strategyName.startsWith('_')) {
+                continue;
+            }
+            strategyNames.push(strategyName);
+            
+            if (Array.isArray(signals)) {
+                for (const signal of signals) {
+                    // 提取关键日期信息
+                    let keyDate = '';
+                    let keyDateType = '';
+                    let reasons = '';
+                    
+                    if (signal.signals && signal.signals[0]) {
+                        const s = signal.signals[0];
+                        if (s.key_date) {
+                            keyDate = s.key_date;
+                            keyDateType = s.key_date_type || '';
+                        }
+                        if (s.reasons && Array.isArray(s.reasons)) {
+                            reasons = s.reasons.join(', ');
+                        }
+                    }
+                    
+                    allStocks.push({
+                        code: signal.code || '',
+                        name: signal.name || '',
+                        strategy: strategyName,
+                        key_date: keyDateType ? `${keyDateType}: ${keyDate}` : keyDate,
+                        reasons: reasons,
+                        score: signal.score || signal.total_score || ''
+                    });
+                }
+            }
+        }
+        
+        // 如果有交集分析，也添加交集股票
+        const intersectionAnalysis = lastSelectionResults._intersection_analysis;
+        if (intersectionAnalysis && intersectionAnalysis.by_count) {
+            for (const [count, stocks] of Object.entries(intersectionAnalysis.by_count)) {
+                if (parseInt(count) > 1 && Array.isArray(stocks)) {
+                    for (const stock of stocks) {
+                        // 检查是否已存在
+                        if (!allStocks.find(s => s.code === stock.code)) {
+                            allStocks.push({
+                                code: stock.code || '',
+                                name: stock.name || '',
+                                strategy: '交集',
+                                key_date: `被${count}个策略选中`,
+                                reasons: stock.reasons ? stock.reasons.join(', ') : '',
+                                score: stock.score || ''
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 生成CSV内容
+        const headers = ['股票代码', '股票名称', '策略名称', '关键日期', '选股理由', '评分'];
+        const csvRows = [headers.join(',')];
+        
+        for (const stock of allStocks) {
+            const row = [
+                stock.code,
+                stock.name,
+                stock.strategy,
+                stock.key_date,
+                `\"${stock.reasons.replace(/\"/g, '\"\"')}\"`,  // 转义引号
+                stock.score
+            ];
+            csvRows.push(row.join(','));
+        }
+        
+        // 创建并下载文件
+        const csvContent = '\ufeff' + csvRows.join('\n');  // 添加BOM支持中文
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        
+        const link = document.createElement('a');
+        link.href = url;
+        const dateStr = lastSelectionDate || lastSelectionTime.split(' ')[0];
+        link.download = `选股结果_${dateStr}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        // 恢复按钮状态
+        btn.innerHTML = '<span class="icon">📥</span> 导出结果';
+        btn.disabled = false;
+        
+    } catch (error) {
+        console.error('导出选股结果异常:', error);
+        alert('导出失败: ' + error.message);
+        btn.innerHTML = '<span class="icon">📥</span> 导出结果';
+        btn.disabled = false;
+    }
+}
+
+// 暴露全局函数
+window.exportSelectionResults = exportSelectionResults;
 
 /**
  * 渲染选股结果

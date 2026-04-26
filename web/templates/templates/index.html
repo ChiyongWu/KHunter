@@ -578,8 +578,12 @@
                 <div id="selection-page" class="page">
                     <div class="card">
                         <div class="card-header">
-                            <div style="display:flex;align-items:center;gap:10px;">
+                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                <span id="selection-date" class="text-primary" style="font-weight:600;"></span>
                                 <span id="selection-time" class="text-muted"></span>
+                                <button class="btn btn-success" id="export-selection-btn" onclick="exportSelectionResults()" style="display:none;">
+                                    <span class="icon">📥</span> 导出结果
+                                </button>
                                 <button class="btn btn-primary" id="save-selection-btn" style="display:none;">
                                     <span class="icon">💾</span> 保存结果
                                 </button>

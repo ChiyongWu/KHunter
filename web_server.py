@@ -1242,6 +1242,7 @@ def run_selection():
             'filter_stats': filter_stats,
             'b1_match': False,
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'selection_date': end_date if end_date else datetime.now().strftime('%Y-%m-%d'),  # 添加选股日期
             'strategy_display_names': strategy_display_names  # 添加策略名称映射
         })
     
