@@ -911,9 +911,9 @@ class BacktestEngine:
     # 配置从 config/pool_removal_config.yaml 读取
     # 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
     # 所有选股策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
-    # min_hold_days: 持有多少天后开始趋势验证
+    # min_hold_days: 加入股票池多少天后开始趋势验证
     # - 0: 买入后立即验证趋势
-    # - N: 持有N天后才验证趋势
+    # - N: 加入股票池N天后才验证趋势
 
     # YAML配置文件缓存
     _pool_removal_config_cache = None
@@ -982,7 +982,7 @@ class BacktestEngine:
         
         移除条件（满足任一即移除）：
         1. 破支撑位：前一日收盘价 < 支撑位 × 0.98（始终生效）
-        2. 不满足上升趋势条件（持有 min_hold_days 天后生效）
+        2. 不满足上升趋势条件（加入股票池 min_hold_days 天后生效）
         
         趋势验证条件：
         - 收盘价 >= MA10

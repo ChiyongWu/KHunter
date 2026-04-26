@@ -7,76 +7,76 @@ removal_strategies:
   ImmortalGuidanceStrategy:
     min_hold_days: 0
     is_enabled: true
-    remark: "仙人指路策略：买入后立即验证趋势"
+    remark: "仙人指路策略：加入股票池后立即验证趋势"
 
   # 连阳回调策略
   ContinuousRisingWithVolumeStrategyV2:
     min_hold_days: 3
     is_enabled: true
-    remark: "连阳回调策略：持有3天后验证趋势"
+    remark: "连阳回调策略：加入股票池3天后验证趋势"
 
   # 阻力突破策略
   ResistanceBreakoutStrategy:
     min_hold_days: 2
     is_enabled: true
-    remark: "阻力突破策略：持有2天后验证趋势"
+    remark: "阻力突破策略：加入股票池2天后验证趋势"
 
   # 底部反转策略
   BottomTrendInflectionStrategy:
     min_hold_days: 5
     is_enabled: true
-    remark: "底部反转策略：持有5天后验证趋势"
+    remark: "底部反转策略：加入股票池5天后验证趋势"
 
   # W底策略
   WBottomStrategy:
     min_hold_days: 5
     is_enabled: true
-    remark: "W底策略：持有5天后验证趋势"
+    remark: "W底策略：加入股票池5天后验证趋势"
 
   # 多重金叉策略
   MultiGoldenCrossStrategy:
     min_hold_days: 3
     is_enabled: true
-    remark: "多重金叉策略：持有3天后验证趋势"
+    remark: "多重金叉策略：加入股票池3天后验证趋势"
 
   # 多方炮策略
   MultiPartyCannonStrategy:
     min_hold_days: 3
     is_enabled: true
-    remark: "多方炮策略：持有3天后验证趋势"
+    remark: "多方炮策略：加入股票池3天后验证趋势"
 
   # 强洗弱转强策略
   StrongWashWeakToStrongStrategy:
     min_hold_days: 3
     is_enabled: true
-    remark: "强洗弱转强策略：持有3天后验证趋势"
+    remark: "强洗弱转强策略：加入股票池3天后验证趋势"
 
   # 趋势加速拐点策略
   TrendAccelerationInflectionStrategy:
     min_hold_days: 3
     is_enabled: true
-    remark: "趋势加速拐点策略：持有3天后验证趋势"
+    remark: "趋势加速拐点策略：加入股票池3天后验证趋势"
 
   # 趋势共振反转策略
   TrendResonanceReversalStrategy:
     min_hold_days: 5
     is_enabled: true
-    remark: "趋势共振反转策略：持有5天后验证趋势"
+    remark: "趋势共振反转策略：加入股票池5天后验证趋势"
 
   # 涨停横盘策略
   LimitUpSidewaysStrategy:
     min_hold_days: 2
     is_enabled: true
-    remark: "涨停横盘策略：持有2天后验证趋势"
+    remark: "涨停横盘策略：加入股票池2天后验证趋势"
 
   # 晨星策略
   MorningStarStrategy:
     min_hold_days: 5
     is_enabled: true
-    remark: "晨星策略：持有5天后验证趋势"
+    remark: "晨星策略：加入股票池5天后验证趋势"
 
   # 涨停回马枪策略
   LimitUpPullbackStrategy:
     min_hold_days: 2
     is_enabled: true
-    remark: "涨停回马枪策略：持有2天后验证趋势"
+    remark: "涨停回马枪策略：加入股票池2天后验证趋势"
