@@ -329,26 +329,15 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             # key_day_idx 是距今3-4天的位置
             # key_day_idx - shrink_offset 检查的是更近的日期（索引更小=日期更近）
             # 
-            # 修改逻辑：
-            # 1. 允许第1天不缩量（可能是反弹）
-            # 2. 从第2天开始寻找连续缩量
-            # 3. 缩量期间允许有1天跌破MA10（可能是短期回调）
+            # 逻辑：在关键日后的max_adjust_days天内，找到连续的缩量天数
+            # 不要求从哪一天开始，只要关键日之后有连续的缩量即可
+            # 缩量期间不允许跌破MA10
             
             valid_shrink_days = 0
             found_shrink_sequence = False
 
-            # 首先检查第1天是否缩量
-            first_day_idx = key_day_idx - 1
-            first_day_shrink = False
-            if first_day_idx >= 0:
-                first_day = df.iloc[first_day_idx]
-                first_day_shrink = first_day['volume'] < key_day_volume
-
-            # 如果第1天缩量，从第1天开始寻找缩量序列
-            # 如果第1天不缩量，从第2天开始寻找缩量序列
-            start_search_offset = 1 if first_day_shrink else 2
-            
-            for start_offset in range(start_search_offset, self.max_adjust_days + 1):
+            # 遍历关键日后的每一天，寻找缩量序列
+            for start_offset in range(1, self.max_adjust_days + 1):
                 start_idx = key_day_idx - start_offset
                 
                 if start_idx < 0:
@@ -356,7 +345,6 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                 
                 # 从这一天开始，检查是否有连续的缩量
                 temp_shrink_days = 0
-                temp_ma10_broken_count = 0  # 允许最多1天跌破MA10
                 
                 for shrink_offset in range(start_offset, self.max_adjust_days + 1):
                     shrink_day_idx = key_day_idx - shrink_offset
@@ -370,11 +358,9 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                     if shrink_day['volume'] >= key_day_volume:
                         break
                     
-                    # 检查是否跌破MA10（允许最多1天跌破）
+                    # 检查是否跌破MA10（不允许跌破）
                     if shrink_day['close'] < shrink_day['ma10']:
-                        temp_ma10_broken_count += 1
-                        if temp_ma10_broken_count > 1:
-                            break
+                        break
                     
                     temp_shrink_days += 1
                 
