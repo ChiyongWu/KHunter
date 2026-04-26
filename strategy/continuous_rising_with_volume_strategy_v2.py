@@ -328,15 +328,27 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
             # 注意：数据是倒序（最新在前），所以索引越小日期越近
             # key_day_idx 是距今3-4天的位置
             # key_day_idx - shrink_offset 检查的是更近的日期（索引更小=日期更近）
-            # 逻辑：在关键日后的max_adjust_days天内，找到连续的缩量天数
-            # 不要求第一天就缩量，只要在这个时间窗口内有连续的缩量即可
+            # 
+            # 修改逻辑：
+            # 1. 允许第1天不缩量（可能是反弹）
+            # 2. 从第2天开始寻找连续缩量
+            # 3. 缩量期间允许有1天跌破MA10（可能是短期回调）
             
             valid_shrink_days = 0
-            ma5_broken = False
             found_shrink_sequence = False
 
-            # 遍历关键日后的每一天，寻找缩量序列
-            for start_offset in range(1, self.max_adjust_days + 1):
+            # 首先检查第1天是否缩量
+            first_day_idx = key_day_idx - 1
+            first_day_shrink = False
+            if first_day_idx >= 0:
+                first_day = df.iloc[first_day_idx]
+                first_day_shrink = first_day['volume'] < key_day_volume
+
+            # 如果第1天缩量，从第1天开始寻找缩量序列
+            # 如果第1天不缩量，从第2天开始寻找缩量序列
+            start_search_offset = 1 if first_day_shrink else 2
+            
+            for start_offset in range(start_search_offset, self.max_adjust_days + 1):
                 start_idx = key_day_idx - start_offset
                 
                 if start_idx < 0:
@@ -344,7 +356,7 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                 
                 # 从这一天开始，检查是否有连续的缩量
                 temp_shrink_days = 0
-                temp_ma5_broken = False
+                temp_ma10_broken_count = 0  # 允许最多1天跌破MA10
                 
                 for shrink_offset in range(start_offset, self.max_adjust_days + 1):
                     shrink_day_idx = key_day_idx - shrink_offset
@@ -358,20 +370,21 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                     if shrink_day['volume'] >= key_day_volume:
                         break
                     
-                    # 检查是否跌破MA5（回调不破5日线）
-                    if shrink_day['close'] < shrink_day['ma5']:
-                        temp_ma5_broken = True
-                        break
+                    # 检查是否跌破MA10（允许最多1天跌破）
+                    if shrink_day['close'] < shrink_day['ma10']:
+                        temp_ma10_broken_count += 1
+                        if temp_ma10_broken_count > 1:
+                            break
                     
                     temp_shrink_days += 1
                 
                 # 如果找到足够的缩量天数，记录下来
-                if temp_shrink_days >= self.min_adjust_days and not temp_ma5_broken:
+                if temp_shrink_days >= self.min_adjust_days:
                     valid_shrink_days = temp_shrink_days
                     found_shrink_sequence = True
                     break
 
-            # 检查是否满足缩量调整天数要求（≥3天）且未跌破MA5
+            # 检查是否满足缩量调整天数要求（≥3天）
             if not found_shrink_sequence:
                 continue
 
@@ -388,12 +401,12 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
                 'consecutive_阳_days': consecutive_阳_days,
                 'rally_pct': round(rally_pct * 100, 2),
                 'shrink_days': valid_shrink_days,
-                'ma5': key_day['ma5'],
+                'ma10': key_day['ma10'],
                 'reasons': [
                     f'连续{consecutive_阳_days}天阳线（涨幅{rally_pct*100:.1f}%）',
                     f'关键日后{valid_shrink_days}天缩量调整',
                     f'均线多头排列（MA5>MA10>MA20）',
-                    f'调整期间回调不破MA5'
+                    f'调整期间回调不破MA10'
                 ]
             }
             return [signal_info]
@@ -429,7 +442,7 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         # 条件4：缩量调整
         criteria.append(
             f"4. 缩量调整：关键日后≥{self.min_adjust_days}天缩量调整（成交量<关键日），"
-            f"调整期间回调不破MA5"
+            f"调整期间回调不破MA10"
         )
 
         return criteria
