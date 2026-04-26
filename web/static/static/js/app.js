@@ -25,6 +25,7 @@ async function loadModules() {
         const historyModule = await import('./modules/history.js');
         const rankingModule = await import('./modules/ranking.js');
         const utilsModule = await import('./modules/utils.js');
+        const backtestModule = await import('./modules/backtest.js');
         const backtestBatchModule = await import('./modules/backtest-batch.js');
         const backtestExecutorModule = await import('./modules/backtest-executor.js');
         
@@ -39,6 +40,7 @@ async function loadModules() {
             history: historyModule,
             ranking: rankingModule,
             utils: utilsModule,
+            backtest: backtestModule,
             backtestBatch: backtestBatchModule,
             backtestExecutor: backtestExecutorModule
         };
@@ -111,6 +113,10 @@ function initializeApp() {
     
     // 暴露批量回测相关函数（供HTML调用）
     window.removeBacktestTask = modules.backtestBatch.removeBacktestTask;
+    window.searchBacktestHistory = modules.backtest.searchBacktestHistory;
+    window.viewBacktestResult = modules.backtest.viewBacktestResult;
+    window.exportBacktestResult = modules.backtest.exportBacktestResult;
+    window.closeBacktestModal = modules.backtest.closeBacktestModal;
     
     // 绑定按钮事件
     const runSelectionBtn = document.getElementById('run-selection-btn');
