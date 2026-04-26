@@ -266,28 +266,42 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
 
             # 【条件4】检查连续阳线：包含关键日在内，总共≥3天连续阳线
             # 注意：数据是倒序（最新在前），索引越大日期越早
-            # 关键日本身是倍量阳线，肯定是阳线，所以从1开始计数
+            # 需要双向检查：向前（更早日期）和向后（更近日期）
             
             # 向前（更早日期）检查连续阳线
-            consecutive_阳_days = 1  # 关键日本身算1天
+            before_count = 0
             for i in range(1, self.max_consecutive_阳 + 1):
                 check_idx = key_day_idx + i
                 if check_idx < len(df) and df.iloc[check_idx].get('is_阳线', False):
-                    consecutive_阳_days += 1
+                    before_count += 1
                 else:
                     break
+
+            # 向后（更近日期）检查连续阳线
+            after_count = 0
+            for i in range(1, self.max_consecutive_阳 + 1):
+                check_idx = key_day_idx - i
+                if check_idx >= 0 and df.iloc[check_idx].get('is_阳线', False):
+                    after_count += 1
+                else:
+                    break
+
+            # 计算包含关键日的连续阳线总天数
+            consecutive_阳_days = before_count + 1 + after_count  # 关键日本身算1天
 
             # 检查连续阳线天数是否满足要求（≥3天）
             if consecutive_阳_days < self.min_consecutive_阳:
                 continue
 
             # 【条件5】检查连续阳线期间累计涨幅不超过阈值
-            # 从最早的阳线到关键日计算涨幅
+            # 从最早的阳线到最新的阳线计算涨幅
             # 注意：倒序数据中，索引越大日期越早
             # 最早的阳线位置
-            start_idx = key_day_idx + consecutive_阳_days - 1
+            start_idx = key_day_idx + before_count
+            # 最新的阳线位置
+            end_idx = key_day_idx - after_count
             start_price = df.iloc[start_idx]['close']  # 最早阳线的收盘价
-            end_price = key_day['close']  # 关键日的收盘价
+            end_price = df.iloc[end_idx]['close']  # 最新阳线的收盘价
             rally_pct = (end_price - start_price) / start_price
 
             if rally_pct > self.max_rally_pct:

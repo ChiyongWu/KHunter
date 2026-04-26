@@ -9,6 +9,7 @@ import logging
 import threading
 import numpy as np
 import pandas as pd
+from scipy import stats
 import json
 from pathlib import Path
 from typing import List, Dict, Tuple
@@ -909,8 +910,12 @@ class BacktestEngine:
     def _check_pool_removal(self, current_date, config):
         """检查股票池中需要移除的股票
         
-        在每日选股之前执行，使用前一日收盘价与支撑位比较。
-        当前一日收盘价跌破支撑位超过阈值时，将该股票从候选池中移除。
+        移除条件（满足任一即移除）：
+        1. T-1收盘价 < 10日均线
+        2. 最近20日线性回归斜率 <= 0
+        3. 最近20日R²拟合度 < 0.5
+        
+        确保股票池中的股票均处于上升趋势。
         
         Args:
             current_date: 当前交易日期
@@ -919,48 +924,69 @@ class BacktestEngine:
         Returns:
             list: 移除的候选列表
         """
-        # 检查是否启用移除机制
-        if not config.get('support_removal_enabled', True):
-            return []
-        
-        # 获取移除阈值，默认2%
-        removal_threshold = config.get('support_removal_threshold', 0.02)
         removed_candidates = []
         remaining_candidates = []
         
         # 获取前一个交易日（用于获取收盘价）
         prev_date = self._get_previous_trading_day(current_date)
+        prev_date_str = prev_date.strftime('%Y-%m-%d')
         
         for candidate in self.buy_candidate_pool:
             # 提取股票信息
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
-            support_level = candidate.get('support_level', 0.0)
-            support_method = candidate.get('support_method', 'unknown')
             
-            # 无法计算支撑位，保留在池中
-            if support_level <= 0:
+            # 获取股票数据
+            df = self.stock_filtered_cache.get(stock_code)
+            if df is None:
+                # 无法获取数据，保留在池中
                 remaining_candidates.append(candidate)
                 continue
             
-            # 获取前一日收盘价
-            prev_close = self._get_stock_price(stock_code, prev_date, 'close')
+            # 日期切片：只取到前一日为止的数据
+            df_to_date = df[df['date'] <= prev_date_str].copy()
             
-            # 无法获取价格，保留在池中
-            if prev_close <= 0:
+            # 需要至少20日数据用于计算
+            if len(df_to_date) < 20:
                 remaining_candidates.append(candidate)
                 continue
             
-            # 判断前一日收盘价是否跌破支撑位超过阈值
-            if prev_close < support_level * (1 - removal_threshold):
-                removed_candidates.append(candidate)
-                # 计算跌破百分比
-                drop_pct = (prev_close - support_level) / support_level * 100
-                logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
-                           f"前一日收盘价={prev_close:.2f}, 支撑位={support_level:.2f}, "
-                           f"跌幅={drop_pct:.2f}%, 方法={support_method}")
+            # 确保正序（日期从早到晚）
+            if df_to_date['date'].iloc[0] > df_to_date['date'].iloc[-1]:
+                df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+            
+            # 条件1: T-1收盘价 >= 10日均线
+            ma10 = df_to_date['close'].tail(10).mean()
+            prev_close = df_to_date.iloc[-1]['close']
+            ma_condition = prev_close >= ma10
+            
+            # 条件2&3: 线性回归斜率和R²（最近20日）
+            prices = df_to_date['close'].tail(20).values
+            x = np.arange(len(prices))
+            slope, _, r_value, _, _ = stats.linregress(x, prices)
+            r_squared = r_value ** 2
+            slope_condition = slope > 0
+            r2_condition = r_squared >= 0.3
+            
+            # 判断是否满足上升趋势条件
+            if ma_condition and slope_condition and r2_condition:
+                # 满足条件，保留在池中
+                remaining_candidates.append(candidate)
             else:
-                remaining_candidates.append(candidate)
+                # 不满足上升趋势，移除
+                removed_candidates.append(candidate)
+                # 记录移除原因
+                reasons = []
+                if not ma_condition:
+                    reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
+                if not slope_condition:
+                    reasons.append(f"斜率{slope:.4f}<=0")
+                if not r2_condition:
+                    reasons.append(f"R²{r_squared:.4f}<0.5")
+                logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
+                           f"收盘={prev_close:.2f}, MA10={ma10:.2f}, "
+                           f"斜率={slope:.4f}, R²={r_squared:.4f}, "
+                           f"原因: {'; '.join(reasons)}")
         
         # 更新股票池
         if removed_candidates:
