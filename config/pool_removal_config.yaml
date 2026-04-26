@@ -1,0 +1,35 @@
+# ============================================
+# 股票池移除策略配置
+# ============================================
+# 说明：
+# - 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
+# - 配置项：
+#   - min_hold_days: 持有多少天后开始趋势验证
+#     - 0: 买入后立即验证趋势
+#     - N: 持有N天后才验证趋势
+#   - is_enabled: 是否启用该策略的移除逻辑（1=启用，0=禁用）
+
+removal_strategies:
+  # 仙人指路策略：买入后立即验证趋势
+  ImmortalGuidanceStrategy:
+    min_hold_days: 0
+    is_enabled: true
+    remark: "仙人指路策略：买入后立即验证趋势"
+
+  # 连阳回调策略：持有3天后验证趋势
+  ContinuousRisingWithVolumeStrategyV2:
+    min_hold_days: 3
+    is_enabled: true
+    remark: "连阳回调策略：持有3天后验证趋势"
+
+  # 阻力突破策略：持有2天后验证趋势
+  ResistBreakoutStrategy:
+    min_hold_days: 2
+    is_enabled: true
+    remark: "阻力突破策略：持有2天后验证趋势"
+
+  # 底部反转策略：持有5天后验证趋势
+  BottomTrendInflectionStrategy:
+    min_hold_days: 5
+    is_enabled: true
+    remark: "底部反转策略：持有5天后验证趋势"
