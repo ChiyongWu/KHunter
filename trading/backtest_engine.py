@@ -908,26 +908,12 @@ class BacktestEngine:
         return 0.0
     
     # 策略移除模式配置（仅针对选股策略）
-    # 配置从 config/pool_removal_config.yaml 读取，此处为回退默认值
+    # 配置从 config/pool_removal_config.yaml 读取
     # 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
     # 所有选股策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
     # min_hold_days: 持有多少天后开始趋势验证
     # - 0: 买入后立即验证趋势
     # - N: 持有N天后才验证趋势
-    STRATEGY_REMOVAL_CONFIG = {
-        'ImmortalGuidanceStrategy': {
-            'min_hold_days': 0  # 仙人指路策略：买入后立即验证趋势
-        },
-        'ContinuousRisingWithVolumeStrategyV2': {
-            'min_hold_days': 3  # 连阳回调策略：持有3天后验证趋势
-        },
-        'ResistBreakoutStrategy': {
-            'min_hold_days': 2  # 阻力突破策略：持有2天后验证趋势
-        },
-        'BottomTrendInflectionStrategy': {
-            'min_hold_days': 5  # 底部反转策略：持有5天后验证趋势
-        },
-    }
 
     # YAML配置文件缓存
     _pool_removal_config_cache = None
@@ -939,6 +925,10 @@ class BacktestEngine:
         
         Returns:
             策略名称 -> 配置字典的映射
+            
+        Raises:
+            FileNotFoundError: 配置文件不存在
+            ValueError: 配置格式错误或无启用的策略
         """
         # 使用类级别缓存，避免重复读取文件
         if BacktestEngine._pool_removal_config_cache is not None:
@@ -947,55 +937,45 @@ class BacktestEngine:
         config_map = {}
         config_path = Path(__file__).parent.parent / "config" / "pool_removal_config.yaml"
         
-        try:
-            if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    yaml_config = yaml.safe_load(f) or {}
-                
-                strategies = yaml_config.get('removal_strategies', {})
-                for name, cfg in strategies.items():
-                    # 只加载启用的策略
-                    if cfg.get('is_enabled', True):
-                        config_map[name] = {
-                            'min_hold_days': cfg.get('min_hold_days', 2)
-                        }
-                
-                if config_map:
-                    BacktestEngine._pool_removal_config_cache = config_map
-                    logger.info(f"从YAML配置加载股票池移除策略: {len(config_map)} 个策略")
-                else:
-                    logger.warning("YAML配置无启用的策略，使用默认配置")
-                    config_map = self.STRATEGY_REMOVAL_CONFIG
-            else:
-                logger.warning(f"配置文件不存在: {config_path}，使用默认配置")
-                config_map = self.STRATEGY_REMOVAL_CONFIG
-                
-        except Exception as e:
-            logger.warning(f"加载股票池移除配置失败: {str(e)}，使用默认配置")
-            config_map = self.STRATEGY_REMOVAL_CONFIG
+        if not config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            yaml_config = yaml.safe_load(f) or {}
+        
+        strategies = yaml_config.get('removal_strategies', {})
+        for name, cfg in strategies.items():
+            if cfg.get('is_enabled', True):
+                config_map[name] = {
+                    'min_hold_days': cfg.get('min_hold_days', 2)
+                }
+        
+        if not config_map:
+            raise ValueError("YAML配置无启用的策略")
+        
+        BacktestEngine._pool_removal_config_cache = config_map
+        logger.info(f"从YAML配置加载股票池移除策略: {len(config_map)} 个策略")
         
         return config_map
 
     def _get_strategy_removal_config(self, strategy_name: str) -> Dict:
         """获取策略的移除配置
         
-        从YAML配置文件读取配置，配置缺失时使用默认配置。
+        从YAML配置文件读取，配置缺失时抛出异常。
         
         Args:
             strategy_name: 策略名称
             
         Returns:
             移除配置字典，包含 min_hold_days
+            
+        Raises:
+            KeyError: 策略未在配置文件中配置
         """
-        # 从YAML配置读取
         yaml_config = self._load_pool_removal_config()
-        if strategy_name in yaml_config:
-            return yaml_config[strategy_name]
-        
-        # 回退到硬编码配置
-        return self.STRATEGY_REMOVAL_CONFIG.get(strategy_name, {
-            'min_hold_days': 2  # 默认持有2天后验证趋势
-        })
+        if strategy_name not in yaml_config:
+            raise KeyError(f"策略 {strategy_name} 未配置股票池移除参数，请在 config/pool_removal_config.yaml 中添加")
+        return yaml_config[strategy_name]
 
     def _check_pool_removal(self, current_date, config):
         """检查股票池中需要移除的股票
