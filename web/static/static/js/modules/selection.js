@@ -385,7 +385,7 @@ export async function saveSelectionResults() {
 }
 
 /**
- * 导出选股结果为CSV
+ * 导出选股结果为Excel
  */
 export async function exportSelectionResults() {
     // 检查是否有可导出的数据
@@ -402,98 +402,42 @@ export async function exportSelectionResults() {
     btn.innerHTML = '<span class="icon">⏳</span> 导出中...';
     
     try {
-        // 收集所有股票数据
-        const allStocks = [];
-        const strategyNames = [];
+        // 调用后端API导出Excel
+        const response = await fetch('/api/trading/export_selection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                results: lastSelectionResults,
+                selection_date: lastSelectionDate,
+                selection_time: lastSelectionTime
+            })
+        });
         
-        for (const [strategyName, signals] of Object.entries(lastSelectionResults)) {
-            // 跳过特殊字段
-            if (strategyName.startsWith('_')) {
-                continue;
+        if (response.ok) {
+            // 获取文件名
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = '选股结果.xlsx';
+            if (contentDisposition) {
+                const match = contentDisposition.match(/filename="([^"]+)"/);
+                if (match && match[1]) {
+                    filename = decodeURIComponent(match[1]);
+                }
             }
-            strategyNames.push(strategyName);
             
-            if (Array.isArray(signals)) {
-                for (const signal of signals) {
-                    // 提取关键日期信息
-                    let keyDate = '';
-                    let keyDateType = '';
-                    let reasons = '';
-                    
-                    if (signal.signals && signal.signals[0]) {
-                        const s = signal.signals[0];
-                        if (s.key_date) {
-                            keyDate = s.key_date;
-                            keyDateType = s.key_date_type || '';
-                        }
-                        if (s.reasons && Array.isArray(s.reasons)) {
-                            reasons = s.reasons.join(', ');
-                        }
-                    }
-                    
-                    allStocks.push({
-                        code: signal.code || '',
-                        name: signal.name || '',
-                        strategy: strategyName,
-                        key_date: keyDateType ? `${keyDateType}: ${keyDate}` : keyDate,
-                        reasons: reasons,
-                        score: signal.score || signal.total_score || ''
-                    });
-                }
-            }
+            // 下载文件
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        } else {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.message || '导出失败');
         }
-        
-        // 如果有交集分析，也添加交集股票
-        const intersectionAnalysis = lastSelectionResults._intersection_analysis;
-        if (intersectionAnalysis && intersectionAnalysis.by_count) {
-            for (const [count, stocks] of Object.entries(intersectionAnalysis.by_count)) {
-                if (parseInt(count) > 1 && Array.isArray(stocks)) {
-                    for (const stock of stocks) {
-                        // 检查是否已存在
-                        if (!allStocks.find(s => s.code === stock.code)) {
-                            allStocks.push({
-                                code: stock.code || '',
-                                name: stock.name || '',
-                                strategy: '交集',
-                                key_date: `被${count}个策略选中`,
-                                reasons: stock.reasons ? stock.reasons.join(', ') : '',
-                                score: stock.score || ''
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 生成CSV内容
-        const headers = ['股票代码', '股票名称', '策略名称', '关键日期', '选股理由', '评分'];
-        const csvRows = [headers.join(',')];
-        
-        for (const stock of allStocks) {
-            const row = [
-                stock.code,
-                stock.name,
-                stock.strategy,
-                stock.key_date,
-                `\"${stock.reasons.replace(/\"/g, '\"\"')}\"`,  // 转义引号
-                stock.score
-            ];
-            csvRows.push(row.join(','));
-        }
-        
-        // 创建并下载文件
-        const csvContent = '\ufeff' + csvRows.join('\n');  // 添加BOM支持中文
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        
-        const link = document.createElement('a');
-        link.href = url;
-        const dateStr = lastSelectionDate || lastSelectionTime.split(' ')[0];
-        link.download = `选股结果_${dateStr}.csv`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
         
         // 恢复按钮状态
         btn.innerHTML = '<span class="icon">📥</span> 导出结果';
@@ -533,7 +477,7 @@ export function renderSelectionResults(results, time, filterStats) {
     let intersectionAnalysis = null;
     let intersectionStocks = null;
     
-    // 提取特殊字段（后端返回的是 _intersection_analysis，不是 _intersectionAnalysis）
+    // 提取特殊字段
     if (results._intersection_analysis) {
         intersectionAnalysis = results._intersection_analysis;
         delete results._intersection_analysis;
@@ -543,7 +487,7 @@ export function renderSelectionResults(results, time, filterStats) {
         delete results._intersection;
     }
     
-    // 处理交集结果（AND逻辑）
+    // 处理交集结果
     if (intersectionStocks && Array.isArray(intersectionStocks)) {
         totalCount = intersectionStocks.length;
         html += '<p style="margin-bottom: 16px;"><strong>交集结果：共选出 ' + totalCount + ' 只股票</strong></p>';
@@ -552,7 +496,6 @@ export function renderSelectionResults(results, time, filterStats) {
             html += '<p class="text-muted">两个策略没有同时选中的股票</p>';
         } else {
             html += intersectionStocks.map(signal => {
-                // 验证信号结构
                 if (!signal || typeof signal !== 'object') {
                     console.warn('无效的信号结构:', signal);
                     return '';
@@ -567,9 +510,7 @@ export function renderSelectionResults(results, time, filterStats) {
             }).join('');
         }
     } else {
-        // 处理OR逻辑结果 - 优先显示交集股票
-        
-        // 显示交集分析（如果有）
+        // 处理OR逻辑结果
         if (intersectionAnalysis && typeof intersectionAnalysis === 'object') {
             const analysisHtml = renderIntersectionAnalysis(intersectionAnalysis);
             if (analysisHtml) {
@@ -577,115 +518,70 @@ export function renderSelectionResults(results, time, filterStats) {
             }
         }
         
-        // 构建交集股票集合（用于优先显示）
-        const intersectionSet = new Set();
         const byCountMap = (intersectionAnalysis && intersectionAnalysis.by_count) || {};
         
-        // 收集所有出现在多个策略中的股票代码
-        // by_count 的格式: { '1': [{code, name, ...}, ...], '2': [{code, name, ...}, ...] }
-        for (const count in byCountMap) {
-            if (parseInt(count) > 1) {  // 只收集被多个策略选中的股票
-                const stocks = byCountMap[count];
-                if (Array.isArray(stocks)) {
-                    stocks.forEach(stock => {
-                        if (stock && stock.code) {
-                            intersectionSet.add(stock.code);
-                        }
-                    });
-                }
-            }
-        }
-        
-        // 处理每个策略的结果
         const strategyEntries = Object.entries(results || {});
         
         if (strategyEntries.length === 0) {
             html += '<p class="text-muted">暂无选股结果</p>';
         } else {
-            // 第一步：优先显示交集股票（出现在多个策略中的股票）
-            if (intersectionSet.size > 0) {
-                // 按交集数量降序排列
-                const sortedCounts = Object.keys(byCountMap)
-                    .map(Number)
-                    .sort((a, b) => b - a);  // 降序排列
-                
-                // 按交集数量显示股票
-                for (const count of sortedCounts) {
-                    if (count > 1) {
-                        const stocks = byCountMap[count];
-                        if (!Array.isArray(stocks) || stocks.length === 0) {
-                            continue;
-                        }
-                        
-                        // 收集这个交集数量的所有股票及其策略信息
-                        const countStocksMap = {};
-                        for (const stock of stocks) {
-                            if (stock && stock.code) {
-                                countStocksMap[stock.code] = stock;
-                            }
-                        }
-                        
-                        // 生成标题：显示被多少个策略同时选中
-                        const countTitle = count === 2 ? '被2个策略同时选中' : ('被' + count + '个策略同时选中');
-                        html += '<div class="selection-strategy"><h4>⭐ ' + countTitle + ' (' + Object.keys(countStocksMap).length + '只)</h4>';
-                        
-                        // 显示这个交集数量的所有股票
-                        html += Object.values(countStocksMap).map(signal => {
-                            if (!signal || typeof signal !== 'object') {
-                                console.warn('无效的信号结构:', signal);
-                                return '';
-                            }
-                            
-                            const s = signal.signals && Array.isArray(signal.signals) && signal.signals[0] ? signal.signals[0] : {};
-                            // 使用中文名称显示策略
-                            const strategiesStr = signal.strategy_display_names && Array.isArray(signal.strategy_display_names) ? signal.strategy_display_names.join(' + ') : '';
-                            const reasons = s.reasons && Array.isArray(s.reasons) ? s.reasons.map(r => '<span class="tag">' + r + '</span>').join('') : '';
-                            
-                            const keyDate = s.key_date ? '<span class="tag">' + s.key_date_type + ': ' + s.key_date + '</span>' : '';
-                            return '<div class="signal-card"><div class="signal-header"><span class="signal-title"><a href="javascript:void(0)" onclick="viewStockDetail(\'' + signal.code + '\')" class="stock-link">' + signal.code + ' ' + signal.name + '</a></span><div class="signal-tags"><span class="tag">' + strategiesStr + '</span>' + keyDate + reasons + '</div></div></div>';
-                        }).join('');
-                        
-                        html += '</div>';
-                        totalCount += Object.keys(countStocksMap).length;
+            // 显示交集股票
+            const sortedCounts = Object.keys(byCountMap).map(Number).sort((a, b) => b - a);
+            
+            for (const count of sortedCounts) {
+                if (count > 1) {
+                    const stocks = byCountMap[count];
+                    if (!Array.isArray(stocks) || stocks.length === 0) continue;
+                    
+                    const countStocksMap = {};
+                    for (const stock of stocks) {
+                        if (stock && stock.code) countStocksMap[stock.code] = stock;
                     }
+                    
+                    const countTitle = count === 2 ? '被2个策略同时选中' : ('被' + count + '个策略同时选中');
+                    html += '<div class="selection-strategy"><h4>⭐ ' + countTitle + ' (' + Object.keys(countStocksMap).length + '只)</h4>';
+                    
+                    html += Object.values(countStocksMap).map(signal => {
+                        if (!signal || typeof signal !== 'object') return '';
+                        
+                        const s = signal.signals && Array.isArray(signal.signals) && signal.signals[0] ? signal.signals[0] : {};
+                        const strategiesStr = signal.strategy_display_names && Array.isArray(signal.strategy_display_names) ? signal.strategy_display_names.join(' + ') : '';
+                        const reasons = s.reasons && Array.isArray(s.reasons) ? s.reasons.map(r => '<span class="tag">' + r + '</span>').join('') : '';
+                        
+                        const keyDate = s.key_date ? '<span class="tag">' + s.key_date_type + ': ' + s.key_date + '</span>' : '';
+                        return '<div class="signal-card"><div class="signal-header"><span class="signal-title"><a href="javascript:void(0)" onclick="viewStockDetail(\'' + signal.code + '\')" class="stock-link">' + signal.code + ' ' + signal.name + '</a></span><div class="signal-tags"><span class="tag">' + strategiesStr + '</span>' + keyDate + reasons + '</div></div></div>';
+                    }).join('');
+                    
+                    html += '</div>';
+                    totalCount += Object.keys(countStocksMap).length;
                 }
             }
             
-            // 第二步：显示单个策略的股票（被1个策略选中的股票）
+            // 显示单个策略的股票
             if (byCountMap[1] && Array.isArray(byCountMap[1]) && byCountMap[1].length > 0) {
                 const singleStrategyStocks = byCountMap[1];
-                
-                // 按策略分组股票
                 const stocksByStrategy = {};
+                
                 for (const stock of singleStrategyStocks) {
                     if (stock && stock.code) {
-                        // 获取策略名称
                         const strategyName = stock.strategy_display_names && Array.isArray(stock.strategy_display_names) ? 
                                            stock.strategy_display_names[0] : 
                                            (stock.strategies && Array.isArray(stock.strategies) ? stock.strategies[0] : '未知策略');
                         
-                        if (!stocksByStrategy[strategyName]) {
-                            stocksByStrategy[strategyName] = [];
-                        }
+                        if (!stocksByStrategy[strategyName]) stocksByStrategy[strategyName] = [];
                         stocksByStrategy[strategyName].push(stock);
                     }
                 }
                 
-                // 按策略分组显示
                 for (const [strategyName, stocks] of Object.entries(stocksByStrategy)) {
                     if (stocks.length > 0) {
                         totalCount += stocks.length;
                         html += '<div class="selection-strategy"><h4>' + strategyName + ' (' + stocks.length + '只)</h4>';
                         
-                        // 显示这个策略的所有股票
                         html += stocks.map(signal => {
-                            if (!signal || typeof signal !== 'object') {
-                                console.warn('无效的信号结构:', signal);
-                                return '';
-                            }
+                            if (!signal || typeof signal !== 'object') return '';
                             
                             const s = signal.signals && Array.isArray(signal.signals) && signal.signals[0] ? signal.signals[0] : {};
-                            // 使用中文名称显示策略
                             const strategiesStr = signal.strategy_display_names && Array.isArray(signal.strategy_display_names) ? signal.strategy_display_names.join(' + ') : '';
                             const reasons = s.reasons && Array.isArray(s.reasons) ? s.reasons.map(r => '<span class="tag">' + r + '</span>').join('') : '';
                             
@@ -697,12 +593,9 @@ export function renderSelectionResults(results, time, filterStats) {
                     }
                 }
             } else if (strategyEntries.length > 0) {
-                // 兜底逻辑：当没有交集分析数据时，直接遍历策略结果显示股票
                 for (const [strategyName, signals] of strategyEntries) {
                     if (Array.isArray(signals) && signals.length > 0) {
-                        // 尝试获取策略的中文名称
                         let strategyDisplayName = strategyName;
-                        // 简单的策略名称映射，实际项目中可能需要从配置或API获取
                         const strategyNameMap = {
                             'TrendAccelerationInflectionStrategy': '趋势加速拐点',
                             'TrendReversalStrategy': '趋势共振反转策略',
@@ -717,17 +610,12 @@ export function renderSelectionResults(results, time, filterStats) {
                             'LimitUpPullbackStrategy': '涨停回马枪策略',
                             'LimitUpSidewaysStrategy': '涨停横盘策略'
                         };
-                        if (strategyNameMap[strategyName]) {
-                            strategyDisplayName = strategyNameMap[strategyName];
-                        }
+                        if (strategyNameMap[strategyName]) strategyDisplayName = strategyNameMap[strategyName];
                         
                         html += '<div class="selection-strategy"><h4>' + strategyDisplayName + ' (' + signals.length + '只)</h4>';
                         
                         html += signals.map(signal => {
-                            if (!signal || typeof signal !== 'object') {
-                                console.warn('无效的信号结构:', signal);
-                                return '';
-                            }
+                            if (!signal || typeof signal !== 'object') return '';
                             
                             const s = signal.signals && Array.isArray(signal.signals) && signal.signals[0] ? signal.signals[0] : {};
                             const reasons = s.reasons && Array.isArray(s.reasons) ? s.reasons.map(r => '<span class="tag">' + r + '</span>').join('') : '';
@@ -742,16 +630,13 @@ export function renderSelectionResults(results, time, filterStats) {
                 }
             }
             
-            // 添加总数统计
             if (totalCount > 0) {
                 html = '<p style="margin-bottom: 16px;"><strong>共选出 ' + totalCount + ' 只股票</strong></p>' + html;
             }
         }
     }
     
-    // 如果没有生成任何HTML，根据过滤统计信息决定是否显示提示
     if (!html) {
-        // 检查是否有过滤统计信息且显示有股票
         const hasFilterStats = filterStats && filterStats.enabled && 
                               (filterStats.total_before > 0 || filterStats.total_after > 0 || filterStats.filtered_out > 0);
         
@@ -762,7 +647,6 @@ export function renderSelectionResults(results, time, filterStats) {
     
     container.innerHTML = html;
     
-    // 显示过滤统计信息
     if (filterStats && filterStats.enabled) {
         const filterHtml = `
             <div class="filter-stats-section">
@@ -773,29 +657,13 @@ export function renderSelectionResults(results, time, filterStats) {
                 <h4>过滤条件统计</h4>
                 <ul>
                     ${Object.entries(filterStats.filters_applied || {}).map(([filter, count]) => {
-                        if (count > 0) {
-                            return `<li>${filter}: ${count} 只</li>`;
-                        }
+                        if (count > 0) return `<li>${filter}: ${count} 只</li>`;
                         return '';
                     }).join('')}
                 </ul>
-                ${filterStats.filtered_stocks && filterStats.filtered_stocks.length > 0 ? `
-                    <h4>被过滤的股票</h4>
-                    <div class="filtered-stocks-list">
-                        ${filterStats.filtered_stocks.map(stock => {
-                            return `
-                                <div class="filtered-stock-item">
-                                    <span class="stock-code">${stock.code} ${stock.name}</span>
-                                    <span class="stock-reason">${stock.reason}</span>
-                                </div>
-                            `;
-                        }).join('')}
-                    </div>
-                ` : ''}
             </div>
         `;
         
-        // 添加到容器的末尾
         container.insertAdjacentHTML('beforeend', filterHtml);
     }
 }

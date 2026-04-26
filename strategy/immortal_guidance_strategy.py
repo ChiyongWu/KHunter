@@ -316,35 +316,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                 result['close_above_ma5'] = False
                 return result
 
-            if day_close >= support_price:
-                if day_close >= anti_body_target:
-                    # 加强确认条件
-                    # 1. 确认日成交量不能萎缩太多（至少是信号日的50%）
-                    signal_day_volume = df.iloc[signal_day_idx].get('volume', 0)
-                    if signal_day_volume > 0 and day_volume < signal_day_volume * 0.5:
-                        continue
-                    
-                    # 2. 确认日K线形态健康：不能是长上影线
-                    # 计算确认日的上影线比例
-                    if day_close > day_open:
-                        # 阳线：上影线 = 最高价 - 收盘价（确保非负）
-                        confirm_upper_shadow = max(0, day_high - day_close)
-                    else:
-                        # 阴线：上影线 = 最高价 - 开盘价（确保非负）
-                        confirm_upper_shadow = max(0, day_high - day_open)
-                    
-                    confirm_body_length = abs(day_close - day_open)
-                    confirm_total_length = confirm_upper_shadow + confirm_body_length
-                    confirm_upper_shadow_ratio = confirm_upper_shadow / confirm_total_length if confirm_total_length > 0 else 0
-                    
-                    # 确认日的上影线比例不能超过20%
-                    if confirm_upper_shadow_ratio > 0.2:
-                        continue
-                    
-                    # 3. 确认日收盘价相对支撑价要有一定涨幅（至少1%）
-                    if (day_close - support_price) / support_price < 0.01:
-                        continue
-                    
+            if day_close >= anti_body_target:
                     result['confirmed'] = True
                     result['confirmed_date'] = str(day_data['date']).split()[0]
                     result['days_to_confirm'] = day_idx + 1

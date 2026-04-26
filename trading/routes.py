@@ -1631,3 +1631,213 @@ def export_trading_plan():
             'message': f'导出交易计划失败：{str(e)}',
             'data': None
         }), 500
+
+
+@khunter_bp.route('/export_selection', methods=['POST'])
+def export_selection():
+    """
+    导出选股结果Excel接口
+
+    请求体:
+        {
+            "results": {...},      // 选股结果数据
+            "selection_date": "2024-04-15",
+            "selection_time": "2024-04-15 14:30:00"
+        }
+
+    返回:
+        Excel文件下载，包含两个Sheet：
+        1. 选股结果 - 所有选中的股票
+        2. 策略统计 - 各策略选股统计
+    """
+    try:
+        from io import BytesIO
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        from urllib.parse import quote
+        from flask import make_response
+
+        data = request.get_json() or {}
+        results = data.get('results', {})
+        selection_date = data.get('selection_date', '')
+        selection_time = data.get('selection_time', '')
+
+        # 创建工作簿
+        wb = openpyxl.Workbook()
+
+        # 定义样式
+        header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+        # ========== Sheet 1: 选股结果 ==========
+        ws1 = wb.active
+        ws1.title = "选股结果"
+
+        # 设置列宽
+        ws1.column_dimensions['A'].width = 12
+        ws1.column_dimensions['B'].width = 14
+        ws1.column_dimensions['C'].width = 15
+        ws1.column_dimensions['D'].width = 25
+        ws1.column_dimensions['E'].width = 50
+        ws1.column_dimensions['F'].width = 12
+
+        # 表头
+        row = 1
+        headers = ['序号', '股票代码', '股票名称', '策略名称', '关键日期', '选股理由', '评分']
+        for col, header in enumerate(headers, 1):
+            cell = ws1.cell(row=row, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+
+        # 收集所有股票数据
+        row = 2
+        all_stocks = []
+        strategy_stats = {}  # 策略统计
+
+        for strategy_name, signals in results.items():
+            # 跳过特殊字段
+            if strategy_name.startswith('_'):
+                continue
+
+            if strategy_name not in strategy_stats:
+                strategy_stats[strategy_name] = {'count': 0, 'stocks': []}
+
+            if Array.isArray(signals) if 'Array' in dir() else isinstance(signals, list):
+                strategy_stats[strategy_name]['count'] = len(signals)
+                strategy_stats[strategy_name]['stocks'] = signals
+
+            if isinstance(signals, list):
+                strategy_stats[strategy_name]['count'] = len(signals)
+                strategy_stats[strategy_name]['stocks'] = signals
+
+                for signal in signals:
+                    if not isinstance(signal, dict):
+                        continue
+
+                    # 提取关键日期信息
+                    key_date_str = ''
+                    if signal.get('signals') and isinstance(signal['signals'], list) and len(signal['signals']) > 0:
+                        s = signal['signals'][0]
+                        if s.get('key_date'):
+                            key_type = s.get('key_date_type', '')
+                            key_date_str = f"{key_type}: {s['key_date']}" if key_type else s['key_date']
+
+                    # 提取选股理由
+                    reasons_str = ''
+                    if signal.get('signals') and isinstance(signal['signals'], list) and len(signal['signals']) > 0:
+                        s = signal['signals'][0]
+                        if s.get('reasons') and isinstance(s['reasons'], list):
+                            reasons_str = '; '.join(s['reasons'])
+
+                    all_stocks.append({
+                        'code': signal.get('code', ''),
+                        'name': signal.get('name', ''),
+                        'strategy': strategy_name,
+                        'key_date': key_date_str,
+                        'reasons': reasons_str,
+                        'score': signal.get('score') or signal.get('total_score') or ''
+                    })
+
+        # 添加交集股票（被多个策略同时选中的）
+        intersection_analysis = results.get('_intersection_analysis', {})
+        if isinstance(intersection_analysis, dict) and intersection_analysis.get('by_count'):
+            by_count = intersection_analysis.get('by_count', {})
+            for count_str, stocks in by_count.items():
+                count = int(count_str) if count_str.isdigit() else 0
+                if count > 1 and isinstance(stocks, list):
+                    for stock in stocks:
+                        if not isinstance(stock, dict):
+                            continue
+                        # 检查是否已存在
+                        if not any(s['code'] == stock.get('code') for s in all_stocks):
+                            reasons_str = ''
+                            if stock.get('reasons') and isinstance(stock['reasons'], list):
+                                reasons_str = '; '.join(stock['reasons'])
+                            all_stocks.append({
+                                'code': stock.get('code', ''),
+                                'name': stock.get('name', ''),
+                                'strategy': '交集',
+                                'key_date': f"被{count}个策略同时选中",
+                                'reasons': reasons_str,
+                                'score': stock.get('score') or ''
+                            })
+
+        # 按评分排序
+        all_stocks.sort(key=lambda x: float(x['score']) if x['score'] and str(x['score']).replace('.', '').isdigit() else 0, reverse=True)
+
+        # 写入数据
+        for idx, stock in enumerate(all_stocks, 1):
+            ws1.cell(row=row, column=1, value=idx).border = border
+            ws1.cell(row=row, column=2, value=stock['code']).border = border
+            ws1.cell(row=row, column=3, value=stock['name']).border = border
+            ws1.cell(row=row, column=4, value=stock['strategy']).border = border
+            ws1.cell(row=row, column=5, value=stock['key_date']).border = border
+            ws1.cell(row=row, column=6, value=stock['reasons']).border = border
+            ws1.cell(row=row, column=7, value=stock['score']).border = border
+            row += 1
+
+        # ========== Sheet 2: 策略统计 ==========
+        ws2 = wb.create_sheet(title="策略统计")
+
+        ws2.column_dimensions['A'].width = 30
+        ws2.column_dimensions['B'].width = 15
+
+        # 表头
+        row = 1
+        stats_headers = ['策略名称', '选股数量']
+        for col, header in enumerate(stats_headers, 1):
+            cell = ws2.cell(row=row, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+
+        # 添加统计信息
+        row = 2
+        ws2.cell(row=row, column=1, value='选股日期').border = border
+        ws2.cell(row=row, column=2, value=selection_date).border = border
+        row += 1
+        ws2.cell(row=row, column=1, value='选股时间').border = border
+        ws2.cell(row=row, column=2, value=selection_time).border = border
+        row += 1
+        ws2.cell(row=row, column=1, value='总选股数').border = border
+        ws2.cell(row=row, column=2, value=len(all_stocks)).border = border
+        row += 2
+
+        # 策略统计
+        for strategy_name, stats in sorted(strategy_stats.items(), key=lambda x: x[1]['count'], reverse=True):
+            ws2.cell(row=row, column=1, value=strategy_name).border = border
+            ws2.cell(row=row, column=2, value=stats['count']).border = border
+            row += 1
+
+        # 保存文件
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # 生成文件名
+        date_str = selection_date.replace('-', '') if selection_date else ''
+        filename = f"选股结果_{date_str}.xlsx"
+
+        response = make_response(output.getvalue())
+        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        response.headers['Content-Disposition'] = f'attachment; filename="{quote(filename)}"'
+        return response
+
+    except Exception as e:
+        logger.error(f"导出选股结果失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'导出选股结果失败：{str(e)}',
+            'data': None
+        }), 500
