@@ -947,24 +947,33 @@ class BacktestEngine:
         for name, cfg in strategies.items():
             if cfg.get('is_enabled', True):
                 config_map[name] = {
-                    'min_hold_days': cfg.get('min_hold_days', 2)
+                    'min_hold_days': cfg.get('min_hold_days', 2),
+                    'display_name': cfg.get('display_name', '')
                 }
+                # 同时通过中文名称建立映射（兼容有无"策略"二字两种情况）
+                display_name = cfg.get('display_name', '')
+                if display_name:
+                    config_map[display_name] = config_map[name]
+                    # 兼容不带"策略"后缀的名称
+                    if display_name.endswith('策略'):
+                        config_map[display_name[:-2]] = config_map[name]
         
         if not config_map:
             raise ValueError("YAML配置无启用的策略")
         
         BacktestEngine._pool_removal_config_cache = config_map
-        logger.info(f"从YAML配置加载股票池移除策略: {len(config_map)} 个策略")
+        logger.info(f"从YAML配置加载股票池移除策略: {len([k for k in config_map.keys() if not k.endswith('策略') and not k.endswith('拐点')])} 个策略")
         
         return config_map
 
     def _get_strategy_removal_config(self, strategy_name: str) -> Dict:
         """获取策略的移除配置
         
-        从YAML配置文件读取，配置缺失时抛出异常。
+        从YAML配置文件读取，支持类名和中文名称（含/不含"策略"后缀）。
+        配置缺失时抛出异常。
         
         Args:
-            strategy_name: 策略名称
+            strategy_name: 策略名称（类名或中文名称）
             
         Returns:
             移除配置字典，包含 min_hold_days
@@ -973,9 +982,24 @@ class BacktestEngine:
             KeyError: 策略未在配置文件中配置
         """
         yaml_config = self._load_pool_removal_config()
-        if strategy_name not in yaml_config:
-            raise KeyError(f"策略 {strategy_name} 未配置股票池移除参数，请在 config/pool_removal_config.yaml 中添加")
-        return yaml_config[strategy_name]
+        
+        # 直接匹配
+        if strategy_name in yaml_config:
+            return yaml_config[strategy_name]
+        
+        # 尝试添加"策略"后缀
+        if not strategy_name.endswith('策略'):
+            with_strategy = strategy_name + '策略'
+            if with_strategy in yaml_config:
+                return yaml_config[with_strategy]
+        
+        # 尝试去除"策略"后缀
+        if strategy_name.endswith('策略'):
+            without_strategy = strategy_name[:-2]
+            if without_strategy in yaml_config:
+                return yaml_config[without_strategy]
+        
+        raise KeyError(f"策略 {strategy_name} 未配置股票池移除参数，请在 config/pool_removal_config.yaml 中添加")
 
     def _check_pool_removal(self, current_date, config):
         """检查股票池中需要移除的股票

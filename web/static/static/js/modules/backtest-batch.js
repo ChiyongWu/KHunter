@@ -948,7 +948,7 @@ async function executeBacktestBatch() {
       backtestTaskManager.updateTaskStatus(task.id, 'running');
       
       // 显示执行进度
-      const progress = Math.round((i / tasks.length) * 100);
+      const progress = Math.round(((i + 1) / tasks.length) * 100);
       backtestUIManager.showProgress({
         strategyName: task.strategy_name,
         currentIndex: i + 1,
