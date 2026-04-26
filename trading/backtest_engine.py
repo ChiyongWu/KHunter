@@ -956,14 +956,17 @@ class BacktestEngine:
         """检查股票池中需要移除的股票
         
         移除条件（满足任一即移除）：
-        1. T-1收盘价 < 10日均线
-        2. 最近20日线性回归斜率 <= 0
-        3. 最近20日R²拟合度 < 0.3
+        1. 破支撑位：前一日收盘价 < 支撑位 × 0.98
+        2. 收盘价 < MA10
+        3. 20日线性回归斜率 <= 0
+        4. 20日R²拟合度 < 0.3
         
-        注意：根据策略类型决定验证时机：
-        - immediate: 买入后立即开始验证趋势
-        - gradual: 持有 min_hold_days 天后才开始验证趋势
-        - never: 完全不验证趋势
+        注意：
+        - 破支撑位移除始终生效
+        - 趋势验证根据策略模式决定是否生效：
+          - immediate: 买入后立即验证趋势
+          - gradual: 持有 min_hold_days 天后才开始验证趋势
+          - never: 完全不验证趋势
         
         Args:
             current_date: 当前交易日期
@@ -990,12 +993,6 @@ class BacktestEngine:
             removal_mode = removal_config.get('mode', 'gradual')
             min_hold_days = removal_config.get('min_hold_days', 2)
             
-            # 判断是否跳过趋势验证
-            if removal_mode == 'never':
-                # 完全不验证，保留在池中
-                remaining_candidates.append(candidate)
-                continue
-            
             # 计算持有天数
             added_date = candidate.get('added_date')
             if isinstance(added_date, str):
@@ -1004,11 +1001,6 @@ class BacktestEngine:
                 added_date = datetime.date.today()
             
             hold_days = (prev_date - added_date).days
-            
-            # 渐进模式：持有天数不足，保留在池中
-            if removal_mode == 'gradual' and hold_days < min_hold_days:
-                remaining_candidates.append(candidate)
-                continue
             
             # 获取股票数据
             df = self.stock_filtered_cache.get(stock_code)
@@ -1029,39 +1021,59 @@ class BacktestEngine:
             if df_to_date['date'].iloc[0] > df_to_date['date'].iloc[-1]:
                 df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
             
-            # 条件1: T-1收盘价 >= 10日均线
-            ma10 = df_to_date['close'].tail(10).mean()
             prev_close = df_to_date.iloc[-1]['close']
-            ma_condition = prev_close >= ma10
             
-            # 条件2&3: 线性回归斜率和R²（最近20日）
-            prices = df_to_date['close'].tail(20).values
-            x = np.arange(len(prices))
-            slope, _, r_value, _, _ = stats.linregress(x, prices)
-            r_squared = r_value ** 2
-            slope_condition = slope > 0
-            r2_condition = r_squared >= 0.3
+            # ========== 移除条件判断 ==========
+            removal_reasons = []
+            should_remove = False
             
-            # 判断是否满足上升趋势条件
-            if ma_condition and slope_condition and r2_condition:
-                # 满足条件，保留在池中
-                remaining_candidates.append(candidate)
+            # 条件1: 破支撑位移除（始终检查）
+            support_level = candidate.get('support_level', 0.0)
+            if support_level > 0 and prev_close > 0:
+                # 跌破支撑位超过2%则移除
+                if prev_close < support_level * 0.98:
+                    should_remove = True
+                    drop_pct = (prev_close - support_level) / support_level * 100
+                    removal_reasons.append(f"跌破支撑位{support_level:.2f}{drop_pct:.1f}%")
+            
+            # 条件2: 趋势验证移除（根据策略模式决定是否检查）
+            trend_verified = False
+            if removal_mode != 'never':
+                # 渐进模式：持有天数不足则跳过趋势验证
+                if removal_mode == 'gradual' and hold_days < min_hold_days:
+                    trend_verified = True  # 观察期内，跳过验证
+                else:
+                    # 执行趋势验证
+                    ma10 = df_to_date['close'].tail(10).mean()
+                    prices = df_to_date['close'].tail(20).values
+                    x = np.arange(len(prices))
+                    slope, _, r_value, _, _ = stats.linregress(x, prices)
+                    r_squared = r_value ** 2
+                    
+                    # 判断是否满足上升趋势条件
+                    if prev_close >= ma10 and slope > 0 and r_squared >= 0.3:
+                        trend_verified = True
+                    else:
+                        # 不满足上升趋势，移除
+                        should_remove = True
+                        if prev_close < ma10:
+                            removal_reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
+                        if slope <= 0:
+                            removal_reasons.append(f"斜率{slope:.4f}<=0")
+                        if r_squared < 0.3:
+                            removal_reasons.append(f"R²{r_squared:.4f}<0.3")
             else:
-                # 不满足上升趋势，移除
+                # never模式，跳过趋势验证
+                trend_verified = True
+            
+            # 决定是否移除
+            if should_remove:
                 removed_candidates.append(candidate)
-                # 记录移除原因
-                reasons = []
-                if not ma_condition:
-                    reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
-                if not slope_condition:
-                    reasons.append(f"斜率{slope:.4f}<=0")
-                if not r2_condition:
-                    reasons.append(f"R²{r_squared:.4f}<0.5")
                 logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
-                           f"收盘={prev_close:.2f}, MA10={ma10:.2f}, "
-                           f"斜率={slope:.4f}, R²={r_squared:.4f}, "
-                           f"策略={strategy_name}, 持{hold_days}日, "
-                           f"原因: {'; '.join(reasons)}")
+                           f"收盘={prev_close:.2f}, 策略={strategy_name}, 持{hold_days}日, "
+                           f"原因: {'; '.join(removal_reasons)}")
+            else:
+                remaining_candidates.append(candidate)
         
         # 更新股票池
         if removed_candidates:
