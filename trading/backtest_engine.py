@@ -907,15 +907,63 @@ class BacktestEngine:
         logger.debug(f"支撑位计算: {stock_code} 数据不足，无法计算")
         return 0.0
     
+    # 策略移除模式配置
+    # immediate: 买入后立即验证趋势
+    # gradual: 持有N天后开始验证趋势
+    # never: 完全不验证趋势（由卖出规则处理）
+    STRATEGY_REMOVAL_CONFIG = {
+        'ImmortalGuidanceStrategy': {
+            'mode': 'immediate',
+            'min_hold_days': 0
+        },
+        'ContinuousRisingWithVolumeStrategyV2': {
+            'mode': 'gradual',
+            'min_hold_days': 3
+        },
+        'TurtleStrategy': {
+            'mode': 'never',
+            'min_hold_days': 0
+        },
+        'SupportStrategy': {
+            'mode': 'never',
+            'min_hold_days': 0
+        },
+        'ResistBreakoutStrategy': {
+            'mode': 'gradual',
+            'min_hold_days': 2
+        },
+        'BottomTrendInflectionStrategy': {
+            'mode': 'gradual',
+            'min_hold_days': 5
+        },
+    }
+
+    def _get_strategy_removal_config(self, strategy_name: str) -> Dict:
+        """获取策略的移除配置
+        
+        Args:
+            strategy_name: 策略名称
+            
+        Returns:
+            移除配置字典，包含 mode 和 min_hold_days
+        """
+        return self.STRATEGY_REMOVAL_CONFIG.get(strategy_name, {
+            'mode': 'gradual',
+            'min_hold_days': 2
+        })
+
     def _check_pool_removal(self, current_date, config):
         """检查股票池中需要移除的股票
         
         移除条件（满足任一即移除）：
         1. T-1收盘价 < 10日均线
         2. 最近20日线性回归斜率 <= 0
-        3. 最近20日R²拟合度 < 0.5
+        3. 最近20日R²拟合度 < 0.3
         
-        确保股票池中的股票均处于上升趋势。
+        注意：根据策略类型决定验证时机：
+        - immediate: 买入后立即开始验证趋势
+        - gradual: 持有 min_hold_days 天后才开始验证趋势
+        - never: 完全不验证趋势
         
         Args:
             current_date: 当前交易日期
@@ -935,6 +983,32 @@ class BacktestEngine:
             # 提取股票信息
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
+            strategy_name = candidate.get('strategy_name', '')
+            
+            # 获取策略的移除配置
+            removal_config = self._get_strategy_removal_config(strategy_name)
+            removal_mode = removal_config.get('mode', 'gradual')
+            min_hold_days = removal_config.get('min_hold_days', 2)
+            
+            # 判断是否跳过趋势验证
+            if removal_mode == 'never':
+                # 完全不验证，保留在池中
+                remaining_candidates.append(candidate)
+                continue
+            
+            # 计算持有天数
+            added_date = candidate.get('added_date')
+            if isinstance(added_date, str):
+                added_date = datetime.datetime.strptime(added_date, '%Y-%m-%d').date()
+            elif not isinstance(added_date, datetime.date):
+                added_date = datetime.date.today()
+            
+            hold_days = (prev_date - added_date).days
+            
+            # 渐进模式：持有天数不足，保留在池中
+            if removal_mode == 'gradual' and hold_days < min_hold_days:
+                remaining_candidates.append(candidate)
+                continue
             
             # 获取股票数据
             df = self.stock_filtered_cache.get(stock_code)
@@ -986,6 +1060,7 @@ class BacktestEngine:
                 logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
                            f"收盘={prev_close:.2f}, MA10={ma10:.2f}, "
                            f"斜率={slope:.4f}, R²={r_squared:.4f}, "
+                           f"策略={strategy_name}, 持{hold_days}日, "
                            f"原因: {'; '.join(reasons)}")
         
         # 更新股票池
