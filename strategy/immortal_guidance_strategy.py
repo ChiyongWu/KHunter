@@ -185,8 +185,23 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                 continue
 
             surge_pct = (today['high'] - prev_close) / prev_close
-            upper_shadow = today['high'] - today['close']
-            upper_shadow_ratio = upper_shadow / today['high'] if today['high'] > 0 else 0
+            
+            # 计算上影线长度：根据K线类型确定
+            if today['close'] > today['open']:
+                # 阳线：上影线 = 最高价 - 收盘价（确保非负）
+                upper_shadow = max(0, today['high'] - today['close'])
+            else:
+                # 阴线：上影线 = 最高价 - 开盘价（确保非负）
+                upper_shadow = max(0, today['high'] - today['open'])
+            
+            # 计算K线实体长度
+            body_length = abs(today['close'] - today['open'])
+            
+            # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
+            # 避免除零错误
+            total_length = upper_shadow + body_length
+            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+            
             upper_shadow_50_price = (today['close'] + today['high']) / 2
 
             ma5 = today.get('ma5', 0)
@@ -256,6 +271,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                     'days_to_confirm': confirmation_result.get('days_to_confirm', 0),
                     'anti_body_price': confirmation_result.get('anti_body_price'),
                     'close_above_ma5': confirmation_result.get('close_above_ma5', True),
+                    'post_confirmation_stable': confirmation_result.get('post_confirmation_stable', True),
                 }
             }]
 
@@ -292,6 +308,9 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             day_data = df.iloc[check_idx]
             day_close = day_data['close']
             day_ma5 = day_data.get('ma5', 0)
+            day_volume = day_data.get('volume', 0)
+            day_open = day_data.get('open', 0)
+            day_high = day_data.get('high', 0)
 
             if day_close < day_ma5:
                 result['close_above_ma5'] = False
@@ -299,6 +318,33 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
             if day_close >= support_price:
                 if day_close >= anti_body_target:
+                    # 加强确认条件
+                    # 1. 确认日成交量不能萎缩太多（至少是信号日的50%）
+                    signal_day_volume = df.iloc[signal_day_idx].get('volume', 0)
+                    if signal_day_volume > 0 and day_volume < signal_day_volume * 0.5:
+                        continue
+                    
+                    # 2. 确认日K线形态健康：不能是长上影线
+                    # 计算确认日的上影线比例
+                    if day_close > day_open:
+                        # 阳线：上影线 = 最高价 - 收盘价（确保非负）
+                        confirm_upper_shadow = max(0, day_high - day_close)
+                    else:
+                        # 阴线：上影线 = 最高价 - 开盘价（确保非负）
+                        confirm_upper_shadow = max(0, day_high - day_open)
+                    
+                    confirm_body_length = abs(day_close - day_open)
+                    confirm_total_length = confirm_upper_shadow + confirm_body_length
+                    confirm_upper_shadow_ratio = confirm_upper_shadow / confirm_total_length if confirm_total_length > 0 else 0
+                    
+                    # 确认日的上影线比例不能超过20%
+                    if confirm_upper_shadow_ratio > 0.2:
+                        continue
+                    
+                    # 3. 确认日收盘价相对支撑价要有一定涨幅（至少1%）
+                    if (day_close - support_price) / support_price < 0.01:
+                        continue
+                    
                     result['confirmed'] = True
                     result['confirmed_date'] = str(day_data['date']).split()[0]
                     result['days_to_confirm'] = day_idx + 1
@@ -427,8 +473,22 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if surge_pct < self.params['surge_threshold']:
             return False
 
-        upper_shadow = today['high'] - today['close']
-        upper_shadow_ratio = upper_shadow / today['high'] if today['high'] > 0 else 0
+        # 计算上影线长度：根据K线类型确定
+        if today['close'] > today['open']:
+            # 阳线：上影线 = 最高价 - 收盘价
+            upper_shadow = today['high'] - today['close']
+        else:
+            # 阴线：上影线 = 最高价 - 开盘价
+            upper_shadow = today['high'] - today['open']
+        
+        # 计算K线实体长度
+        body_length = abs(today['close'] - today['open'])
+        
+        # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
+        # 避免除零错误
+        total_length = upper_shadow + body_length
+        upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+        
         if upper_shadow_ratio < self.params['upper_shadow_ratio']:
             return False
 
@@ -467,8 +527,22 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             if surge_pct < self.params['surge_threshold']:
                 continue
 
-            upper_shadow = today['high'] - today['close']
-            upper_shadow_ratio = upper_shadow / today['high'] if today['high'] > 0 else 0
+            # 计算上影线长度：根据K线类型确定
+            if today['close'] > today['open']:
+                # 阳线：上影线 = 最高价 - 收盘价（确保非负）
+                upper_shadow = max(0, today['high'] - today['close'])
+            else:
+                # 阴线：上影线 = 最高价 - 开盘价（确保非负）
+                upper_shadow = max(0, today['high'] - today['open'])
+            
+            # 计算K线实体长度
+            body_length = abs(today['close'] - today['open'])
+            
+            # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
+            # 避免除零错误
+            total_length = upper_shadow + body_length
+            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+            
             if upper_shadow_ratio < self.params['upper_shadow_ratio']:
                 continue
 

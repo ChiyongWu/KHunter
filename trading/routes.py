@@ -908,6 +908,249 @@ def get_backtest_trades(result_id):
         }), 500
 
 
+@trading_bp.route('/backtest/results/<int:result_id>/export', methods=['GET'])
+def export_backtest_result(result_id):
+    """
+    导出回测结果为Excel接口
+    
+    参数:
+        result_id: 回测结果ID (路径参数)
+    
+    返回:
+        Excel文件下载，包含三个Sheet：
+        1. 基本信息 - 回测概览
+        2. 收益曲线 - 每日资金和收益率
+        3. 交易明细 - 所有交易记录
+    """
+    try:
+        from io import BytesIO
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        from openpyxl.utils import get_column_letter
+        
+        # 获取回测结果
+        result = backtest_dao.get_result_by_id(result_id)
+        if not result:
+            return jsonify({
+                'success': False,
+                'message': '回测结果不存在',
+                'data': None
+            }), 404
+        
+        # 获取交易记录
+        trades = backtest_dao.get_trades_by_result(result_id)
+        
+        # 获取收益曲线
+        equity_curve = backtest_dao.get_equity_curve(result_id)
+        
+        # 创建工作簿
+        wb = openpyxl.Workbook()
+        
+        # 定义样式
+        header_fill = PatternFill(start_color="1e3a8a", end_color="1e3a8a", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        sub_header_fill = PatternFill(start_color="dbeafe", end_color="dbeafe", fill_type="solid")
+        sub_header_font = Font(bold=True, color="1e3a8a")
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # ========== Sheet 1: 基本信息 ==========
+        ws1 = wb.active
+        ws1.title = "基本信息"
+        
+        # 设置列宽
+        ws1.column_dimensions['A'].width = 25
+        ws1.column_dimensions['B'].width = 20
+        ws1.column_dimensions['C'].width = 25
+        ws1.column_dimensions['D'].width = 20
+        
+        row = 1
+        # 标题
+        ws1.cell(row=row, column=1, value="回测结果基本信息").font = Font(bold=True, size=14)
+        ws1.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        row += 2
+        
+        # 策略信息
+        ws1.cell(row=row, column=1, value="策略信息").fill = sub_header_fill
+        ws1.cell(row=row, column=1).font = sub_header_font
+        ws1.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        row += 1
+        
+        info_rows = [
+            ("策略名称", result.get('strategy_name', '')),
+            ("回测期间", f"{result.get('start_date', '')} 至 {result.get('end_date', '')}"),
+            ("择时策略", result.get('timing_strategy', '')),
+            ("支撑位计算方法", result.get('support_level_method', '')),
+        ]
+        for label, value in info_rows:
+            ws1.cell(row=row, column=1, value=label).border = border
+            ws1.cell(row=row, column=2, value=value).border = border
+            ws1.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            row += 1
+        
+        row += 1
+        # 资金信息
+        ws1.cell(row=row, column=1, value="资金信息").fill = sub_header_fill
+        ws1.cell(row=row, column=1).font = sub_header_font
+        ws1.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        row += 1
+        
+        capital_rows = [
+            ("初始资金", f"¥{result.get('initial_capital', 0):,.2f}"),
+            ("最终资金", f"¥{result.get('final_capital', 0):,.2f}"),
+            ("总收益率", f"{result.get('total_return', 0):.2f}%"),
+            ("最大回撤", f"{result.get('max_drawdown', 0):.2f}%"),
+        ]
+        for label, value in capital_rows:
+            ws1.cell(row=row, column=1, value=label).border = border
+            ws1.cell(row=row, column=2, value=value).border = border
+            ws1.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            row += 1
+        
+        row += 1
+        # 交易统计
+        ws1.cell(row=row, column=1, value="交易统计").fill = sub_header_fill
+        ws1.cell(row=row, column=1).font = sub_header_font
+        ws1.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        row += 1
+        
+        trade_rows = [
+            ("总交易次数", result.get('total_trades', 0)),
+            ("盈利交易", result.get('win_trades', 0)),
+            ("亏损交易", result.get('loss_trades', 0)),
+            ("胜率", f"{result.get('win_rate', 0):.2f}%"),
+            ("平均收益率", f"{result.get('avg_return', 0):.2f}%"),
+            ("盈亏比", f"{result.get('profit_factor', 0):.2f}"),
+        ]
+        for label, value in trade_rows:
+            ws1.cell(row=row, column=1, value=label).border = border
+            ws1.cell(row=row, column=2, value=value).border = border
+            ws1.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            row += 1
+        
+        row += 1
+        # 风险指标
+        ws1.cell(row=row, column=1, value="风险指标").fill = sub_header_fill
+        ws1.cell(row=row, column=1).font = sub_header_font
+        ws1.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        row += 1
+        
+        risk_rows = [
+            ("夏普比率", f"{result.get('sharpe_ratio', 0):.2f}"),
+            ("索提诺比率", f"{result.get('sortino_ratio', 0):.2f}"),
+            ("波动率", f"{result.get('volatility', 0):.2f}%"),
+            ("最大单笔收益", f"{result.get('max_return', 0):.2f}%"),
+            ("最小单笔收益", f"{result.get('min_return', 0):.2f}%"),
+        ]
+        for label, value in risk_rows:
+            ws1.cell(row=row, column=1, value=label).border = border
+            ws1.cell(row=row, column=2, value=value).border = border
+            ws1.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            row += 1
+        
+        # ========== Sheet 2: 收益曲线 ==========
+        ws2 = wb.create_sheet(title="收益曲线")
+        
+        ws2.column_dimensions['A'].width = 15
+        ws2.column_dimensions['B'].width = 18
+        ws2.column_dimensions['C'].width = 15
+        
+        # 表头
+        row = 1
+        headers = ['日期', '资金', '收益率(%)']
+        for col, header in enumerate(headers, 1):
+            cell = ws2.cell(row=row, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+        
+        # 数据
+        row = 2
+        for item in equity_curve:
+            ws2.cell(row=row, column=1, value=item.get('date', '')).border = border
+            ws2.cell(row=row, column=2, value=item.get('capital', 0)).border = border
+            ws2.cell(row=row, column=2).number_format = '#,##0.00'
+            ws2.cell(row=row, column=3, value=item.get('return_rate', 0)).border = border
+            ws2.cell(row=row, column=3).number_format = '0.00'
+            row += 1
+        
+        # ========== Sheet 3: 交易明细 ==========
+        ws3 = wb.create_sheet(title="交易明细")
+        
+        ws3.column_dimensions['A'].width = 12
+        ws3.column_dimensions['B'].width = 12
+        ws3.column_dimensions['C'].width = 15
+        ws3.column_dimensions['D'].width = 12
+        ws3.column_dimensions['E'].width = 12
+        ws3.column_dimensions['F'].width = 12
+        ws3.column_dimensions['G'].width = 12
+        ws3.column_dimensions['H'].width = 10
+        ws3.column_dimensions['I'].width = 12
+        
+        # 表头
+        row = 1
+        headers = ['股票代码', '股票名称', '买入日期', '买入价格', '买入金额', '卖出日期', '卖出价格', '收益率(%)', '卖出类型']
+        for col, header in enumerate(headers, 1):
+            cell = ws3.cell(row=row, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+        
+        # 数据
+        row = 2
+        for trade in trades:
+            ws3.cell(row=row, column=1, value=trade.get('stock_code', '')).border = border
+            ws3.cell(row=row, column=2, value=trade.get('stock_name', '')).border = border
+            ws3.cell(row=row, column=3, value=trade.get('buy_date', '')).border = border
+            ws3.cell(row=row, column=4, value=trade.get('buy_price', 0)).border = border
+            ws3.cell(row=row, column=4).number_format = '0.00'
+            ws3.cell(row=row, column=5, value=trade.get('buy_amount', 0)).border = border
+            ws3.cell(row=row, column=5).number_format = '#,##0.00'
+            ws3.cell(row=row, column=6, value=trade.get('sell_date', '')).border = border
+            ws3.cell(row=row, column=7, value=trade.get('sell_price', 0)).border = border
+            ws3.cell(row=row, column=7).number_format = '0.00'
+            ws3.cell(row=row, column=8, value=trade.get('return_rate', 0)).border = border
+            ws3.cell(row=row, column=8).number_format = '0.00'
+            ws3.cell(row=row, column=9, value=trade.get('sell_type', '')).border = border
+            row += 1
+        
+        # 保存文件
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        # 生成文件名
+        strategy_name = result.get('strategy_name', '回测结果')
+        start_date = result.get('start_date', '').replace('-', '')
+        end_date = result.get('end_date', '').replace('-', '')
+        filename = f"回测报告_{strategy_name}_{start_date}_{end_date}.xlsx"
+        
+        # 创建响应
+        from flask import make_response
+        from urllib.parse import quote
+        response = make_response(output.getvalue())
+        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        encoded_filename = quote(filename)
+        response.headers['Content-Disposition'] = f'attachment; filename="{encoded_filename}"'
+        return response
+        
+    except Exception as e:
+        logger.error(f"导出回测结果失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'导出回测结果失败: {str(e)}',
+            'data': None
+        }), 500
+
+
 @trading_bp.route('/backtest/strategies', methods=['GET'])
 def get_strategies():
     """

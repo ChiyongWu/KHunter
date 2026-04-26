@@ -1066,20 +1066,9 @@ def run_selection():
             filter_config = config.get('filters', {})
             stock_filter = StockFilter(filter_config)
             
-            # 构建股票数据字典用于过滤
-            stock_data_for_filter = {}
-            for code in db_manager.list_all_stocks():
-                try:
-                    # 从数据库读取股票数据，如果指定了结束日期，则只读取到该日期的数据
-                    df = db_manager.read_stock(code, end_date=end_date)
-                    if not df.empty:
-                        name = stock_names.get(code, '未知')
-                        stock_data_for_filter[code] = (name, df)
-                except:
-                    pass
-            
-            # 应用过滤
-            filtered_results, filter_stats = stock_filter.apply_filters(results, stock_data_for_filter)
+            # 应用过滤 - 使用与策略分析相同的stock_data
+            # 这样可以确保过滤逻辑使用与策略分析相同的数据，避免数据不一致
+            filtered_results, filter_stats = stock_filter.apply_filters(results, stock_data)
             
             # 显示过滤统计
             if filter_stats.get('enabled', False):

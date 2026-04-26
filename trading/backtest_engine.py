@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import json
+import yaml
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -368,7 +369,10 @@ class BacktestEngine:
                             logger.warning(f"股票 {stock_code} 获取实时数据失败: {str(e)}")
                     
                     # 反转数据为倒序（最新的在前），供策略使用
-                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                    # 注意：read_stock默认返回倒序数据，截断后仍为倒序，无需反转
+                    # 仅当数据为升序时才反转
+                    if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                        df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
                     
                     # 先检查该股票是否已有持仓（用于策略判断加仓）
                     existing_pos = None
@@ -1273,9 +1277,11 @@ class BacktestEngine:
                     if df_to_date.empty:
                         continue
                     
-                    # 反转数据为倒序（最新的在前）
-                    # 策略实现假设数据是倒序排列，但数据库返回的是升序排列
-                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                    # 反转数据为倒序（最新的在前），供策略使用
+                    # 注意：read_stock默认返回倒序数据，截断后仍为倒序，无需反转
+                    # 仅当数据为升序时才反转
+                    if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                        df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
                     
                     # 获取股票名称
                     name = self.stock_name_cache.get(code, "未知")
@@ -1608,7 +1614,10 @@ class BacktestEngine:
                         date_str = current_date.strftime('%Y-%m-%d')
                         df_to_date = df[df['date'] <= date_str].copy()
                         if not df_to_date.empty:
-                            df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                            # 确保数据为倒序（最新在前），供择时策略使用
+                            # 仅当数据为升序时才反转
+                            if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                                df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
                             result = self.timing_strategy.get_timing_result(df_to_date, position, 0)
                             
                             if result.is_sell:

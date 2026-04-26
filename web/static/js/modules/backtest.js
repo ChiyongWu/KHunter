@@ -662,7 +662,7 @@ function displayBacktestHistory(results) {
     const historyBody = document.getElementById('backtest-history-body');
     if (historyBody) {
         if (results.length === 0) {
-            historyBody.innerHTML = '<tr><td colspan="8" class="loading">暂无回测历史记录</td></tr>';
+            historyBody.innerHTML = '<tr><td colspan="9" class="loading">暂无回测历史记录</td></tr>';
         } else {
             historyBody.innerHTML = results.map(result => `
                 <tr>
@@ -680,9 +680,58 @@ function displayBacktestHistory(results) {
                             查看
                         </button>
                     </td>
+                    <td>
+                        <button class="btn btn-success btn-sm" onclick="exportBacktestResult(${result.id})" title="导出Excel">
+                            📥 导出
+                        </button>
+                    </td>
                 </tr>
             `).join('');
         }
+    }
+}
+
+/**
+ * 导出回测结果为Excel
+ * @param {number} resultId - 回测结果ID
+ */
+async function exportBacktestResult(resultId) {
+    try {
+        // 显示加载提示
+        showAlert('正在导出回测报告...', 'info');
+        
+        const response = await fetch(`/api/trading/backtest/results/${resultId}/export`);
+        
+        if (response.ok) {
+            // 获取文件名
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = '回测报告.xlsx';
+            if (contentDisposition) {
+                const match = contentDisposition.match(/filename="([^"]+)"/);
+                if (match && match[1]) {
+                    filename = decodeURIComponent(match[1]);
+                }
+            }
+            
+            // 下载文件
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            showAlert('导出成功', 'success');
+        } else {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.message || '导出失败');
+        }
+    } catch (error) {
+        console.error('导出回测结果失败:', error);
+        showAlert('导出失败: ' + error.message, 'error');
     }
 }
 
@@ -1359,7 +1408,30 @@ function displayBacktestTradesOnConfigPage(trades) {
     }
 }
 
+/**
+ * 显示提示信息（兼容函数，确保在所有页面都能正常工作）
+ * @param {string} message - 提示信息
+ * @param {string} type - 提示类型：info/success/error/warning
+ */
+function showAlert(message, type = 'info') {
+    // 如果全局已有showAlert函数，直接调用
+    if (typeof window.showAlert === 'function') {
+        window.showAlert(message, type);
+        return;
+    }
+    
+    // 否则使用原生alert作为后备（简化版）
+    if (type === 'error') {
+        alert('错误: ' + message);
+    } else if (type === 'success') {
+        alert('成功: ' + message);
+    } else {
+        console.log(message);
+    }
+}
+
 // 暴露全局函数
 window.viewBacktestResult = viewBacktestResult;
 window.searchBacktestHistory = searchBacktestHistory;
 window.closeBacktestModal = closeBacktestModal;
+window.exportBacktestResult = exportBacktestResult;
