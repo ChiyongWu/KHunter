@@ -793,6 +793,12 @@ let backtestUIManager = null;
 function initBacktestBatchModule() {
   console.log('初始化批量回测模块');
   
+  // 避免重复初始化
+  if (backtestTaskManager && backtestUIManager) {
+    console.log('批量回测模块已初始化，跳过重复初始化');
+    return;
+  }
+
   // 创建管理器实例
   backtestTaskManager = new BacktestTaskManager();
   backtestUIManager = new BacktestUIManager();

@@ -658,13 +658,20 @@ def get_stock_detail(code):
                 logger.error(f"从Tushare获取 {code} 数据失败: {e}")
                 return jsonify({'success': False, 'error': '股票不存在'})
         
+        # 确保数据按日期升序排列（从早到晚）
+        df = df.sort_values('date', ascending=True).reset_index(drop=True)
+        
         # 计算KDJ指标
         from utils.technical import KDJ
         kdj_df = KDJ(df, n=9, m1=3, m2=3)
         
-        # 转换为列表格式
+        # 转换为列表格式，返回最近100条数据
         data = []
-        for i, (_, row) in enumerate(df.tail(100).iterrows()):  # 返回最近100条
+        # 取最后100条（最新的数据）
+        start_idx = max(0, len(df) - 100)
+        for i in range(start_idx, len(df)):
+            row = df.iloc[i]
+            kdj_row = kdj_df.iloc[i]
             data.append({
                 'date': row['date'].strftime('%Y-%m-%d'),
                 'open': round(row['open'], 2) if pd.notna(row['open']) else None,
@@ -674,9 +681,9 @@ def get_stock_detail(code):
                 'volume': int(row['volume']) if pd.notna(row['volume']) else 0,
                 'turnover': round(row.get('turnover', 0), 2) if 'turnover' in row and pd.notna(row.get('turnover')) else 0,
                 'market_cap': round(row.get('market_cap', 0) / 1e8, 2) if 'market_cap' in row and pd.notna(row.get('market_cap')) else 0,  # 总市值，单位：亿
-                'K': round(kdj_df.iloc[i]['K'], 2) if pd.notna(kdj_df.iloc[i]['K']) else None,
-                'D': round(kdj_df.iloc[i]['D'], 2) if pd.notna(kdj_df.iloc[i]['D']) else None,
-                'J': round(kdj_df.iloc[i]['J'], 2) if pd.notna(kdj_df.iloc[i]['J']) else None
+                'K': round(kdj_row['K'], 2) if pd.notna(kdj_row['K']) else None,
+                'D': round(kdj_row['D'], 2) if pd.notna(kdj_row['D']) else None,
+                'J': round(kdj_row['J'], 2) if pd.notna(kdj_row['J']) else None
             })
         
         return jsonify({'success': True, 'code': code, 'data': data})
