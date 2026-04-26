@@ -613,6 +613,33 @@ CREATE TABLE IF NOT EXISTS backtest_config (
 );
 
 -- ============================================
+-- 21.1 股票池移除策略配置表
+-- ============================================
+CREATE TABLE IF NOT EXISTS pool_removal_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 配置ID，自增主键
+    strategy_name TEXT NOT NULL UNIQUE,
+    -- strategy_name: 策略名称（类名），类型TEXT，必填，唯一，例如ImmortalGuidanceStrategy
+    min_hold_days INTEGER DEFAULT 2,
+    -- min_hold_days: 持有多少天后开始趋势验证，类型INTEGER，默认2，0表示立即验证
+    is_enabled INTEGER DEFAULT 1,
+    -- is_enabled: 是否启用，类型INTEGER，默认1（1=启用，0=禁用）
+    remarks TEXT,
+    -- remarks: 备注，类型TEXT，可选，例如"仙人指路策略：买入后立即验证趋势"
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- created_at: 创建时间，类型TIMESTAMP，默认当前时间
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    -- updated_at: 更新时间，类型TIMESTAMP，默认当前时间
+);
+
+-- 初始化股票池移除策略配置数据
+INSERT OR REPLACE INTO pool_removal_config (strategy_name, min_hold_days, is_enabled, remarks) VALUES
+    ('ImmortalGuidanceStrategy', 0, 1, '仙人指路策略：买入后立即验证趋势'),
+    ('ContinuousRisingWithVolumeStrategyV2', 3, 1, '连阳回调策略：持有3天后验证趋势'),
+    ('ResistBreakoutStrategy', 2, 1, '阻力突破策略：持有2天后验证趋势'),
+    ('BottomTrendInflectionStrategy', 5, 1, '底部反转策略：持有5天后验证趋势');
+
+-- ============================================
 -- 22. 回测结果表
 -- ============================================
 CREATE TABLE IF NOT EXISTS backtest_result (

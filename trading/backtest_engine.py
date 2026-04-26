@@ -908,6 +908,7 @@ class BacktestEngine:
         return 0.0
     
     # 策略移除模式配置（仅针对选股策略）
+    # 配置从数据库表 pool_removal_config 读取，此处为回退默认值
     # 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
     # 所有选股策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
     # min_hold_days: 持有多少天后开始趋势验证
@@ -928,8 +929,48 @@ class BacktestEngine:
         },
     }
 
+    # 数据库配置缓存
+    _pool_removal_config_cache = None
+
+    def _load_pool_removal_config(self) -> Dict[str, Dict]:
+        """从数据库加载股票池移除策略配置
+        
+        Returns:
+            策略名称 -> 配置字典的映射
+        """
+        # 使用类级别缓存，避免重复查询数据库
+        if PoolRemovalConfig._pool_removal_config_cache is not None:
+            return PoolRemovalConfig._pool_removal_config_cache
+        
+        config_map = {}
+        try:
+            cursor = self.db_manager.execute(
+                "SELECT strategy_name, min_hold_days, is_enabled FROM pool_removal_config WHERE is_enabled = 1"
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                strategy_name = row[0] if isinstance(row, tuple) else row['strategy_name']
+                min_hold_days = row[1] if isinstance(row, tuple) else row['min_hold_days']
+                config_map[strategy_name] = {'min_hold_days': min_hold_days}
+            
+            if config_map:
+                PoolRemovalConfig._pool_removal_config_cache = config_map
+                logger.info(f"从数据库加载股票池移除配置: {len(config_map)} 个策略")
+            else:
+                # 数据库无配置，使用默认值
+                logger.info("数据库无股票池移除配置，使用默认配置")
+                config_map = self.STRATEGY_REMOVAL_CONFIG
+                
+        except Exception as e:
+            logger.warning(f"加载股票池移除配置失败: {str(e)}，使用默认配置")
+            config_map = self.STRATEGY_REMOVAL_CONFIG
+        
+        return config_map
+
     def _get_strategy_removal_config(self, strategy_name: str) -> Dict:
         """获取策略的移除配置
+        
+        从数据库读取配置，数据库无配置时使用默认配置。
         
         Args:
             strategy_name: 策略名称
@@ -937,6 +978,12 @@ class BacktestEngine:
         Returns:
             移除配置字典，包含 min_hold_days
         """
+        # 优先从数据库读取
+        db_config = self._load_pool_removal_config()
+        if strategy_name in db_config:
+            return db_config[strategy_name]
+        
+        # 回退到硬编码配置
         return self.STRATEGY_REMOVAL_CONFIG.get(strategy_name, {
             'min_hold_days': 2  # 默认持有2天后验证趋势
         })
