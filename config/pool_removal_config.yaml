@@ -1,35 +1,82 @@
-# ============================================
 # 股票池移除策略配置
-# ============================================
-# 说明：
-# - 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
-# - 配置项：
-#   - min_hold_days: 持有多少天后开始趋势验证
-#     - 0: 买入后立即验证趋势
-#     - N: 持有N天后才验证趋势
-#   - is_enabled: 是否启用该策略的移除逻辑（1=启用，0=禁用）
+# 说明：配置哪些选股策略需要执行股票池移除，以及移除条件的参数
+# 择时策略（TurtleStrategy、SupportStrategy等）不用于选股，不参与股票池移除
 
 removal_strategies:
-  # 仙人指路策略：买入后立即验证趋势
+  # 仙人指路策略
   ImmortalGuidanceStrategy:
     min_hold_days: 0
     is_enabled: true
     remark: "仙人指路策略：买入后立即验证趋势"
 
-  # 连阳回调策略：持有3天后验证趋势
+  # 连阳回调策略
   ContinuousRisingWithVolumeStrategyV2:
     min_hold_days: 3
     is_enabled: true
     remark: "连阳回调策略：持有3天后验证趋势"
 
-  # 阻力突破策略：持有2天后验证趋势
-  ResistBreakoutStrategy:
+  # 阻力突破策略
+  ResistanceBreakoutStrategy:
     min_hold_days: 2
     is_enabled: true
     remark: "阻力突破策略：持有2天后验证趋势"
 
-  # 底部反转策略：持有5天后验证趋势
+  # 底部反转策略
   BottomTrendInflectionStrategy:
     min_hold_days: 5
     is_enabled: true
     remark: "底部反转策略：持有5天后验证趋势"
+
+  # W底策略
+  WBottomStrategy:
+    min_hold_days: 5
+    is_enabled: true
+    remark: "W底策略：持有5天后验证趋势"
+
+  # 多重金叉策略
+  MultiGoldenCrossStrategy:
+    min_hold_days: 3
+    is_enabled: true
+    remark: "多重金叉策略：持有3天后验证趋势"
+
+  # 多方炮策略
+  MultiPartyCannonStrategy:
+    min_hold_days: 3
+    is_enabled: true
+    remark: "多方炮策略：持有3天后验证趋势"
+
+  # 强洗弱转强策略
+  StrongWashWeakToStrongStrategy:
+    min_hold_days: 3
+    is_enabled: true
+    remark: "强洗弱转强策略：持有3天后验证趋势"
+
+  # 趋势加速拐点策略
+  TrendAccelerationInflectionStrategy:
+    min_hold_days: 3
+    is_enabled: true
+    remark: "趋势加速拐点策略：持有3天后验证趋势"
+
+  # 趋势共振反转策略
+  TrendResonanceReversalStrategy:
+    min_hold_days: 5
+    is_enabled: true
+    remark: "趋势共振反转策略：持有5天后验证趋势"
+
+  # 涨停横盘策略
+  LimitUpSidewaysStrategy:
+    min_hold_days: 2
+    is_enabled: true
+    remark: "涨停横盘策略：持有2天后验证趋势"
+
+  # 晨星策略
+  MorningStarStrategy:
+    min_hold_days: 5
+    is_enabled: true
+    remark: "晨星策略：持有5天后验证趋势"
+
+  # 涨停回马枪策略
+  LimitUpPullbackStrategy:
+    min_hold_days: 2
+    is_enabled: true
+    remark: "涨停回马枪策略：持有2天后验证趋势"
