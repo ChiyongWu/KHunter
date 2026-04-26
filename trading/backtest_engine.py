@@ -907,29 +907,24 @@ class BacktestEngine:
         logger.debug(f"支撑位计算: {stock_code} 数据不足，无法计算")
         return 0.0
     
-    # 策略移除模式配置
-    # 所有策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
+    # 策略移除模式配置（仅针对选股策略）
+    # 择时策略（TurtleStrategy、SupportStrategy）不用于选股，不参与股票池移除
+    # 所有选股策略都有两个移除条件：破支撑位（始终生效）+ 趋势验证（延迟生效）
     # min_hold_days: 持有多少天后开始趋势验证
     # - 0: 买入后立即验证趋势
     # - N: 持有N天后才验证趋势
     STRATEGY_REMOVAL_CONFIG = {
         'ImmortalGuidanceStrategy': {
-            'min_hold_days': 0  # 买入后立即验证趋势
+            'min_hold_days': 0  # 仙人指路策略：买入后立即验证趋势
         },
         'ContinuousRisingWithVolumeStrategyV2': {
-            'min_hold_days': 3  # 持有3天后验证趋势
-        },
-        'TurtleStrategy': {
-            'min_hold_days': 10  # 海龟策略：持有10天后验证趋势
-        },
-        'SupportStrategy': {
-            'min_hold_days': 10  # 支撑位策略：持有10天后验证趋势
+            'min_hold_days': 3  # 连阳回调策略：持有3天后验证趋势
         },
         'ResistBreakoutStrategy': {
-            'min_hold_days': 2  # 持有2天后验证趋势
+            'min_hold_days': 2  # 阻力突破策略：持有2天后验证趋势
         },
         'BottomTrendInflectionStrategy': {
-            'min_hold_days': 5  # 持有5天后验证趋势
+            'min_hold_days': 5  # 底部反转策略：持有5天后验证趋势
         },
     }
 
