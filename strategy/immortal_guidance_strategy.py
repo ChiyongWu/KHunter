@@ -16,6 +16,8 @@
 
 修改历史：
 - 2024-01-新增lookback_days参数，支持追溯最近N个交易日内的信号
+- 2024-01-修复反包确认索引计算错误问题
+- 2024-01-新增确认后持续性检查，确保信号日后股价持续维持在MA5之上
 """
 import pandas as pd
 import numpy as np
@@ -30,7 +32,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
     通过三个核心步骤实现选股：
     1. T日上影线日识别（冲高+长上影+放量+收阳线+站线）
     2. T日趋势过滤（均线多头+上升趋势+趋势强度）
-    3. T+1~T+3日确认（回调支撑+反包确认）
+    3. T+1~T+3日确认（回调支撑+反包确认+后续持续性检查）
 
     支持lookback_days参数，可在最近N个交易日内追溯寻找已确认的仙人指路信号。
     """
@@ -97,12 +99,10 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if len(df) < lookback_days:
             return 0.0, 0.0
 
-        # 检查是否已经有预计算的趋势指标（用于测试）
         if 'trend_slope' in df.columns and 'trend_r_squared' in df.columns:
             return df['trend_slope'].iloc[0], df['trend_r_squared'].iloc[0]
 
         recent_df = df.iloc[:lookback_days].copy()
-        # 反转数据，使其按时间正序排列（旧数据在前，新数据在后）
         recent_df = recent_df.iloc[::-1].reset_index(drop=True)
         y = recent_df['close'].values
         x = np.arange(len(y))
@@ -141,6 +141,9 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             return []
 
         if not self._validate_stock_name(stock_name):
+            return []
+
+        if not self._quick_filter_with_lookback(df):
             return []
 
         result = self.calculate_indicators(df)
@@ -260,7 +263,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
     def _check_confirmation(self, df, signal_day_idx, support_price, anti_body_target) -> dict:
         """
-        检查T+1~T+3日确认条件
+        检查T+1~T+3日确认条件，以及确认后是否继续维持在MA5之上
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param signal_day_idx: 信号日索引
@@ -269,22 +272,21 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         :return: 确认结果字典
         """
         window = self.params['anti_body_window']
+        post_confirmation_window = 5
         result = {
             'confirmed': False,
             'confirmed_date': None,
             'days_to_confirm': 0,
             'anti_body_price': None,
             'close_above_ma5': True,
+            'post_confirmation_stable': True,
         }
 
-        confirmation_start_idx = signal_day_idx + 3
-
-        if len(df) < confirmation_start_idx + window:
-            return result
+        confirmed_day_idx = None
 
         for day_idx in range(window):
-            check_idx = confirmation_start_idx + day_idx
-            if check_idx >= len(df):
+            check_idx = signal_day_idx - (day_idx + 1)
+            if check_idx < 0:
                 break
 
             day_data = df.iloc[check_idx]
@@ -301,7 +303,25 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                     result['confirmed_date'] = str(day_data['date']).split()[0]
                     result['days_to_confirm'] = day_idx + 1
                     result['anti_body_price'] = day_close
-                    return result
+                    confirmed_day_idx = check_idx
+                    break
+
+        if not result['confirmed']:
+            return result
+
+        for post_idx in range(1, post_confirmation_window + 1):
+            check_idx = confirmed_day_idx - post_idx
+            if check_idx < 0:
+                break
+
+            day_data = df.iloc[check_idx]
+            day_close = day_data['close']
+            day_ma5 = day_data.get('ma5', 0)
+
+            if day_close < day_ma5:
+                result['post_confirmation_stable'] = False
+                result['confirmed'] = False
+                return result
 
         return result
 
@@ -413,3 +433,45 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             return False
 
         return True
+
+    def _quick_filter_with_lookback(self, df) -> bool:
+        """
+        快速过滤（支持回溯）- 检查最近N天是否有潜在的仙人指路形态
+
+        :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        if df is None or df.empty:
+            return False
+
+        lookback_days = self.params.get('lookback_days', 6)
+        lookback_days = min(lookback_days, len(df) - 1)
+
+        if lookback_days < 1:
+            return False
+
+        for day_offset in range(lookback_days):
+            today_idx = day_offset
+            prev_idx = day_offset + 1
+
+            if prev_idx >= len(df):
+                break
+
+            today = df.iloc[today_idx]
+            prev_close = df.iloc[prev_idx]['close']
+
+            if prev_close == 0 or pd.isna(prev_close):
+                continue
+
+            surge_pct = (today['high'] - prev_close) / prev_close
+            if surge_pct < self.params['surge_threshold']:
+                continue
+
+            upper_shadow = today['high'] - today['close']
+            upper_shadow_ratio = upper_shadow / today['high'] if today['high'] > 0 else 0
+            if upper_shadow_ratio < self.params['upper_shadow_ratio']:
+                continue
+
+            return True
+
+        return False
