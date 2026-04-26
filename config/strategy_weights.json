@@ -73,6 +73,11 @@
       "name": "连阳回调策略",
       "weight": 50,
       "description": "正向信号，连阳后缩量回调"
+    },
+    {
+      "name": "仙人指路策略",
+      "weight": 70,
+      "description": "正向信号，仙人指路形态识别"
     }
   ],
   "veto_config": {

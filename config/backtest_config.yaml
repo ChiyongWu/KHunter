@@ -1,0 +1,31 @@
+# 回测配置文件
+# 所有回测参数从此文件读取
+
+backtest:
+  # 回测策略名称
+  strategy_name: ResistanceBreakoutStrategy
+  
+  # 回测时间范围
+  start_date: '2026-02-28'
+  end_date: '2026-04-22'
+  
+  # 资金参数
+  initial_capital: 1000000  # 初始资金（元）
+  buy_amount: 100000        # 每次买入金额（元）
+  
+  # 交易限制
+  max_daily_buys: 5         # 每日最大买入次数
+  
+  # 选股参数
+  score_threshold: 60       # 评分阈值
+  
+  # 持仓参数
+  hold_period: 10           # 持仓周期（天）
+  
+  # 止损止盈
+  stop_loss: -5             # 止损比例（%）
+  take_profit: 15           # 止盈比例（%）
+  
+  # 择时策略
+  timing_strategy: turtle    # 择时策略类型
+  support_level_method: ma20  # 支撑位计算方法（从策略配置中读取，此处为备用）

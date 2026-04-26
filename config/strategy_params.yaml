@@ -1,3 +1,23 @@
+# 策略运行参数
+strategy_runner:
+  # 止盈止损参数
+  take_profit_threshold: 0.15  # 止盈阈值
+  stop_loss_threshold: -0.05  # 止损阈值
+  
+  # 交易参数
+  max_position_size: 0.1  # 单只股票最大仓位比例
+  min_position_size: 0.01  # 单只股票最小仓位比例
+  max_positions: 10  # 最大持仓数量
+  
+  # 选股参数
+  selection_limit: 20  # 每次选股数量上限
+  min_score: 70  # 最低选股评分
+  
+  # 运行参数
+  working_hour: 9  # 工作小时
+  working_minute: 30  # 工作分钟
+  check_interval: 60  # 检查间隔（秒）
+
 strategies:
   LimitUpPullbackStrategy:
     support_method: key_close_5
@@ -1112,7 +1132,7 @@ strategies:
   ContinuousRisingWithVolumeStrategyV2:
     support_method: key_open
     color: '#8b5cf6'
-    description: 识别3~10天连阳后出现倍量突破，随后缩量调整的股票，捕捉潜在的上涨机会
+    description: 识别4~5天连阳后出现倍量阳线（收盘>MA5），随后缩量调整3~4天，捕捉回调买点
     display_name: 连阳回调策略
     icon: 📈
     param_details:
@@ -1121,15 +1141,15 @@ strategies:
         description: 最小连续阳线天数
         display_name: 最小连续阳线天数
         group: 连阳参数
-        max: 10
+        max: 6
         min: 3
         type: int
       max_consecutive_阳:
-        default: 10
+        default: 5
         description: 最大连续阳线天数
         display_name: 最大连续阳线天数
         group: 连阳参数
-        max: 10
+        max: 8
         min: 3
         type: int
       volume_multiplier:
@@ -1165,11 +1185,11 @@ strategies:
         min: 3
         type: int
       max_adjust_days:
-        default: 5
+        default: 4
         description: 缩量调整最大天数
         display_name: 缩量调整最大天数
         group: 调整参数
-        max: 7
+        max: 6
         min: 3
         type: int
       min_adjust_days:
@@ -1177,8 +1197,62 @@ strategies:
         description: 缩量调整最小天数
         display_name: 缩量调整最小天数
         group: 调整参数
-        max: 5
+        max: 6
         min: 3
+        type: int
+      body_ratio_min:
+        default: 0.01
+        description: 阳线最小实体比例（收盘-开盘）/开盘价
+        display_name: 阳线最小实体比例
+        group: 形态参数
+        max: 0.03
+        min: 0.005
+        type: float
+      max_rally_pct:
+        default: 0.25
+        description: 连续阳线期间最大累计涨幅
+        display_name: 连阳最大累计涨幅
+        group: 形态参数
+        max: 0.35
+        min: 0.1
+        type: float
+      ma_period:
+        default: 5
+        description: 均线周期（关键日收盘需站上该均线）
+        display_name: 均线周期
+        group: 趋势参数
+        max: 20
+        min: 5
+        type: int
+      enable_ma_filter:
+        default: true
+        description: 是否启用均线多头过滤（MA5>MA10>MA20）
+        display_name: 均线多头过滤
+        group: 趋势参数
+        type: bool
+      trend_lookback_days:
+        default: 20
+        description: 趋势判断天数
+        display_name: 趋势判断天数
+        group: 趋势参数
+        max: 30
+        min: 10
+        type: int
+      trend_r_squared_threshold:
+        default: 0.3
+        description: 趋势R²阈值（趋势稳定性）
+        display_name: 趋势R²阈值
+        group: 趋势参数
+        max: 0.7
+        min: 0.1
+        type: float
+      strategy_weight:
+        default: 50
+        description: 技术面评分权重
+        display_name: 策略权重
+        group: 评分参数
+        max: null
+        min: null
         type: int
     param_groups:
     - description: 控制连续阳线判断的参数
@@ -1191,6 +1265,10 @@ strategies:
       name: 成交量参数
     - description: 控制缩量调整判断的参数
       name: 调整参数
+    - description: 控制阳线形态的参数
+      name: 形态参数
+    - description: 控制趋势判断的参数
+      name: 趋势参数
     params:
       min_consecutive_阳: 3
       max_consecutive_阳: 10
@@ -1200,6 +1278,125 @@ strategies:
       key_day_offset_max: 4
       max_adjust_days: 5
       min_adjust_days: 3
+      body_ratio_min: 0.01
+      max_rally_pct: 0.25
+      ma_period: 5
+      enable_ma_filter: true
+      trend_lookback_days: 20
+      trend_r_squared_threshold: 0.3
+      strategy_weight: 50
+
+  ImmortalGuidanceStrategy:
+    support_method: key_open
+    color: '#f59e0b'
+    description: 识别仙人指路形态，通过冲高回落+长上影+放量+趋势向上的组合判断，筛选强势股回调买点
+    display_name: 仙人指路策略
+    icon: 🌟
+    param_details:
+      surge_threshold:
+        default: 0.06
+        description: 冲高幅度阈值
+        display_name: 冲高幅度(%)
+        group: 上影线参数
+        max: 0.10
+        min: 0.05
+        type: float
+      upper_shadow_ratio:
+        default: 0.03
+        description: 上影线比例阈值
+        display_name: 上影线比例(%)
+        group: 上影线参数
+        max: 0.05
+        min: 0.02
+        type: float
+      volume_ratio_min:
+        default: 1.5
+        description: 放量下限倍数
+        display_name: 放量下限
+        group: 成交量参数
+        max: 2.0
+        min: 1.2
+        type: float
+      volume_ratio_max:
+        default: 3.0
+        description: 放量上限倍数
+        display_name: 放量上限
+        group: 成交量参数
+        max: 4.0
+        min: 2.5
+        type: float
+      ma_periods:
+        default: [5, 10, 20]
+        description: 均线周期列表
+        display_name: 均线周期
+        group: 均线参数
+        max: null
+        min: null
+        type: list
+      trend_lookback_days:
+        default: 20
+        description: 趋势判断天数
+        display_name: 趋势天数
+        group: 趋势参数
+        max: 30
+        min: 10
+        type: int
+      trend_r_squared_threshold:
+        default: 0.5
+        description: 趋势R²阈值
+        display_name: 趋势R²
+        group: 趋势参数
+        max: 0.7
+        min: 0.3
+        type: float
+      anti_body_window:
+        default: 3
+        description: 反包时间窗口(天)
+        display_name: 反包窗口(天)
+        group: 反包参数
+        max: 5
+        min: 1
+        type: int
+      anti_body_ratio:
+        default: 0.50
+        description: 反包上影线比例
+        display_name: 反包比例
+        group: 反包参数
+        max: 0.60
+        min: 0.40
+        type: float
+      strategy_weight:
+        default: 70
+        description: 技术面评分权重
+        display_name: 策略权重
+        group: 评分参数
+        max: null
+        min: null
+        type: int
+    param_groups:
+    - description: 控制上影线识别的参数
+      name: 上影线参数
+    - description: 控制成交量条件的参数
+      name: 成交量参数
+    - description: 控制均线判断的参数
+      name: 均线参数
+    - description: 控制趋势判断的参数
+      name: 趋势参数
+    - description: 控制反包确认的参数
+      name: 反包参数
+    - description: 控制评分参数
+      name: 评分参数
+    params:
+      surge_threshold: 0.06
+      upper_shadow_ratio: 0.03
+      volume_ratio_min: 1.5
+      volume_ratio_max: 3.0
+      ma_periods: [5, 10, 20]
+      trend_lookback_days: 20
+      trend_r_squared_threshold: 0.5
+      anti_body_window: 3
+      anti_body_ratio: 0.50
+      strategy_weight: 70
 
   TurtleStrategy:
     support_method: ma20

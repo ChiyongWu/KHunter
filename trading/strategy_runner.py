@@ -10,6 +10,7 @@ import threading
 import numpy as np
 import pandas as pd
 import json
+import yaml
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
@@ -85,6 +86,54 @@ class StrategyRunner:
         # 确保运行目录存在
         self.running_dir = Path("data/running")
         self.running_dir.mkdir(exist_ok=True)
+        
+        # 加载策略运行配置
+        self.config = self._load_config()
+        self.take_profit_threshold = self.config.get('take_profit_threshold', 0.15)
+        self.stop_loss_threshold = self.config.get('stop_loss_threshold', -0.05)
+    
+    def _load_config(self) -> Dict:
+        """加载策略运行配置
+        
+        Returns:
+            配置字典
+        """
+        config_path = Path("config/strategy_params.yaml")
+        if not config_path.exists():
+            logger.warning("策略运行配置文件不存在，使用默认配置")
+            return {
+                'take_profit_threshold': 0.15,
+                'stop_loss_threshold': -0.05,
+                'max_position_size': 0.1,
+                'min_position_size': 0.01,
+                'max_positions': 10,
+                'selection_limit': 20,
+                'min_score': 70,
+                'working_hour': 9,
+                'working_minute': 30,
+                'check_interval': 60
+            }
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                runner_config = config.get('strategy_runner', {})
+                logger.info("策略运行配置加载成功")
+                return runner_config
+        except Exception as e:
+            logger.error(f"加载策略运行配置失败: {str(e)}")
+            return {
+                'take_profit_threshold': 0.15,
+                'stop_loss_threshold': -0.05,
+                'max_position_size': 0.1,
+                'min_position_size': 0.01,
+                'max_positions': 10,
+                'selection_limit': 20,
+                'min_score': 70,
+                'working_hour': 9,
+                'working_minute': 30,
+                'check_interval': 60
+            }
     
     def get_working_date(self) -> str:
         """获取当前工作日期
@@ -387,7 +436,7 @@ class StrategyRunner:
                 profit_rate = (current_price - buy_price) / buy_price
                 
                 # 生成卖出信号
-                if timing_result.is_sell or profit_rate >= 0.15 or profit_rate <= -0.05:
+                if timing_result.is_sell or profit_rate >= self.take_profit_threshold or profit_rate <= self.stop_loss_threshold:
                     signal = {
                         'id': f"sell_{stock_code}_{trade_date}",
                         'date': trade_date,
@@ -398,7 +447,7 @@ class StrategyRunner:
                         'price': current_price,
                         'amount': current_price * position['quantity'],
                         'reason': timing_result.message if timing_result.is_sell else 
-                                 '止盈' if profit_rate >= 0.15 else '止损',
+                                 '止盈' if profit_rate >= self.take_profit_threshold else '止损',
                         'strategy_name': 'N/A',
                         'timing_strategy': self.timing_strategy_name,
                         'executed': False,

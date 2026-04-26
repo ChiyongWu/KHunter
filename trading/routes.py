@@ -7,6 +7,7 @@ from trading.backtest_engine import BacktestEngine
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
 from utils.strategy_name_mapper import get_english_name
+from utils.strategy_config_manager import StrategyConfigManager
 import logging
 
 # 获取日志记录器
@@ -354,23 +355,54 @@ def run_backtest():
         strategy_name = data.get('strategy_name', '')  # 接收中文名称
         support_level_method = data.get('support_level_method', 'ma20')
         timing_strategy = data.get('timing_strategy', 'turtle')
+        timing_params = data.get('timing_params', {})  # 提取择时策略参数
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
         
         # 将中文策略名称转换为英文（用于策略执行）
         english_strategy_name = get_english_name(strategy_name)
         
-        # 提取回测配置参数
-        score_threshold = data.get('score_threshold', 60)
-        max_hold_days = data.get('max_hold_days', 10)
-        stop_loss = data.get('stop_loss', -5)
-        take_profit = data.get('take_profit', 15)
-        initial_capital = data.get('initial_capital', 1000000)
-        buy_amount = data.get('buy_amount', 100000)
-        max_daily_buys = data.get('max_daily_buys', 5)
-        # 温度约束参数
+        # 从数据库读取回测配置参数
+        db_config = db_manager.query_one("SELECT stop_loss, take_profit, hold_period, initial_capital, buy_amount, max_daily_buys, score_threshold FROM backtest_config LIMIT 1")
+        
+        # 使用数据库中的配置值
+        if db_config:
+            score_threshold = db_config.get('score_threshold', 60)
+            max_hold_days = db_config.get('hold_period', 10)
+            stop_loss = db_config.get('stop_loss', -7)
+            take_profit = db_config.get('take_profit', 21)
+            initial_capital = db_config.get('initial_capital', 1000000)
+            buy_amount = db_config.get('buy_amount', 100000)
+            max_daily_buys = db_config.get('max_daily_buys', 5)
+        else:
+            # 数据库无配置时使用默认值
+            score_threshold = 60
+            max_hold_days = 10
+            stop_loss = -7
+            take_profit = 21
+            initial_capital = 1000000
+            buy_amount = 100000
+            max_daily_buys = 5
+        
+        # 温度约束参数（前端传入）
         enable_temp_limit = data.get('enable_temp_limit', 1)
         temp_limit_mode = data.get('temp_limit_mode', 'both')
+        
+        # 从配置文件读取海龟策略参数
+        turtle_params = {}
+        if timing_strategy == 'turtle':
+            try:
+                config_manager = StrategyConfigManager()
+                turtle_config = config_manager.get_strategy_config('TurtleStrategy')
+                turtle_params = turtle_config.get('params', {})
+                logger.info(f"从配置文件读取海龟策略参数: n_entry={turtle_params.get('n_entry')}, "
+                           f"n_exit={turtle_params.get('n_exit')}, atr_period={turtle_params.get('atr_period')}")
+            except Exception as e:
+                logger.warning(f"读取海龟策略配置失败，使用默认值: {str(e)}")
+                turtle_params = {
+                    'n_entry': 20, 'n_exit': 10, 'atr_period': 20,
+                    'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 50000
+                }
         
         # 验证参数
         if not strategy_name or not start_date or not end_date:
@@ -391,6 +423,7 @@ def run_backtest():
             'buy_amount': buy_amount,
             'max_daily_buys': max_daily_buys,
             'timing_strategy': timing_strategy,
+            'timing_params': timing_params,  # 择时策略参数
             'support_level_method': support_level_method,
             'buy_point_lower': -1,
             'buy_point_upper': 3,
@@ -398,7 +431,15 @@ def run_backtest():
             'end_date': end_date,
             # 温度约束参数
             'enable_temp_limit': enable_temp_limit,
-            'temp_limit_mode': temp_limit_mode
+            'temp_limit_mode': temp_limit_mode,
+            # 海龟策略参数（从配置文件读取）
+            'n_entry': turtle_params.get('n_entry'),
+            'n_exit': turtle_params.get('n_exit'),
+            'atr_period': turtle_params.get('atr_period'),
+            'entry_atr': turtle_params.get('entry_atr'),
+            'add_atr': turtle_params.get('add_atr'),
+            'exit_atr': turtle_params.get('exit_atr'),
+            'base_position_amount': turtle_params.get('base_position_amount')
         }
         
         # 使用原有的回测引擎

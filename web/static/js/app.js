@@ -29,6 +29,7 @@ async function loadModules() {
         const backtestExecutorModule = await import('./modules/backtest-executor.js');
         const marketTempModule = await import('./modules/market_temperature.js');
         const moneyFlowModule = await import('./modules/money_flow.js');
+        const strategyRunnerModule = await import('./modules/strategy-runner.js');
         
         // 存储模块
         modules = {
@@ -44,7 +45,8 @@ async function loadModules() {
             backtestBatch: backtestBatchModule,
             backtestExecutor: backtestExecutorModule,
             marketTemp: marketTempModule,
-            moneyFlow: moneyFlowModule
+            moneyFlow: moneyFlowModule,
+            strategyRunner: strategyRunnerModule
         };
         
         // 初始化

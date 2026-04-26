@@ -19,6 +19,7 @@ class TimingResult:
         self.indicators = {}       # 指标值
         self.message = ""          # 信号说明
         self.trade_type = ""       # 交易类型：buy, add, sell, reduce
+        self.add_count = 0         # 加仓次数（用于海龟等加仓策略）
 
 
 class TimingStrategy(ABC):

@@ -1,13 +1,14 @@
 """
-连阳回调策略
+连阳回调策略 V2
 核心逻辑：
-1. 在选股日前3-4天寻找倍量长阳线（关键日）
-2. 检查关键日前是否有连续阳线（3-4天）
-3. 检查关键日后是否有缩量调整（2-3天）
-4. 缩量调整期间不跌破关键日的开盘价（支撑位）
+1. 在选股日前3-4天寻找倍量阳线（关键日），且收盘价>MA5
+2. 检查关键日前是否有连续阳线（≥3天）
+3. 检查趋势：均线多头排列（MA5>MA10>MA20）
+4. 检查关键日后是否有缩量调整（≥3天）
+5. 缩量调整期间回调不破5日线
 """
 from strategy.base_strategy import BaseStrategy
-from utils.technical import calculate_daily_return
+from utils.technical import calculate_daily_return, MA
 import pandas as pd
 import numpy as np
 
@@ -17,10 +18,11 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
     连阳回调策略
 
     核心逻辑：
-    1. 在选股日前3-4天寻找倍量长阳线（关键日）
-    2. 检查关键日前是否有连续阳线（3-4天）
-    3. 检查关键日后是否有缩量调整（2-3天）
-    4. 缩量调整期间不跌破关键日的开盘价（支撑位）
+    1. 在选股日前3-4天寻找倍量阳线（关键日），且收盘价>MA5
+    2. 检查关键日前是否有连续阳线（≥3天）
+    3. 检查趋势：均线多头排列（MA5>MA10>MA20）
+    4. 检查关键日后是否有缩量调整（≥3天）
+    5. 缩量调整期间回调不破5日线
     """
 
     def __init__(self, params=None):
@@ -31,40 +33,59 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         super().__init__("连阳回调策略", params)
         # 从配置文件加载参数
         self.min_consecutive_阳 = self.params.get('min_consecutive_阳', 3)  # 最小连续阳线天数
-        self.max_consecutive_阳 = self.params.get('max_consecutive_阳', 10)  # 最大连续阳线天数
-        self.volume_multiplier = self.params.get('volume_multiplier', 2.2)  # 倍量阈值（2.2倍）
-        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.08)  # 倍量阳线最小涨幅（8%）
-        self.max_adjust_days = self.params.get('max_adjust_days', 5)  # 缩量调整最大天数
+        self.max_consecutive_阳 = self.params.get('max_consecutive_阳', 5)  # 最大连续阳线天数
+        self.volume_multiplier = self.params.get('volume_multiplier', 2.0)  # 倍量阈值（当日成交量/前5日均量）
+        self.key_day_rise_min = self.params.get('key_day_rise_min', 0.05)  # 倍量阳线最小涨幅（5%）
+        self.max_adjust_days = self.params.get('max_adjust_days', 4)  # 缩量调整最大天数
         self.min_adjust_days = self.params.get('min_adjust_days', 3)  # 缩量调整最小天数
         self.key_day_offset_min = self.params.get('key_day_offset_min', 3)  # 关键日距今最小天数
         self.key_day_offset_max = self.params.get('key_day_offset_max', 4)  # 关键日距今最大天数
+        self.body_ratio_min = self.params.get('body_ratio_min', 0.01)  # 阳线最小实体比例
+        self.max_rally_pct = self.params.get('max_rally_pct', 0.25)  # 连续阳线期间最大累计涨幅
+        self.ma_period = self.params.get('ma_period', 5)  # 均线周期（用于收盘站线判断）
+        # 趋势过滤参数
+        self.trend_lookback_days = self.params.get('trend_lookback_days', 20)  # 趋势判断天数
+        self.trend_r_squared_threshold = self.params.get('trend_r_squared_threshold', 0.3)  # 趋势R²阈值
+        self.enable_ma_filter = self.params.get('enable_ma_filter', True)  # 是否启用均线多头过滤
 
-    def quick_filter(self, df):
+    def _calculate_trend_indicators(self, df):
         """
-        快速过滤：检查是否有足够涨幅的阳线
-        
-        只基于价格，不涉及成交量或其他指标
-        
-        :param df: 股票数据DataFrame（正序，从旧到新）
-        :return: True表示通过快速过滤，False表示未通过
+        计算趋势指标（线性回归）
+        :param df: 股票K线数据（升序）
+        :return: R²值
         """
-        for key_day_offset in [self.key_day_offset_min, self.key_day_offset_max]:
-            key_day_idx = key_day_offset
-            
-            if key_day_idx >= len(df) or key_day_idx + 1 >= len(df):
-                continue
-            
-            # 快速检查：只检查涨幅是否足够
-            key_day_close = df.iloc[key_day_idx]['close']
-            prev_close = df.iloc[key_day_idx + 1]['close']
-            
-            if prev_close > 0:
-                # 涨跌幅 = (今日收盘 - 前一日收盘) / 前一日收盘
-                rise_ratio = (key_day_close - prev_close) / prev_close
-                if rise_ratio >= self.key_day_rise_min:
-                    return True
-        
-        return False
+        lookback = min(self.trend_lookback_days, len(df))
+        if lookback < 5:
+            return 0
+
+        close_prices = df['close'].values[-lookback:]
+        x = np.arange(lookback)
+        y = close_prices
+
+        # 线性回归
+        if len(x) < 2:
+            return 0
+
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+        numerator = np.sum((x - x_mean) * (y - y_mean))
+        denominator = np.sum((x - x_mean) ** 2)
+
+        if denominator == 0:
+            return 0
+
+        slope = numerator / denominator
+        y_pred = y_mean + slope * (x - x_mean)
+
+        # 计算R²
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - y_mean) ** 2)
+
+        if ss_tot == 0:
+            return 0
+
+        r_squared = 1 - (ss_res / ss_tot)
+        return r_squared
 
     def calculate_indicators(self, df):
         """
@@ -76,38 +97,44 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         required_columns = ['open', 'close', 'volume', 'low']
         for col in required_columns:
             if col not in df.columns:
-                # 如果缺少必要的列，返回空DataFrame
                 print(f'数据缺少必要的列: {col}')
-                return df.head(0)  # 返回空DataFrame
+                return df.head(0)
 
         # 处理None值
         for col in required_columns:
             if df[col].isnull().any():
-                # 如果有None值，返回空DataFrame
                 print(f'数据包含None值: {col}')
-                return df.head(0)  # 返回空DataFrame
+                return df.head(0)
 
-        # 确保数据按日期降序排列
-        df = df.sort_values('date', ascending=False).reset_index(drop=True)
+        # 确保数据按日期升序排列（便于计算）
+        df = df.sort_values('date', ascending=True).reset_index(drop=True)
 
-        # 计算是否收阳
+        # 计算是否收阳（收盘价 > 开盘价）
         df['is_阳线'] = df['close'] > df['open']
 
-        # 计算涨幅（相对于前一天收盘价）- 使用统一的函数
-        df['涨幅'] = calculate_daily_return(df)
+        # 计算阳线实体比例（收盘-开盘）/开盘价
+        df['实体比例'] = (df['close'] - df['open']) / df['open']
 
-        # 计算前五日平均成交量
-        # 方法：先按升序排列计算，再按降序排列回来
-        # 创建一个临时的升序数据框用于计算
-        df_asc = df.iloc[::-1].copy().reset_index(drop=True)
-        # 计算前5天的均量（shift(1)表示向后移动1行，即不包括当前行）
-        df_asc['前五日平均成交量'] = df_asc['volume'].shift(1).rolling(
-            window=5, min_periods=1
-        ).mean()
-        # 反转回降序，并将结果赋值回原DataFrame
-        df['前五日平均成交量'] = df_asc['前五日平均成交量'].iloc[::-1].values
+        # 计算涨幅（相对于前一天收盘价）
+        # 注意：数据是降序(最新在前)，calculate_daily_return需要升序数据，这里直接用pct_change
+        df['涨幅'] = df['close'].pct_change()
 
-        # 计算是否倍量阳线（需要同时满足涨幅要求）
+        # 计算前五日平均成交量（不包括当日）
+        # 先shift(1)排除当日，再rolling计算前5日平均
+        df['前五日平均成交量'] = df['volume'].shift(1).rolling(window=5, min_periods=1).mean()
+
+        # 计算MA均线（5、10、20日）
+        df['ma5'] = MA(df['close'], 5)
+        df['ma10'] = MA(df['close'], 10)
+        df['ma20'] = MA(df['close'], 20)
+
+        # 计算均线多头排列（MA5 > MA10 > MA20）
+        df['均线多头'] = (df['ma5'] > df['ma10']) & (df['ma10'] > df['ma20'])
+
+        # 计算收盘是否站上MA5
+        df['站上MA5'] = df['close'] > df['ma5']
+
+        # 计算是否倍量阳线（需要同时满足：收阳、倍量、涨幅要求）
         df['is_倍量阳线'] = (
             df['is_阳线'] &
             (df['volume'] > df['前五日平均成交量'] * self.volume_multiplier) &
@@ -116,123 +143,183 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
 
         return df
 
+    def quick_filter(self, df):
+        """
+        快速过滤：检查是否有足够涨幅的阳线（不检查成交量，成交量需要指标计算）
+
+        :param df: 股票数据DataFrame（正序，从旧到新）
+        :return: True表示通过快速过滤，False表示未通过
+        """
+        # 数据需要至少包含：关键日距今最大天数 + 最大调整天数 + 5天缓冲
+        required_days = self.key_day_offset_max + self.max_adjust_days + 5
+        if len(df) < required_days:
+            return False
+
+        # 检查关键日位置是否有足够涨幅的阳线
+        for key_day_offset in [self.key_day_offset_min, self.key_day_offset_max]:
+            # 关键日索引应该从后往前数（len(df) - 1 - offset）
+            key_day_idx = len(df) - 1 - key_day_offset
+
+            if key_day_idx < 0 or key_day_idx >= len(df):
+                continue
+            
+            # 需要有前一天的数据
+            if key_day_idx == 0:
+                continue
+
+            key_day = df.iloc[key_day_idx]
+            prev_day = df.iloc[key_day_idx - 1]
+
+            # 检查是否收阳线
+            if key_day['close'] <= key_day['open']:
+                continue
+
+            # 检查涨幅是否足够
+            prev_close = prev_day['close']
+            if prev_close > 0:
+                rise_ratio = (key_day['close'] - prev_close) / prev_close
+                if rise_ratio >= self.key_day_rise_min:
+                    return True
+
+        return False
+
     def select_stocks(self, df, stock_name=''):
         """
         选股逻辑
-        :param df: 股票K线数据（按日期降序排列，最新在前）
+        :param df: 股票K线数据（按日期升序排列，旧数据在前）
         :param stock_name: 股票名称
         :return: 选股信号
         """
-        # 注意：快速过滤已在基类的execute_selection方法中处理
-        # 这里只需要处理完整的选股条件检查
-        
         # 确保数据足够
-        if len(df) < self.key_day_offset_max + self.max_adjust_days + 5:
+        required_days = self.key_day_offset_max + self.max_adjust_days + 5
+        if len(df) < required_days:
             return []
 
-        # 计算选股日（今天）的索引 - 数据按日期降序，所以今天是第一行（iloc[0]）
-        today_idx = 0
+        # 第一步：遍历可能的连续阳线起始点（关键日向前检查）
+        # 在升序数据中：
+        # - 索引0是最老的数据
+        # - 索引len-1是最新数据（今天/选股日）
+        # - key_day_offset_min/max 表示关键日到今天的天数
 
-        # 第一步：检查3-4个交易日前是否有倍量阳线
-        # 注意：这里只计算交易日，不计算周末和节假日
-        # 由于数据中只包含交易日，所以直接使用索引即可
         for key_day_offset in [self.key_day_offset_min, self.key_day_offset_max]:
-            key_day_idx = today_idx + key_day_offset
+            # 关键日索引（从后往前数）
+            key_day_idx = len(df) - 1 - key_day_offset
 
-            if key_day_idx >= len(df):
+            if key_day_idx < 0 or key_day_idx >= len(df):
                 continue
 
-            # 检查是否是倍量阳线
-            if not df.iloc[key_day_idx]['is_倍量阳线']:
+            # 检查关键日是否满足条件
+            key_day = df.iloc[key_day_idx]
+
+            # 【条件1】关键日必须是倍量阳线
+            if not key_day.get('is_倍量阳线', False):
                 continue
 
-            # 【条件1】检查倍量阳线前是否有连续阳线（3-5天）
-            # 在降序数据中，向"后"是更小的索引（今天方向），向"前"是更大的索引（更老的日期）
-            
-            # 找到连续阳线的起始位置（向"后"检查，即今天方向，更小的索引）
-            start_idx = key_day_idx
-            for i in range(1, 10):  # 最多检查10天
+            # 【条件2】关键日收盘价必须站上MA5
+            if not key_day.get('站上MA5', False):
+                continue
+
+            # 【条件3】趋势过滤：均线多头排列
+            if self.enable_ma_filter:
+                if not key_day.get('均线多头', False):
+                    continue
+
+            # 【条件4】检查连续阳线：找到包含关键日的连续阳线序列，总共>=3天即可
+            # 注意：数据是倒序（最新在前），索引越大日期越早
+
+            # 向前（更早日期）检查连续阳线
+            before_start_idx = key_day_idx
+            for i in range(1, self.max_consecutive_阳 + 1):
                 check_idx = key_day_idx - i
-                if check_idx >= 0 and df.iloc[check_idx]['is_阳线']:
-                    start_idx = check_idx
+                if check_idx >= 0 and df.iloc[check_idx].get('is_阳线', False):
+                    before_start_idx = check_idx
                 else:
                     break
 
-            # 找到连续阳线的结束位置（向"前"检查，即更老的日期，更大的索引）
-            end_idx = key_day_idx
-            for i in range(1, 10):  # 最多检查10天
+            # 向后（更近日期）检查连续阳线
+            after_end_idx = key_day_idx
+            for i in range(1, self.max_consecutive_阳 + 1):
                 check_idx = key_day_idx + i
-                if check_idx < len(df) and df.iloc[check_idx]['is_阳线']:
-                    end_idx = check_idx
+                if check_idx < len(df) and df.iloc[check_idx].get('is_阳线', False):
+                    after_end_idx = check_idx
                 else:
                     break
 
-            # 计算连续阳线总数（包括倍量阳线本身）
-            total_consecutive_阳 = end_idx - start_idx + 1
+            # 计算包含关键日的连续阳线总天数
+            consecutive_阳_days = after_end_idx - before_start_idx + 1
 
-            # 检查是否满足连续阳线要求（3-5天）
-            if not (3 <= total_consecutive_阳 <= 5):
+            # 检查连续阳线天数是否满足要求（≥3天）
+            if consecutive_阳_days < self.min_consecutive_阳:
                 continue
 
-            # 【条件2】检查倍量阳线后是否有连续缩量K线（2-4天）
-            # 获取倍量阳线的成交量和开盘价
-            key_day_volume = df.iloc[key_day_idx]['volume']
-            key_day_open = df.iloc[key_day_idx]['open']
+            # 【条件5】检查连续阳线期间累计涨幅不超过阈值
+            # 从最老的阳线到最新的阳线计算涨幅
+            start_price = df.iloc[before_start_idx]['close']  # 连续阳线起始日收盘价
+            end_price = df.iloc[after_end_idx]['close']  # 连续阳线结束日收盘价
+            rally_pct = (end_price - start_price) / start_price
 
-            # 在倍量阳线之后寻找连续缩量K线
-            # 从倍量阳线后的第一根K线开始检查
-            found_shrink_sequence = False
+            if rally_pct > self.max_rally_pct:
+                continue
+
+            # 【条件6】检查关键日后缩量调整
+            # 获取关键日的成交量
+            key_day_volume = key_day['volume']
+
+            # 在关键日后检查缩量调整
+            # 注意：数据是倒序（最新在前），所以索引越大日期越早
+            # key_day_idx 是距今3-4天的位置
+            # key_day_idx + shrink_offset 检查的是更近的日期（索引更大=日期更近）
             valid_shrink_days = 0
-            
-            # 检查倍量阳线后面的所有K线，寻找连续缩量序列
-            for start_offset in range(1, min(10, key_day_idx)):  # 最多向后检查10根K线
-                # 从这个位置开始检查连续缩量
-                valid_shrink_days = 0
-                support_broken = False
-                
-                for shrink_offset in range(start_offset, start_offset + self.max_adjust_days):
-                    shrink_day_idx = key_day_idx - shrink_offset
-                    
-                    # 检查缩量日是否存在
-                    if shrink_day_idx < 0:
-                        break
-                    
-                    # 检查是否缩量（成交量小于倍量阳线）
-                    shrink_volume = df.iloc[shrink_day_idx]['volume']
-                    if shrink_volume >= key_day_volume:
-                        break
-                    
-                    # 检查是否跌破关键日开盘价（支撑位）- 使用收盘价检查
-                    shrink_close = df.iloc[shrink_day_idx]['close']
-                    if shrink_close < key_day_open:
-                        support_broken = True
-                        break
-                    
-                    valid_shrink_days += 1
-                
-                # 如果找到足够的连续缩量天数且未跌破支撑位，则满足条件
-                if valid_shrink_days >= self.min_adjust_days and not support_broken:
-                    found_shrink_sequence = True
+            ma5_broken = False
+
+            for shrink_offset in range(1, self.max_adjust_days + 1):
+                shrink_day_idx = key_day_idx + shrink_offset
+
+                # 检查缩量日是否存在（索引必须<len(df)）
+                if shrink_day_idx >= len(df):
                     break
-            
-            # 检查是否满足连续缩量天数要求（至少2天）且未跌破支撑位
-            if found_shrink_sequence:
-                # 找到倍量阳线的日期
-                key_date = df.iloc[key_day_idx]['date']
-                if hasattr(key_date, 'strftime'):
-                    key_date_str = key_date.strftime('%Y-%m-%d')
-                else:
-                    key_date_str = str(key_date)[:10]
-                
-                # 返回选股信号
-                signal_info = {
-                    'key_date': key_date_str,
-                    'key_date_type': '倍量阳线',
-                    'reasons': [f'倍量阳线前有{total_consecutive_阳}天连阳', f'倍量后有{valid_shrink_days}天缩量']
-                }
-                return [signal_info]
-        
-        # 没有找到符合条件的股票，返回空列表
+
+                shrink_day = df.iloc[shrink_day_idx]
+
+                # 检查是否缩量（成交量小于关键日）
+                if shrink_day['volume'] >= key_day_volume:
+                    break
+
+                # 检查是否跌破MA5（回调不破5日线）
+                if shrink_day['close'] < shrink_day['ma5']:
+                    ma5_broken = True
+                    break
+
+                valid_shrink_days += 1
+
+            # 检查是否满足缩量调整天数要求（≥3天）且未跌破MA5
+            if valid_shrink_days < self.min_adjust_days or ma5_broken:
+                continue
+
+            # 所有条件都满足，返回选股信号
+            key_date = key_day['date']
+            if hasattr(key_date, 'strftime'):
+                key_date_str = key_date.strftime('%Y-%m-%d')
+            else:
+                key_date_str = str(key_date)[:10]
+
+            signal_info = {
+                'key_date': key_date_str,
+                'key_date_type': '倍量阳线',
+                'consecutive_阳_days': consecutive_阳_days,
+                'rally_pct': round(rally_pct * 100, 2),
+                'shrink_days': valid_shrink_days,
+                'ma5': key_day['ma5'],
+                'reasons': [
+                    f'连续{consecutive_阳_days}天阳线（涨幅{rally_pct*100:.1f}%）',
+                    f'关键日后{valid_shrink_days}天缩量调整',
+                    f'均线多头排列（MA5>MA10>MA20）',
+                    f'调整期间回调不破MA5'
+                ]
+            }
+            return [signal_info]
+
+        # 没有找到符合条件的股票
         return []
 
     def get_selection_criteria(self):
@@ -241,20 +328,29 @@ class ContinuousRisingWithVolumeStrategyV2(BaseStrategy):
         :return: 选股条件描述列表
         """
         criteria = []
-        
-        # 条件1：倍量阳线
-        volume_multiplier = self.params.get('volume_multiplier', 2.2)
-        key_day_rise_min = self.params.get('key_day_rise_min', 0.07) * 100
-        key_day_offset_min = self.params.get('key_day_offset_min', 3)
-        key_day_offset_max = self.params.get('key_day_offset_max', 4)
-        criteria.append(f"1. 倍量阳线：在选股日前{key_day_offset_min}-{key_day_offset_max}天寻找倍量长阳线（涨幅≥{key_day_rise_min:.0f}%，成交量≥前5日均量的{volume_multiplier:.1f}倍）")
-        
+
+        # 条件1：关键日倍量阳线
+        volume_multiplier = self.params.get('volume_multiplier', 2.0)
+        key_day_rise_min = self.params.get('key_day_rise_min', 0.05) * 100
+        criteria.append(
+            f"1. 关键日倍量阳线：距今{self.key_day_offset_min}-{self.key_day_offset_max}天的倍量阳线 "
+            f"（涨幅≥{key_day_rise_min:.0f}%，成交量≥前5日均量的{volume_multiplier:.1f}倍，收盘价>MA5）"
+        )
+
         # 条件2：连续阳线
-        criteria.append(f"2. 连续阳线：倍量阳线前有3-5天连续阳线")
-        
-        # 条件3：缩量调整
-        min_adjust_days = self.params.get('min_adjust_days', 2)
-        max_adjust_days = self.params.get('max_adjust_days', 4)
-        criteria.append(f"3. 缩量调整：倍量阳线后有{min_adjust_days}-{max_adjust_days}天缩量调整（成交量小于倍量阳线），缩量调整期间不跌破关键日的开盘价")
-        
+        criteria.append(
+            f"2. 连续阳线：包含关键日在内，关键日之前连续阳线≥{self.min_consecutive_阳}天"
+        )
+
+        # 条件3：均线多头排列
+        criteria.append(
+            f"3. 均线多头排列：MA5 > MA10 > MA20（上升趋势确认）"
+        )
+
+        # 条件4：缩量调整
+        criteria.append(
+            f"4. 缩量调整：关键日后≥{self.min_adjust_days}天缩量调整（成交量<关键日），"
+            f"调整期间回调不破MA5"
+        )
+
         return criteria

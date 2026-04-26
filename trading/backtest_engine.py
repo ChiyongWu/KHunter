@@ -104,13 +104,44 @@ class BacktestEngine:
             # 初始化择时策略
             timing_strategy_name = config.get('timing_strategy', 'support')
             timing_params = config.get('timing_params', {})
+            
+            # 修复参数传递：如果timing_params中没有对应策略的配置，尝试直接从config中获取
+            strategy_params = timing_params.get(timing_strategy_name, {})
+            
+            # 特殊处理：如果是海龟策略且config中直接包含海龟参数，合并到策略参数中
+            if timing_strategy_name == 'turtle':
+                turtle_specific_params = {
+                    'n_entry': config.get('n_entry'),
+                    'n_exit': config.get('n_exit'),
+                    'atr_period': config.get('atr_period'),
+                    'entry_atr': config.get('entry_atr'),
+                    'add_atr': config.get('add_atr'),
+                    'exit_atr': config.get('exit_atr'),
+                    'preset': config.get('turtle_preset'),
+                    'base_position_amount': config.get('base_position_amount')
+                }
+                # 只合并非None的参数
+                turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
+                strategy_params.update(turtle_specific_params)
+            
             self.timing_strategy = TimingStrategyFactory.create_strategy(
-                timing_strategy_name, timing_params.get(timing_strategy_name, {})
+                timing_strategy_name, strategy_params
             )
             logger.info(f"初始化择时策略: {timing_strategy_name}")
             
-            # 存储择时策略名称，用于后续日志记录
+            # 存储择时策略名称和参数，用于后续日志记录和结果输出
             self.timing_strategy_name = timing_strategy_name
+            self.timing_strategy_params = strategy_params
+            
+            # 记录海龟策略主要参数
+            if timing_strategy_name == 'turtle':
+                logger.info(f"海龟策略参数: n_entry={strategy_params.get('n_entry')}, "
+                           f"n_exit={strategy_params.get('n_exit')}, "
+                           f"atr_period={strategy_params.get('atr_period')}, "
+                           f"entry_atr={strategy_params.get('entry_atr')}, "
+                           f"add_atr={strategy_params.get('add_atr')}, "
+                           f"exit_atr={strategy_params.get('exit_atr')}, "
+                           f"preset={strategy_params.get('preset')}")
             
 
             
@@ -304,13 +335,51 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
+                    # 如果是回测最后一天（今天）且没有当日数据，尝试获取实时数据
+                    today = datetime.datetime.now().date()
+                    last_data_date = df_to_date['date'].max()
+                    if current_date == today and last_data_date < date_str:
+                        logger.info(f"股票 {stock_code} 最后数据日期为 {last_data_date}，尝试获取实时数据...")
+                        # 获取实时价格
+                        try:
+                            realtime_price = self.stock_data_fetcher.get_stock_price(stock_code)
+                            if realtime_price and realtime_price > 0:
+                                # 使用实时价格创建新的K线数据
+                                # 获取前一天数据作为参考
+                                prev_row = df_to_date[df_to_date['date'] == last_data_date].iloc[-1]
+                                prev_close = float(prev_row['close'])
+                                # 开盘价使用前一日收盘价（实时价格是当前价，不是开盘价）
+                                open_price = prev_close
+                                high_price = realtime_price if realtime_price > prev_close else prev_close
+                                low_price = realtime_price if realtime_price < prev_close else prev_close
+                                # 添加新行
+                                new_row = pd.DataFrame([{
+                                    'date': date_str,
+                                    'open': open_price,
+                                    'high': high_price,
+                                    'low': low_price,
+                                    'close': realtime_price,
+                                    'volume': prev_row['volume']  # 用前一天的成交量
+                                }])
+                                df_to_date = pd.concat([df_to_date, new_row], ignore_index=True)
+                                logger.info(f"股票 {stock_code} 添加实时数据: {date_str} 开盘={open_price}, 收盘={realtime_price}")
+                        except Exception as e:
+                            logger.warning(f"股票 {stock_code} 获取实时数据失败: {str(e)}")
+                    
                     # 反转数据为倒序（最新的在前），供策略使用
                     df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
                     
-                    # 调用策略获取完整信号（策略会判断是否加仓）
+                    # 先检查该股票是否已有持仓（用于策略判断加仓）
+                    existing_pos = None
+                    for pos in positions:
+                        if pos['stock_code'] == stock_code:
+                            existing_pos = pos
+                            break
+                    
+                    # 调用策略获取完整信号（策略会根据是否有持仓判断新买入或加仓）
                     result = None
                     if self.timing_strategy:
-                        result = self.timing_strategy.get_timing_result(df_to_date, None, current_capital)
+                        result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_capital)
                         timing_name = self.timing_strategy.__class__.__name__
                         logger.info(f"{timing_name}信号: is_buy={result.is_buy}, is_sell={result.is_sell}, "
                                    f"buy_qty={result.buy_quantity}, sell_qty={result.sell_quantity}, "
@@ -354,13 +423,7 @@ class BacktestEngine:
                                                   buy_price, buy_amount, quantity)
                     buy_record['trade_type'] = trade_type
                     
-                    # 处理持仓：查找是否已有同股票持仓
-                    existing_pos = None
-                    for pos in positions:
-                        if pos['stock_code'] == stock_code:
-                            existing_pos = pos
-                            break
-                    
+                    # 处理持仓：existing_pos 已在前面查找过
                     if existing_pos:
                         # 已有持仓，合并（加仓）
                         old_quantity = existing_pos['quantity']
@@ -369,20 +432,26 @@ class BacktestEngine:
                         existing_pos['buy_amount'] += buy_amount
                         # 加权平均买入价
                         existing_pos['buy_price'] = existing_pos['buy_amount'] / existing_pos['quantity']
-                        logger.info(f"【加仓】{current_date} {stock_code} {stock['stock_name']}: "
+                        # 更新加仓次数和加仓价格
+                        existing_pos['add_count'] = result.add_count if result and hasattr(result, 'add_count') else existing_pos.get('add_count', 0) + 1
+                        existing_pos['last_add_price'] = buy_price
+                        logger.info(f"【加仓#{existing_pos['add_count']}】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
                                    f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
                     else:
                         # 新买入：添加到持仓
+                        # 保存首次建仓金额，用于后续加仓计算（海龟策略：每次加仓 = 首次建仓 × 50%）
+                        base_position_amount = buy_amount
                         positions.append({
                             'stock_code': stock_code,
                             'stock_name': stock['stock_name'],
                             'buy_date': current_date,
                             'buy_price': buy_price,
                             'quantity': quantity,
-                            'buy_amount': buy_amount
+                            'buy_amount': buy_amount,
+                            'base_position_amount': base_position_amount  # 首次建仓金额（用于加仓计算）
                         })
-                        logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}")
+                        logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 首次建仓={base_position_amount}")
                     
                     current_capital -= buy_amount
                     trades.append(buy_record)
@@ -431,42 +500,18 @@ class BacktestEngine:
                 capital_history.append(total_assets)
                 dates.append(current_date)
             
-            # 4. 结束结算：计算剩余持仓市值，同时创建虚拟交易记录纳入胜率计算
+            # 4. 结束结算：计算剩余持仓市值（不创建虚拟卖出记录）
             if positions:
-                logger.info("计算剩余持仓市值并创建持仓交易记录")
+                logger.info("计算剩余持仓市值")
                 final_date = date_range[-1]
                 for position in positions:
                     # 计算当前市值（最后一日收盘价）
                     current_price = self._get_stock_price(position['stock_code'], final_date, 'close')
                     current_value = current_price * position['quantity']
                     current_capital += current_value
-                    logger.info(f"剩余持仓: {position['stock_code']} {position['stock_name']}, 市值: {current_value:.2f}")
-                    
-                    # 计算持仓收益率（从买入到回测结束）
-                    buy_price = position['buy_price']
-                    return_rate = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0
-                    hold_days = (final_date - position['buy_date']).days if isinstance(position['buy_date'], datetime.date) else 0
-                    
-                    # 创建持仓交易记录（以回测结束日期作为"虚拟卖出日期"）
-                    position_trade = {
-                        'stock_code': position['stock_code'],
-                        'stock_name': position['stock_name'],
-                        'buy_date': position['buy_date'],
-                        'sell_date': final_date,  # 虚拟卖出日期（回测结束日）
-                        'buy_price': buy_price,
-                        'sell_price': current_price,
-                        'quantity': position['quantity'],
-                        'profit': current_value - position['buy_amount'],
-                        'return_rate': return_rate,
-                        'profit_loss': current_value - position['buy_amount'],
-                        'hold_days': hold_days,
-                        'detail_url': self._generate_stock_detail_url(position['stock_code']),
-                        'trade_type': 'holding'  # 标记为持仓（未实际卖出）
-                    }
-                    trades.append(position_trade)
-                    logger.info(f"  持仓交易记录: {position['stock_code']} {position['stock_name']}, "
-                               f"买入价={buy_price:.2f}, 当前价={current_price:.2f}, "
-                               f"收益率={return_rate:.2f}%, 持有天数={hold_days}")
+                    logger.info(f"剩余持仓: {position['stock_code']} {position['stock_name']}, "
+                               f"买入价={position['buy_price']:.2f}, 当前价={current_price:.2f}, "
+                               f"市值={current_value:.2f}")
             
             # 5. 计算绩效指标
             final_capital = current_capital
@@ -483,7 +528,11 @@ class BacktestEngine:
                 'performance': performance,
                 'trades': trades,
                 'capital_history': capital_history,
-                'dates': dates
+                'dates': dates,
+                'timing_strategy': {
+                    'name': self.timing_strategy_name,
+                    'params': self.timing_strategy_params
+                }
             }
             
             logger.info(f"回测完成，初始资金: {initial_capital}, 最终资金: {final_capital}, 总收益率: {performance['total_return']:.2f}%")
@@ -999,7 +1048,10 @@ class BacktestEngine:
                     continue
                 
                 # 缓存原始数据
-                self.stock_data_cache[code] = df.copy()
+                df_copy = df.copy()
+                # 统一日期格式为字符串，避免后续比较时类型不一致
+                df_copy['date'] = df_copy['date'].dt.strftime('%Y-%m-%d')
+                self.stock_data_cache[code] = df_copy
                 
                 # 获取并缓存股票名称
                 name = self._get_stock_name(code)
@@ -1017,7 +1069,10 @@ class BacktestEngine:
                     continue
                 
                 # 缓存有效股票
-                self.stock_filtered_cache[code] = df.copy()
+                df_filtered = df.copy()
+                # 统一日期格式为字符串，避免后续比较时类型不一致
+                df_filtered['date'] = df_filtered['date'].dt.strftime('%Y-%m-%d')
+                self.stock_filtered_cache[code] = df_filtered
                 loaded += 1
                 
             except Exception as e:
@@ -1261,8 +1316,9 @@ class BacktestEngine:
             except Exception as e:
                 logger.debug(f"Tushare获取价格失败: {str(e)}")
             
-            # 3. 备选：使用StockDataFetcher获取实时价格（仅用于当前日期）
-            if date == datetime.datetime.now().date():
+            # 3. 备选：使用StockDataFetcher获取实时价格（仅用于收盘价，获取开盘价时不应使用实时价）
+            # 注意：实时价格是当前价，不等于开盘价，开盘价只能从数据库获取
+            if date == datetime.datetime.now().date() and price_type != 'open':
                 price = self.stock_data_fetcher.get_stock_price(stock_code)
                 if price:
                     return price
@@ -1358,8 +1414,8 @@ class BacktestEngine:
         sell_records = []
         
         # 获取卖出条件参数
-        take_profit = config.get('take_profit', 15)
-        stop_loss = config.get('stop_loss', -5)
+        take_profit = config.get('take_profit', 21)  # 止盈21%
+        stop_loss = config.get('stop_loss', -7)  # 止损7%
         hold_period = config.get('hold_period', 10)
         
         for position in positions:

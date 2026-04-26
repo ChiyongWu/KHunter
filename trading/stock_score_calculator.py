@@ -90,12 +90,14 @@ class StockScoreCalculator:
         # 获取股票名称
         stock_name = ""
         try:
-            from trading.stock_helper import StockHelper
-            stock_info = StockHelper.get_stock_info(stock_code)
-            if stock_info:
-                stock_name = stock_info.get('name', '')
+            from utils.db_manager import DBManager
+            db = DBManager()
+            cursor = db.execute("SELECT name FROM stock_basic WHERE code = ?", (stock_code,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                stock_name = row[0]
         except Exception as e:
-            logger.error(f"获取股票名称失败: {e}")
+            logger.debug(f"获取股票名称失败: {e}")
 
         # 创建评分结果对象
         score_obj = StockScore(

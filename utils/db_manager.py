@@ -633,7 +633,7 @@ class DBManager:
     # ==================== CSV 替代方法 ====================
     # 以下方法用于替代 CSVManager，提供相同的接口
     
-    def read_stock(self, stock_code: str, start_date: str = None, end_date: str = None, limit: int = None) -> 'pd.DataFrame':
+    def read_stock(self, stock_code: str, start_date: str = None, end_date: str = None, limit: int = None, order: str = 'desc') -> 'pd.DataFrame':
         """
         读取股票K线数据（替代 CSVManager.read_stock）
         
@@ -642,17 +642,14 @@ class DBManager:
             start_date: 开始日期，格式为YYYY-MM-DD，None表示无限制
             end_date: 结束日期，格式为YYYY-MM-DD，None表示无限制
             limit: 限制返回的行数，None表示无限制
+            order: 排序方式，'asc'升序(默认)或'desc'降序，默认返回最新数据
         
         Returns:
             pd.DataFrame: 股票数据，包含date, open, high, low, close, volume等列，date为索引
         """
-        # stock_code: 股票代码，类型str，必填
-        # start_date: 开始日期，类型str，默认None
-        # end_date: 结束日期，类型str，默认None
-        # limit: 限制返回的行数，类型int，默认None
         import pandas as pd
         try:
-            # 从数据库查询股票数据，按日期升序排列
+            # 从数据库查询股票数据
             sql = """
                 SELECT code, date, open, high, low, close, volume, market_cap, K, D, J
                 FROM stock_kline
@@ -669,8 +666,11 @@ class DBManager:
                 sql += " AND date <= ?"
                 params.append(end_date)
             
-            # 按日期升序排列
-            sql += " ORDER BY date ASC"
+            # 按日期排列，limit默认返回最新数据
+            if order == 'desc':
+                sql += " ORDER BY date DESC"
+            else:
+                sql += " ORDER BY date ASC"
             
             if limit:
                 sql += f" LIMIT {limit}"
@@ -683,9 +683,8 @@ class DBManager:
             
             # 转换为DataFrame
             df = pd.DataFrame(results)
-            # 转换date列为datetime类型（保持为列，不设置为索引）
+            # 转换date列为datetime类型
             df['date'] = pd.to_datetime(df['date'])
-            # 保持按日期升序排列（最早的在前），与SQL查询结果一致
             logger.debug(f"读取股票数据成功: {stock_code}, 行数: {len(df)}")
             return df
         except Exception as e:

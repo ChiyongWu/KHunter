@@ -15,9 +15,9 @@ let backtestConfig = {
     timing_strategy: 'support',
     timing_params: {
         turtle: {
-            n1: 6,
-            n2: 12,
-            atr_period: 20
+            n_entry: 6,
+            n_exit: 6,
+            atr_period: 6
         },
         rsi: {
             overbought: 70,
