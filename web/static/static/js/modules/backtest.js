@@ -62,8 +62,42 @@ export function initBacktestResultsPage() {
 export function initBacktestHistoryPage() {
     console.log('初始化回测历史页面');
     
+    // 加载策略列表
+    loadHistoryStrategies();
+    
     // 加载历史回测记录
     loadBacktestHistory();
+}
+
+/**
+ * 加载回测历史页面的策略列表
+ */
+async function loadHistoryStrategies() {
+    try {
+        const response = await fetch('/api/strategies');
+        if (!response.ok) {
+            throw new Error('加载策略列表失败');
+        }
+        const data = await response.json();
+        if (data.success) {
+            const strategies = data.data;
+            const strategySelect = document.getElementById('history-strategy-filter');
+            if (strategySelect) {
+                strategySelect.innerHTML = '<option value="">全部策略</option>';
+                strategies.forEach(strategy => {
+                    const option = document.createElement('option');
+                    // 使用中文名称作为value和显示文本
+                    const chineseName = strategy.display_name || strategy.name;
+                    option.value = strategy.name;  // 使用英文名作为value，用于API调用
+                    option.textContent = chineseName;
+                    strategySelect.appendChild(option);
+                });
+                console.log('回测历史策略列表加载成功:', strategies.length);
+            }
+        }
+    } catch (error) {
+        console.error('加载回测历史策略列表失败:', error);
+    }
 }
 
 /**
