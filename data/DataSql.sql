@@ -632,13 +632,6 @@ CREATE TABLE IF NOT EXISTS pool_removal_config (
     -- updated_at: 更新时间，类型TIMESTAMP，默认当前时间
 );
 
--- 初始化股票池移除策略配置数据
-INSERT OR REPLACE INTO pool_removal_config (strategy_name, min_hold_days, is_enabled, remarks) VALUES
-    ('ImmortalGuidanceStrategy', 0, 1, '仙人指路策略：买入后立即验证趋势'),
-    ('ContinuousRisingWithVolumeStrategyV2', 3, 1, '连阳回调策略：持有3天后验证趋势'),
-    ('ResistBreakoutStrategy', 2, 1, '阻力突破策略：持有2天后验证趋势'),
-    ('BottomTrendInflectionStrategy', 5, 1, '底部反转策略：持有5天后验证趋势');
-
 -- ============================================
 -- 22. 回测结果表
 -- ============================================
