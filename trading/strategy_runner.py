@@ -381,7 +381,13 @@ class StrategyRunner:
                 if stock['stock_code'] in self.portfolio:
                     continue
                 
-                # TODO: 检查是否为ST/退市股票
+                # TODO [高优先级]: 检查是否为ST/退市股票
+                # 参考: doc/策略运行代码与文档差异报告.md - 待办事项
+                # 实现方式: 从akshare获取股票状态信息，过滤ST和退市股票
+                # 预期行为: 排除ST、*ST、退市股票
+                # is_st, is_delisted = check_stock_status(stock_code)
+                # if is_st or is_delisted:
+                #     continue
                 
                 filtered_stocks.append(stock)
             
@@ -597,7 +603,12 @@ class StrategyRunner:
             # 检查是否已处理
             if self.check_if_processed(working_date):
                 logger.info(f"日期 {working_date} 已处理，直接返回结果")
-                # TODO: 加载并返回已处理的结果
+                # TODO [高优先级]: 加载并返回已处理的完整结果
+                # 参考: doc/策略运行代码与文档差异报告.md - 待办事项
+                # 实现方式: 从 daily_{date}.json 加载完整运行记录
+                # 预期行为: 返回完整的运行结果，包括持仓、信号、股票池信息
+                # daily_record = self._load_daily_record(working_date)
+                # return {"status": "success", "message": "日期已处理", "data": daily_record}
                 return {"status": "success", "message": "日期已处理", "data": {"date": working_date}}
             
             # 计算选股日期范围（近一个月）
@@ -704,6 +715,10 @@ class StrategyRunner:
                     "sell_signals": len(sell_signals),
                     "final_portfolio": {
                         "position_count": len(self.portfolio)
+                    },
+                    "timing_strategy": {
+                        "name": self.timing_strategy_name,
+                        "params": self.timing_strategy_params
                     }
                 }
             }
