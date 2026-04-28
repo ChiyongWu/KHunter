@@ -159,13 +159,47 @@ const StrategyRunnerModule = {
             const result = await response.json();
             
             if (result.success) {
+                const initialCash = result.data.initial_cash || 1000000;
+                const positions = result.data.positions;
+                
+                // 计算持仓统计
+                let positionCount = 0;
+                let totalMarketValue = 0;
+                let totalProfitLoss = 0;
+                
+                Object.entries(positions).forEach(([code, pos]) => {
+                    positionCount++;
+                    const marketValue = pos.quantity * pos.current_price;
+                    totalMarketValue += marketValue;
+                    totalProfitLoss += pos.profit_loss;
+                });
+                
+                const availableCash = initialCash - totalMarketValue;
+                const totalAssets = initialCash + totalProfitLoss;
+                const profitRate = totalAssets / initialCash - 1;
+                
+                // 更新统计卡片
+                const positionCountEl = document.getElementById('position-count');
+                const availableCashEl = document.getElementById('available-cash');
+                const totalAssetsEl = document.getElementById('total-assets');
+                const portfolioProfitEl = document.getElementById('portfolio-profit');
+                
+                if (positionCountEl) positionCountEl.textContent = positionCount;
+                if (availableCashEl) availableCashEl.textContent = `¥${availableCash.toFixed(0)}`;
+                if (totalAssetsEl) totalAssetsEl.textContent = `¥${totalAssets.toFixed(0)}`;
+                if (portfolioProfitEl) {
+                    portfolioProfitEl.textContent = `${profitRate >= 0 ? '+' : ''}${(profitRate * 100).toFixed(2)}%`;
+                    portfolioProfitEl.className = `stat-value ${profitRate >= 0 ? 'positive' : 'negative'}`;
+                }
+                
+                // 更新持仓表格
                 const portfolioElement = document.getElementById('portfolio-list');
                 if (portfolioElement) {
-                    if (Object.keys(result.data.positions).length === 0) {
-                        portfolioElement.innerHTML = '<p class="text-center text-muted">暂无持仓</p>';
+                    if (Object.keys(positions).length === 0) {
+                        portfolioElement.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无持仓</td></tr>';
                     } else {
                         portfolioElement.innerHTML = '';
-                        Object.entries(result.data.positions).forEach(([code, pos]) => {
+                        Object.entries(positions).forEach(([code, pos]) => {
                             const row = document.createElement('tr');
                             row.innerHTML = `
                                 <td>${code}</td>

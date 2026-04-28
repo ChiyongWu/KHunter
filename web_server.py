@@ -3156,7 +3156,7 @@ def get_portfolio():
     获取持仓信息
     
     返回：
-        {"success": true, "data": {"positions": {...}}}
+        {"success": true, "data": {"positions": {...}, "initial_cash": 1000000}}
     """
     try:
         if not strategy_runner:
@@ -3169,7 +3169,14 @@ def get_portfolio():
         portfolio_file = strategy_runner.running_dir / f"portfolio_{working_date}.json"
         portfolio = strategy_runner._load_portfolio(str(portfolio_file))
         
-        return jsonify({"success": True, "data": {"positions": portfolio}})
+        # 返回持仓信息和初始资金
+        return jsonify({
+            "success": True, 
+            "data": {
+                "positions": portfolio,
+                "initial_cash": 1000000  # 初始资金100万
+            }
+        })
     except Exception as e:
         logger.error(f"获取持仓信息失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
