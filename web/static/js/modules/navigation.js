@@ -47,7 +47,8 @@ export function switchPage(page) {
         'backtest-results': '回测结果',
         'backtest-history': '回测历史',
         'khunter': '狩猎场',
-        'khunter-track': '狩猎跟踪'
+        'khunter-track': '狩猎跟踪',
+        'strategy-runner': '策略执行器'
     };
     
     // 获取页面标题，如果不存在则使用默认标题
@@ -115,6 +116,9 @@ export function switchPage(page) {
             module.initKHunterTrackPage();
             module.setupKHunterTrackingEvents();
         });
+    } else if (page === 'strategy-runner') {
+        // 策略执行器页面 - 跳转到独立页面
+        window.location.href = '/strategy-runner';
     }
 }
 

@@ -281,6 +281,12 @@
                     <span class="icon">📜</span> 回测历史
                 </li>
                 
+                <!-- 策略执行 -->
+                <li class="nav-group-title">策略执行</li>
+                <li class="nav-item" data-page="strategy-runner">
+                    <span class="icon">🚀</span> 策略执行器
+                </li>
+                
                 <!-- 数据管理 -->
                 <li class="nav-group-title">数据管理</li>
                 <li class="nav-item" data-page="stocks">
@@ -1585,7 +1591,7 @@
                 
                 <div class="date-selector" style="margin-bottom: 20px; display: flex; gap: 12px; align-items: center;">
                     <label style="font-weight: 600; white-space: nowrap;">选股日期：</label>
-                    <input type="date" id="selection-date" style="padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; width: 140px;">
+                    <input type="date" id="selection-date" value="" style="padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; width: 140px;">
                     <button class="btn btn-sm" onclick="selectAllStrategies()" style="padding: 8px 16px; background-color: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">全选</button>
                     <button class="btn btn-sm" onclick="deselectAllStrategies()" style="padding: 8px 16px; background-color: #6b7280; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">反选</button>
                 </div>
