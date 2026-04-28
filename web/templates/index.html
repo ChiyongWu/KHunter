@@ -1086,24 +1086,24 @@
                             <span>运行控制</span>
                         </div>
                         <div class="card-body">
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label for="strategy-list">选股策略</label>
-                                    <div id="strategy-list" class="form-check-list">
-                                        <!-- 策略列表将通过JS动态加载 -->
+                            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
+                                <div class="form-group" style="flex: 1; min-width: 250px;">
+                                    <label>选股策略</label>
+                                    <div id="strategy-list" class="form-check-list" style="max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px;">
+                                        <span style="color: #9ca3af;">加载中...</span>
                                     </div>
                                     <div class="mt-2">
                                         <button id="select-all-strategies" class="btn btn-sm btn-secondary">全选</button>
                                         <button id="deselect-all-strategies" class="btn btn-sm btn-secondary">取消全选</button>
                                     </div>
                                 </div>
-                                <div class="form-group">
+                                <div class="form-group" style="min-width: 150px;">
                                     <label for="timing-strategy">择时策略</label>
                                     <select id="timing-strategy" class="form-select">
-                                        <!-- 择时策略将通过JS动态加载 -->
+                                        <option value="">加载中...</option>
                                     </select>
                                 </div>
-                                <div class="form-group" style="align-self: flex-end;">
+                                <div class="form-group" style="min-width: 120px; align-self: flex-end;">
                                     <button id="run-strategy-btn" class="btn btn-primary">
                                         <span class="icon">🚀</span> 开始运行
                                     </button>
