@@ -1080,15 +1080,6 @@
 
                 <!-- 策略执行器页 -->
                 <div id="strategy-runner-page" class="page">
-                    <div class="page-header">
-                        <h2 class="page-title">策略执行器</h2>
-                        <div class="header-actions">
-                            <button id="refresh-runner-btn" class="btn btn-secondary">
-                                <span class="icon">🔄</span> 刷新
-                            </button>
-                        </div>
-                    </div>
-                    
                     <!-- 运行控制 -->
                     <div class="card mb-3">
                         <div class="card-header">
@@ -1127,7 +1118,7 @@
                     </div>
                     
                     <!-- 统计卡片 -->
-                    <div class="stats-grid mb-3">
+                    <div class="stats-grid mb-3" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
                         <div class="stat-card">
                             <div class="stat-title">持仓数量</div>
                             <div class="stat-value" id="position-count">0</div>
