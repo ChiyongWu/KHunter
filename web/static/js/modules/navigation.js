@@ -117,8 +117,10 @@ export function switchPage(page) {
             module.setupKHunterTrackingEvents();
         });
     } else if (page === 'strategy-runner') {
-        // 策略执行器页面 - 跳转到独立页面
-        window.location.href = '/strategy-runner';
+        // 策略执行器页面 - 初始化
+        import('./strategy-runner.js').then(module => {
+            module.initStrategyRunnerModule();
+        });
     }
 }
 

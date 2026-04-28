@@ -1078,6 +1078,158 @@
                     </div>
                 </div>
 
+                <!-- 策略执行器页 -->
+                <div id="strategy-runner-page" class="page">
+                    <div class="page-header">
+                        <h2 class="page-title">策略执行器</h2>
+                        <div class="header-actions">
+                            <button id="refresh-runner-btn" class="btn btn-secondary">
+                                <span class="icon">🔄</span> 刷新
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- 运行控制 -->
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            <span>运行控制</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="strategy-list">选股策略</label>
+                                    <div id="strategy-list" class="form-check-list">
+                                        <!-- 策略列表将通过JS动态加载 -->
+                                    </div>
+                                    <div class="mt-2">
+                                        <button id="select-all-strategies" class="btn btn-sm btn-secondary">全选</button>
+                                        <button id="deselect-all-strategies" class="btn btn-sm btn-secondary">取消全选</button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="timing-strategy">择时策略</label>
+                                    <select id="timing-strategy" class="form-select">
+                                        <!-- 择时策略将通过JS动态加载 -->
+                                    </select>
+                                </div>
+                                <div class="form-group" style="align-self: flex-end;">
+                                    <button id="run-strategy-btn" class="btn btn-primary">
+                                        <span class="icon">🚀</span> 开始运行
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 今日状态 -->
+                    <div id="strategy-status" class="card mb-3">
+                        <!-- 状态信息将通过JS动态加载 -->
+                    </div>
+                    
+                    <!-- 统计卡片 -->
+                    <div class="stats-grid mb-3">
+                        <div class="stat-card">
+                            <div class="stat-title">持仓数量</div>
+                            <div class="stat-value" id="position-count">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">可用资金</div>
+                            <div class="stat-value" id="available-cash">¥0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">总资产</div>
+                            <div class="stat-value" id="total-assets">¥0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">持仓盈亏</div>
+                            <div class="stat-value" id="portfolio-profit">0%</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 股票池 -->
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            <span>股票池（用于择时）</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>代码</th>
+                                            <th>名称</th>
+                                            <th>评分</th>
+                                            <th>状态</th>
+                                            <th>入池天数</th>
+                                            <th>现价</th>
+                                            <th>支撑位</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pool-list">
+                                        <tr><td colspan="7" class="loading">加载中...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 持仓概览 -->
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            <span>持仓概览</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>代码</th>
+                                            <th>名称</th>
+                                            <th>持仓</th>
+                                            <th>成本</th>
+                                            <th>现价</th>
+                                            <th>盈亏额</th>
+                                            <th>盈亏%</th>
+                                            <th>持有天</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="portfolio-list">
+                                        <tr><td colspan="9" class="loading">加载中...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 今日信号 -->
+                    <div class="card mb-3">
+                        <div class="card-header">
+                            <span>今日信号</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>类型</th>
+                                            <th>代码</th>
+                                            <th>名称</th>
+                                            <th>价格</th>
+                                            <th>数量</th>
+                                            <th>原因</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="signals-list">
+                                        <tr><td colspan="7" class="loading">加载中...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 个股图谱评分页 -->
                 <div id="analysis-page" class="page">
                     <!-- 查询表单区域 -->
