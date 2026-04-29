@@ -5,12 +5,12 @@
   "strategies": [
     {
       "name": "底部趋势拐点",
-      "weight": 60,
+      "weight": 50,
       "description": "正向信号，高分"
     },
     {
       "name": "趋势加速拐点",
-      "weight": 50,
+      "weight": 30,
       "description": "正向信号"
     },
     {
@@ -20,7 +20,7 @@
     },
     {
       "name": "阻力位突破策略",
-      "weight": 60,
+      "weight": 50,
       "description": "正向信号"
     },
 
@@ -31,7 +31,7 @@
     },
     {
       "name": "多金叉共振策略",
-      "weight": 30,
+      "weight": 70,
       "description": "正向信号"
     },
     {
@@ -56,7 +56,7 @@
     },
     {
       "name": "强势洗盘弱转强策略",
-      "weight": 80,
+      "weight": 50,
       "description": "正向信号，弱转强"
     },
     {
@@ -66,12 +66,12 @@
     },
     {
       "name": "涨停横盘策略",
-      "weight": 80,
+      "weight": 70,
       "description": "正向信号，涨停后横盘"
     },
     {
       "name": "连阳回调策略",
-      "weight": 50,
+      "weight": 30,
       "description": "正向信号，连阳后缩量回调"
     },
     {

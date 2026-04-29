@@ -94,7 +94,8 @@ function calculate() {
     // 1. 获取参数
     const huntingDate = document.getElementById('hunting-date').value;
     const trackingDays = parseInt(document.getElementById('tracking-days').value);
-    const timingStrategy = document.getElementById('timing-strategy').value;
+    // 使用更精确的选择器，确保获取狩猎场页面的择时策略select
+    const timingStrategy = document.querySelector('#khunter-page #timing-strategy').value;
     
     // 2. 验证参数
     if (!huntingDate) {

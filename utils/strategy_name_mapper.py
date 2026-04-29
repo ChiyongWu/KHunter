@@ -20,6 +20,8 @@ STRATEGY_NAME_MAP = {
     'StrongWashWeakToStrongStrategy': '强势洗盘弱转强',
     'TrendResonanceReversalStrategy': '趋势共振反转策略',
     'WBottomStrategy': 'W底策略',
+    'ImmortalGuidanceStrategy': '仙人指路策略',
+    'MA20MA60Strategy': '520560策略',
 }
 
 # 反向映射表（中文名称 -> 英文类名）

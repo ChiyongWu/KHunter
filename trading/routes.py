@@ -1269,7 +1269,8 @@ def khunter_calculate():
         data = request.get_json() or {}
         hunting_date = data.get('hunting_date')
         tracking_days = data.get('tracking_days', 10)
-        timing_strategy = data.get('timing_strategy', 'support')
+        # 如果前端传递空字符串或null，使用默认值'support'
+        timing_strategy = data.get('timing_strategy') or 'support'
         
         # 1a. 记录请求参数，便于调试前端传参
         logger.info(f"狩猎场计算请求: hunting_date={hunting_date}, tracking_days={tracking_days}, timing_strategy={timing_strategy}")

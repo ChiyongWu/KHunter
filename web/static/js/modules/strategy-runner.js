@@ -48,47 +48,81 @@ const StrategyRunnerModule = {
     
     // 加载策略运行页面
     loadStrategyRunnerPage: async function() {
+        // 加载策略列表（独立错误隔离）
         try {
-            // 加载策略列表
             await this.loadStrategies();
-            
-            // 加载择时策略列表
+        } catch (error) {
+            console.error('加载策略列表失败:', error);
+        }
+        
+        // 加载择时策略列表（独立错误隔离）
+        try {
             await this.loadTimingStrategies();
-            
-            // 加载运行状态
+        } catch (error) {
+            console.error('加载择时策略列表失败:', error);
+        }
+        
+        // 加载运行状态（独立错误隔离）
+        try {
             await this.loadStrategyStatus();
-            
-            // 加载持仓信息
+        } catch (error) {
+            console.error('加载运行状态失败:', error);
+        }
+        
+        // 加载持仓信息（独立错误隔离）
+        try {
             await this.loadPortfolio();
-            
-            // 加载信号列表
+        } catch (error) {
+            console.error('加载持仓信息失败:', error);
+        }
+        
+        // 加载信号列表（独立错误隔离）
+        try {
             await this.loadSignals();
         } catch (error) {
-            console.error('加载策略运行页面失败:', error);
+            console.error('加载信号列表失败:', error);
         }
     },
     
     // 加载策略列表
     loadStrategies: async function() {
         try {
+            console.log('开始加载策略列表...');
             const response = await fetch('/api/strategies');
+            console.log('策略列表API响应:', response);
             const result = await response.json();
+            console.log('策略列表数据:', result);
             
-            if (result.success) {
+            if (result.success && result.strategies) {
                 const strategyList = document.getElementById('strategy-list');
+                console.log('找到策略列表容器:', strategyList);
                 if (strategyList) {
                     strategyList.innerHTML = '';
-                    result.strategies.forEach(strategy => {
-                        const checkbox = document.createElement('div');
-                        checkbox.className = 'form-check';
-                        checkbox.innerHTML = `
-                            <input class="form-check-input" type="checkbox" value="${strategy.name}" id="strategy-${strategy.name}">
-                            <label class="form-check-label" for="strategy-${strategy.name}">
-                                ${strategy.name}
-                            </label>
-                        `;
-                        strategyList.appendChild(checkbox);
-                    });
+                    // 策略列表为空时显示提示
+                    if (result.strategies.length === 0) {
+                        strategyList.innerHTML = '<div class="text-center text-muted p-3">暂无可用策略</div>';
+                    } else {
+                        result.strategies.forEach(strategy => {
+                            const checkbox = document.createElement('div');
+                            checkbox.className = 'form-check';
+                            checkbox.innerHTML = `
+                                <input class="form-check-input" type="checkbox" value="${strategy.name}" id="strategy-${strategy.name}">
+                                <label class="form-check-label" for="strategy-${strategy.name}">
+                                    ${strategy.display_name || strategy.name}
+                                </label>
+                            `;
+                            strategyList.appendChild(checkbox);
+                        });
+                    }
+                    console.log('策略列表加载完成，共', result.strategies.length, '个策略');
+                } else {
+                    console.error('未找到策略列表容器');
+                }
+            } else {
+                // API返回错误时显示错误提示
+                const strategyList = document.getElementById('strategy-list');
+                if (strategyList) {
+                    strategyList.innerHTML = '<div class="text-center text-danger p-3">策略加载失败，请刷新页面重试</div>';
                 }
             }
         } catch (error) {
@@ -99,6 +133,7 @@ const StrategyRunnerModule = {
     // 加载择时策略列表
     loadTimingStrategies: async function() {
         try {
+            console.log('开始加载择时策略列表...');
             const timingStrategies = [
                 { value: 'turtle', label: '海龟策略' },
                 { value: 'rsi', label: 'RSI策略' },
@@ -107,6 +142,7 @@ const StrategyRunnerModule = {
             ];
             
             const timingStrategySelect = document.getElementById('timing-strategy');
+            console.log('找到择时策略选择框:', timingStrategySelect);
             if (timingStrategySelect) {
                 timingStrategySelect.innerHTML = '';
                 timingStrategies.forEach(strategy => {
@@ -115,6 +151,9 @@ const StrategyRunnerModule = {
                     option.textContent = strategy.label;
                     timingStrategySelect.appendChild(option);
                 });
+                console.log('择时策略列表加载完成，共', timingStrategies.length, '个策略');
+            } else {
+                console.error('未找到择时策略选择框');
             }
         } catch (error) {
             console.error('加载择时策略列表失败:', error);
@@ -146,6 +185,19 @@ const StrategyRunnerModule = {
                         </div>
                     `;
                 }
+            } else {
+                // 运行器未就绪时显示提示
+                const statusElement = document.getElementById('strategy-status');
+                if (statusElement) {
+                    statusElement.innerHTML = `
+                        <div class="card-body">
+                            <h6 class="card-title">运行状态</h6>
+                            <p class="card-text">
+                                <span class="badge bg-secondary">运行器未就绪</span>
+                            </p>
+                        </div>
+                    `;
+                }
             }
         } catch (error) {
             console.error('加载策略运行状态失败:', error);
@@ -158,9 +210,9 @@ const StrategyRunnerModule = {
             const response = await fetch('/api/portfolio');
             const result = await response.json();
             
-            if (result.success) {
+            if (result.success && result.data) {
                 const initialCash = result.data.initial_cash || 1000000;
-                const positions = result.data.positions;
+                const positions = result.data.positions || {};
                 
                 // 计算持仓统计
                 let positionCount = 0;
@@ -220,6 +272,12 @@ const StrategyRunnerModule = {
                         });
                     }
                 }
+            } else {
+                // 显示默认空持仓状态
+                const portfolioElement = document.getElementById('portfolio-list');
+                if (portfolioElement) {
+                    portfolioElement.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无持仓</td></tr>';
+                }
             }
         } catch (error) {
             console.error('加载持仓信息失败:', error);
@@ -232,14 +290,16 @@ const StrategyRunnerModule = {
             const response = await fetch('/api/signals');
             const result = await response.json();
             
-            if (result.success) {
+            if (result.success && result.data) {
                 const signalsElement = document.getElementById('signals-list');
                 if (signalsElement) {
-                    if (result.data.signals.length === 0) {
-                        signalsElement.innerHTML = '<p class="text-center text-muted">暂无信号</p>';
+                    // 使用防御性变量，避免直接访问可能不存在的属性
+                    const signals = result.data.signals || [];
+                    if (signals.length === 0) {
+                        signalsElement.innerHTML = '<tr><td colspan="7" class="text-center text-muted">暂无信号</td></tr>';
                     } else {
                         signalsElement.innerHTML = '';
-                        result.data.signals.forEach(signal => {
+                        signals.forEach(signal => {
                             const row = document.createElement('tr');
                             row.innerHTML = `
                                 <td class="${signal.signal_type === 'buy' ? 'text-success' : 'text-danger'}">
@@ -258,6 +318,12 @@ const StrategyRunnerModule = {
                             signalsElement.appendChild(row);
                         });
                     }
+                }
+            } else {
+                // API返回错误时显示默认状态
+                const signalsElement = document.getElementById('signals-list');
+                if (signalsElement) {
+                    signalsElement.innerHTML = '<tr><td colspan="7" class="text-center text-muted">暂无信号</td></tr>';
                 }
             }
         } catch (error) {

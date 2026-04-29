@@ -32,7 +32,8 @@ export async function runSelection() {
  */
 export function showStrategySelectionModal(strategies) {
     const modal = document.getElementById('strategy-selection-modal');
-    const list = document.getElementById('strategy-list');
+    // 使用更精确的选择器，确保获取模态框内的策略列表
+    const list = document.querySelector('#strategy-selection-modal #strategy-list');
     
     // 生成策略列表 - 显示中文名称，默认未选中
     list.innerHTML = strategies.map(s => `
@@ -48,10 +49,12 @@ export function showStrategySelectionModal(strategies) {
         </div>
     `).join('');
     
-    // 初始化日期选择器为当日
-    const selectionDateInput = document.getElementById('selection-date');
-    const today = new Date().toISOString().split('T')[0];
-    selectionDateInput.value = today;
+    // 初始化日期选择器为当日（使用更精确的选择器避免与span冲突）
+    const selectionDateInput = document.querySelector('#strategy-selection-modal #selection-date');
+    if (selectionDateInput) {
+        const today = new Date().toISOString().split('T')[0];
+        selectionDateInput.value = today;
+    }
     
     modal.classList.add('active');
 }
@@ -82,8 +85,8 @@ export async function confirmStrategySelection() {
         return;
     }
     
-    // 获取用户选择的日期
-    const selectionDateInput = document.getElementById('selection-date');
+    // 获取用户选择的日期（使用更精确的选择器避免与span冲突）
+    const selectionDateInput = document.querySelector('#strategy-selection-modal #selection-date');
     let selectionDate = null;
     
     if (selectionDateInput.value) {

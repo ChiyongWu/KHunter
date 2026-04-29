@@ -119,7 +119,7 @@ export function switchPage(page) {
     } else if (page === 'strategy-runner') {
         // 策略执行器页面 - 初始化
         import('./strategy-runner.js').then(module => {
-            module.initStrategyRunnerModule();
+            module.default.initStrategyRunnerModule();
         });
     }
 }

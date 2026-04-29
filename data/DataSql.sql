@@ -696,6 +696,20 @@ CREATE TABLE IF NOT EXISTS backtest_trade (
     -- support_level: 支撑位置，类型REAL，可选
     trade_type TEXT DEFAULT 'normal',
     -- trade_type: 交易类型，类型TEXT，默认normal，可选值buy/add/sell/reduce
+    buy_commission REAL DEFAULT 0,
+    -- buy_commission: 买入佣金，类型REAL，默认0，单位元
+    buy_transfer_fee REAL DEFAULT 0,
+    -- buy_transfer_fee: 买入过户费，类型REAL，默认0，单位元（仅沪市）
+    sell_commission REAL DEFAULT 0,
+    -- sell_commission: 卖出佣金，类型REAL，默认0，单位元
+    sell_transfer_fee REAL DEFAULT 0,
+    -- sell_transfer_fee: 卖出过户费，类型REAL，默认0，单位元（仅沪市）
+    sell_stamp_tax REAL DEFAULT 0,
+    -- sell_stamp_tax: 卖出印花税，类型REAL，默认0，单位元
+    total_cost REAL DEFAULT 0,
+    -- total_cost: 总成本，类型REAL，默认0，单位元（佣金+过户费+印花税）
+    net_profit REAL DEFAULT 0,
+    -- net_profit: 扣成本后净盈亏，类型REAL，默认0，单位元
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     -- created_at: 创建时间，类型DATETIME，默认当前时间
     FOREIGN KEY (result_id) REFERENCES backtest_result(id) ON DELETE CASCADE

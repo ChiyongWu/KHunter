@@ -32,6 +32,52 @@ logger = logging.getLogger(__name__)
 _backtest_lock = threading.Lock()
 
 
+def calculate_backtest_cost(stock_code: str, price: float, quantity: int, is_buy: bool) -> dict:
+    """计算回测交易成本（不含滑点，按T+1开盘价处理）
+    
+    Args:
+        stock_code: 股票代码
+        price: 交易价格
+        quantity: 交易数量
+        is_buy: 是否为买入操作
+        
+    Returns:
+        成本明细字典
+    """
+    # 回测交易成本配置（固定值，不从配置文件读取）
+    commission_rate = 0.00015     # 佣金率 0.015%
+    min_commission = 5            # 最低佣金 5元
+    stamp_tax_rate = 0.001        # 印花税率 0.1%（仅卖出）
+    transfer_fee_rate = 0.00001   # 过户费率 0.001%（仅沪市）
+    
+    # 判断是否为沪市股票（6开头）
+    is_shanghai = stock_code.startswith('6')
+    
+    # 计算成交金额
+    amount = price * quantity
+    
+    # 佣金（双向收取）
+    commission = amount * commission_rate
+    commission = max(commission, min_commission)  # 最低佣金保底
+    
+    # 过户费（仅沪市，双向收取）
+    transfer_fee = 0
+    if is_shanghai:
+        transfer_fee = amount * transfer_fee_rate
+    
+    # 印花税（仅卖出）
+    stamp_tax = 0
+    if not is_buy:
+        stamp_tax = amount * stamp_tax_rate
+    
+    return {
+        'commission': round(commission, 2),
+        'transfer_fee': round(transfer_fee, 2) if is_shanghai else 0,
+        'stamp_tax': round(stamp_tax, 2) if not is_buy else 0,
+        'is_shanghai': is_shanghai
+    }
+
+
 class BacktestEngine:
     """回测引擎核心类"""
     
@@ -229,13 +275,14 @@ class BacktestEngine:
                     positions, sell_records = self._process_sell(positions, current_date, config)
                     logger.info(f"卖出操作完成，卖出 {len(sell_records)} 笔交易，剩余持仓数: {len(positions)}")
                     
-                    # 更新资金（卖出资金立即可用）
+                    # 更新资金（卖出资金立即可用，净金额已扣除成本）
                     for sell_record in sell_records:
                         current_capital += sell_record['sell_amount']
                         trades.append(sell_record)
                         # 记录当日卖出的股票
                         today_sold_stocks.add(sell_record['stock_code'])
-                        logger.info(f"【卖出】股票: {sell_record['stock_code']} {sell_record['stock_name']}, 类型: {sell_record['sell_type']}, 价格: {sell_record['sell_price']:.2f}, 数量: {sell_record['quantity']}, 金额: {sell_record['sell_amount']:.2f}, 收益率: {sell_record['return_rate']:.2f}%")
+                        total_sell_cost = sell_record['sell_commission'] + sell_record['sell_transfer_fee'] + sell_record['sell_stamp_tax']
+                        logger.info(f"【卖出】股票: {sell_record['stock_code']} {sell_record['stock_name']}, 类型: {sell_record['sell_type']}, 价格: {sell_record['sell_price']:.2f}, 数量: {sell_record['quantity']}, 净金额: {sell_record['sell_amount']:.2f}(扣成本:佣金{sell_record['sell_commission']:.2f}+过户{sell_record['sell_transfer_fee']:.2f}+印花{sell_record['sell_stamp_tax']:.2f}), 收益率: {sell_record['return_rate']:.2f}%")
                     
                     if today_sold_stocks:
                         logger.info(f"当日卖出股票: {list(today_sold_stocks)}")
@@ -454,11 +501,14 @@ class BacktestEngine:
                             'buy_price': buy_price,
                             'quantity': quantity,
                             'buy_amount': buy_amount,
-                            'base_position_amount': base_position_amount  # 首次建仓金额（用于加仓计算）
+                            'base_position_amount': base_position_amount,  # 首次建仓金额（用于加仓计算）
+                            'buy_commission': buy_record['buy_commission'],
+                            'buy_transfer_fee': buy_record['buy_transfer_fee']
                         })
-                        logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 首次建仓={base_position_amount}")
+                        buy_cost = buy_record['buy_commission'] + buy_record['buy_transfer_fee']
+                        logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 佣金={buy_record['buy_commission']:.2f}, 过户费={buy_record['buy_transfer_fee']:.2f}, 首次建仓={base_position_amount}")
                     
-                    current_capital -= buy_amount
+                    current_capital -= (buy_amount + buy_cost)
                     trades.append(buy_record)
                     daily_buys += 1
                     today_bought_stocks.add(stock_code)
@@ -1526,6 +1576,9 @@ class BacktestEngine:
         Returns:
             买入记录
         """
+        # 计算买入成本
+        cost_info = calculate_backtest_cost(stock_code, buy_price, quantity, is_buy=True)
+        
         # 生成股票详情链接
         stock_detail_url = self._generate_stock_detail_url(stock_code)
         
@@ -1544,7 +1597,13 @@ class BacktestEngine:
             'return_rate': None,
             'profit_loss': None,
             'hold_days': None,
-            'detail_url': stock_detail_url
+            'detail_url': stock_detail_url,
+            # 交易成本字段
+            'buy_commission': cost_info['commission'],
+            'buy_transfer_fee': cost_info['transfer_fee'],
+            'sell_commission': 0,
+            'sell_transfer_fee': 0,
+            'sell_stamp_tax': 0
         }
     
     def _process_sell(self, positions: List[Dict], current_date: datetime.date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
@@ -1580,9 +1639,27 @@ class BacktestEngine:
             trading_days = self._get_trading_dates(buy_date_str, current_date_str)
             hold_days = len(trading_days) - 1
             
-            # 获取当日开盘价和收益率
+            # 获取当日开盘价
             open_price = self._get_stock_price(stock_code, current_date, 'open')
-            return_rate = (open_price - position['buy_price']) / position['buy_price'] * 100
+            
+            # 计算含成本的收益率
+            # 买入成本
+            buy_commission = position.get('buy_commission', 0)
+            buy_transfer_fee = position.get('buy_transfer_fee', 0)
+            total_buy_cost = buy_commission + buy_transfer_fee
+            # 实际投入成本 = 买入金额 + 买入佣金 + 过户费
+            actual_cost = position['buy_amount'] + total_buy_cost
+            
+            # 卖出时计算成本（预估，待创建卖出记录时更新）
+            # 注意：印花税只在卖出时收取
+            sell_commission_estimate = open_price * position['quantity'] * 0.00015
+            sell_transfer_fee_estimate = open_price * position['quantity'] * 0.00001 if stock_code.startswith('6') else 0
+            sell_stamp_tax_estimate = open_price * position['quantity'] * 0.001  # 印花税预估
+            
+            # 毛估收益率 = (卖出金额 - 预估卖出成本 - 实际买入成本) / 实际买入成本
+            gross_sell_amount = open_price * position['quantity']
+            estimated_net_proceed = gross_sell_amount - sell_commission_estimate - sell_transfer_fee_estimate - sell_stamp_tax_estimate
+            return_rate = (estimated_net_proceed - actual_cost) / actual_cost * 100
             
             # 根据是否有择时策略决定卖出规则描述
             if self.timing_strategy:
@@ -1590,7 +1667,7 @@ class BacktestEngine:
             else:
                 sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 持有期={hold_period}天"
             logger.info(f"检查持仓 - {stock_code} {stock_name}: 买入日期={buy_date_str}, "
-                       f"持有天数={hold_days}, 收益率={return_rate:.2f}%, {sell_rule}")
+                       f"持有天数={hold_days}, 收益率(含成本)={return_rate:.2f}%, {sell_rule}")
             
             # 初始化卖出决策
             sell_type = None
@@ -1675,9 +1752,12 @@ class BacktestEngine:
                 position['quantity'] = remaining_quantity
                 position['buy_amount'] = position['buy_amount'] * remaining_ratio
                 position['buy_price'] = position['buy_amount'] / remaining_quantity if remaining_quantity > 0 else 0
+                position['buy_commission'] = position.get('buy_commission', 0) * remaining_ratio
+                position['buy_transfer_fee'] = position.get('buy_transfer_fee', 0) * remaining_ratio
                 
                 remaining_positions.append(position)
-                logger.info(f"  【减仓】{stock_code}: 减仓数量={reduce_quantity}, 剩余数量={remaining_quantity}")
+                reduce_cost = reduce_record['sell_commission'] + reduce_record['sell_transfer_fee'] + reduce_record['sell_stamp_tax']
+                logger.info(f"  【减仓】{stock_code}: 减仓数量={reduce_quantity}, 剩余数量={remaining_quantity}, 净减仓金额={reduce_record['sell_amount']:.2f}(扣成本:{reduce_cost:.2f})")
             else:
                 # 继续持有
                 remaining_positions.append(position)
@@ -1695,30 +1775,61 @@ class BacktestEngine:
             sell_price: 卖出价格
             quantity: 卖出数量
             sell_amount: 卖出金额
-            return_rate: 收益率
+            return_rate: 收益率（已含成本预估）
             hold_days: 持有天数
             sell_type: 卖出类型
             
         Returns:
             卖出记录字典
         """
+        # 计算卖出成本
+        cost_info = calculate_backtest_cost(position['stock_code'], sell_price, quantity, is_buy=False)
+        
+        # 持仓分摊比例（用于分摊成本）
+        ratio = quantity / position['quantity']
+        
+        # 分摊的买入成本
+        allocated_buy_amount = position['buy_amount'] * ratio
+        allocated_buy_commission = position.get('buy_commission', 0) * ratio if position.get('buy_commission') else 0
+        allocated_buy_transfer_fee = position.get('buy_transfer_fee', 0) * ratio if position.get('buy_transfer_fee') else 0
+        total_allocated_cost = allocated_buy_amount + allocated_buy_commission + allocated_buy_transfer_fee
+        
+        # 卖出成本
+        sell_commission = cost_info['commission']
+        sell_transfer_fee = cost_info['transfer_fee']
+        sell_stamp_tax = cost_info['stamp_tax']
+        total_sell_cost = sell_commission + sell_transfer_fee + sell_stamp_tax
+        
+        # 净卖出金额
+        net_sell_amount = sell_amount - total_sell_cost
+        
+        # 计算含成本的 profit_loss 和 return_rate
+        profit_loss = net_sell_amount - total_allocated_cost
+        actual_return_rate = (net_sell_amount - total_allocated_cost) / total_allocated_cost * 100 if total_allocated_cost > 0 else 0
+        
         return {
             'stock_code': position['stock_code'],
             'stock_name': position['stock_name'],
             'selection_date': None,
             'buy_date': position['buy_date'],
             'buy_price': position['buy_price'],
-            'buy_amount': position['buy_amount'] * (quantity / position['quantity']),
+            'buy_amount': allocated_buy_amount,
             'quantity': quantity,
             'sell_date': sell_date,
             'sell_price': sell_price,
-            'sell_amount': sell_amount,
+            'sell_amount': net_sell_amount,
             'sell_type': sell_type,
-            'return_rate': return_rate,
-            'profit_loss': sell_amount - position['buy_amount'] * (quantity / position['quantity']),
+            'return_rate': actual_return_rate,
+            'profit_loss': profit_loss,
             'hold_days': hold_days,
             'detail_url': self._generate_stock_detail_url(position['stock_code']),
-            'trade_type': 'sell' if quantity >= position['quantity'] else 'reduce'
+            'trade_type': 'sell' if quantity >= position['quantity'] else 'reduce',
+            # 交易成本字段
+            'buy_commission': allocated_buy_commission,
+            'buy_transfer_fee': allocated_buy_transfer_fee,
+            'sell_commission': sell_commission,
+            'sell_transfer_fee': sell_transfer_fee,
+            'sell_stamp_tax': sell_stamp_tax
         }
     
     def _calculate_performance(self, trades: List[Dict], initial_capital: float, 

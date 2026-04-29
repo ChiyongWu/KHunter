@@ -360,8 +360,37 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             volume_ratio_threshold = self.params['volume_ratio_threshold']
             
             if volume_ratio >= volume_ratio_threshold:
-                # 找到放量反弹，返回日期
-                return str(current_day['date'])
+                # 检查起涨点距离条件
+                # 找到最近的最低点
+                lookback_days = self.params['lookback_days']
+                recent_data = df.head(lookback_days)
+                lowest_price = recent_data['low'].min()
+                
+                # 计算起涨点距离
+                if lowest_price > 0:
+                    distance_ratio = (current_day['close'] - lowest_price) / lowest_price
+                else:
+                    distance_ratio = 0
+                
+                # 距离要求：起涨点距离最低点 <= 15%
+                if distance_ratio <= 0.15:
+                    # 检查回调支撑条件：放量长阳后回调不低于长阳线开盘价
+                    # 获取放量长阳日之后到今天的数据
+                    surge_day_idx = df[df['date'] == current_day['date']].index
+                    if not surge_day_idx.empty:
+                        surge_day_pos = surge_day_idx[0]
+                        # 从放量长阳日到今天（最新交易日）
+                        after_surge = df.iloc[:surge_day_pos]
+                        
+                        if not after_surge.empty:
+                            # 获取放量长阳日的开盘价作为支撑位
+                            support_price = current_day['open']
+                            # 检查所有交易日的最低价
+                            all_above_support = (after_surge['low'] >= support_price).all()
+                            
+                            if all_above_support:
+                                # 找到放量反弹，返回日期
+                                return str(current_day['date'])
         
         return False
     

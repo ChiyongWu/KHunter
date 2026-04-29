@@ -109,26 +109,37 @@ export function initBacktestHistoryPage() {
  */
 async function loadHistoryStrategies() {
     try {
+        console.log('loadHistoryStrategies 开始执行');
         const response = await fetch('/api/strategies');
+        console.log('API 响应状态:', response.status);
         if (!response.ok) {
-            throw new Error('加载策略列表失败');
+            throw new Error('加载策略列表失败: ' + response.status);
         }
         const data = await response.json();
+        console.log('API 返回数据:', data);
         if (data.success) {
             const strategies = data.data;
+            console.log('策略数量:', strategies ? strategies.length : 0);
             const strategySelect = document.getElementById('history-strategy-filter');
+            console.log('strategySelect 元素:', strategySelect);
             if (strategySelect) {
                 strategySelect.innerHTML = '<option value="">全部策略</option>';
-                strategies.forEach(strategy => {
-                    const option = document.createElement('option');
-                    // 使用中文名称作为value和显示文本
-                    const chineseName = strategy.display_name || strategy.name;
-                    option.value = strategy.name;  // 使用英文名作为value，用于API调用
-                    option.textContent = chineseName;
-                    strategySelect.appendChild(option);
-                });
-                console.log('回测历史策略列表加载成功:', strategies.length);
+                if (strategies && strategies.length > 0) {
+                    strategies.forEach(strategy => {
+                        const option = document.createElement('option');
+                        // 使用中文名称作为value和显示文本
+                        const chineseName = strategy.display_name || strategy.name;
+                        option.value = strategy.name;  // 使用英文名作为value，用于API调用
+                        option.textContent = chineseName;
+                        strategySelect.appendChild(option);
+                    });
+                }
+                console.log('回测历史策略列表加载成功, 共', strategySelect.options.length - 1, '个策略');
+            } else {
+                console.warn('未找到 history-strategy-filter 元素');
             }
+        } else {
+            console.error('API 返回失败:', data.error);
         }
     } catch (error) {
         console.error('加载回测历史策略列表失败:', error);
@@ -729,7 +740,7 @@ function displayBacktestHistory(results) {
  * 导出回测结果为Excel
  * @param {number} resultId - 回测结果ID
  */
-async function exportBacktestResult(resultId) {
+export async function exportBacktestResult(resultId) {
     try {
         // 显示加载提示
         showAlert('正在导出回测报告...', 'info');
@@ -773,7 +784,7 @@ async function exportBacktestResult(resultId) {
  * 查看回测结果
  * @param {number} resultId - 回测结果ID
  */
-function viewBacktestResult(resultId) {
+export function viewBacktestResult(resultId) {
     // 显示模态框
     const modal = document.getElementById('backtest-result-modal');
     if (modal) {
@@ -787,7 +798,7 @@ function viewBacktestResult(resultId) {
 /**
  * 关闭回测结果模态框
  */
-function closeBacktestModal() {
+export function closeBacktestModal() {
     const modal = document.getElementById('backtest-result-modal');
     if (modal) {
         modal.style.display = 'none';

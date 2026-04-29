@@ -13,6 +13,7 @@ import json
 import yaml
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+from scipy import stats
 
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
@@ -30,6 +31,97 @@ logger = logging.getLogger(__name__)
 
 # 策略运行全局锁，确保同一时刻只有一个策略运行任务执行
 _strategy_run_lock = threading.Lock()
+
+# 股票池持久化文件路径
+POOL_PERSIST_FILE = "data/running/buy_candidate_pool.json"
+
+
+def calculate_trading_cost(stock_code: str, price: float, quantity: int, is_buy: bool, config: dict) -> dict:
+    """计算交易成本（佣金、印花税、过户费、滑点）
+    
+    Args:
+        stock_code: 股票代码
+        price: 交易价格
+        quantity: 交易数量
+        is_buy: 是否为买入操作
+        config: 交易成本配置
+        
+    Returns:
+        成本明细字典
+    """
+    trading_config = config.get('trading', {})
+    
+    # 获取配置参数
+    commission_rate = trading_config.get('commission_rate', 0.00015)  # 默认0.015%
+    min_commission = trading_config.get('min_commission', 5)            # 最低佣金5元
+    stamp_tax_rate = trading_config.get('stamp_tax_rate', 0.001)       # 印花税0.1%
+    transfer_fee_rate = trading_config.get('transfer_fee_rate', 0.00001)  # 过户费0.001%
+    
+    slippage_config = trading_config.get('slippage', {})
+    slippage_enabled = slippage_config.get('enabled', True)
+    buy_slippage = slippage_config.get('buy_slippage', 0.01)   # 默认买入滑点+1%
+    sell_slippage = slippage_config.get('sell_slippage', 0.005) # 默认卖出滑点-0.5%
+    
+    # 判断是否为沪市股票（6开头）
+    is_shanghai = stock_code.startswith('6')
+    
+    # 计算成交金额
+    original_amount = price * quantity
+    
+    # 计算滑点调整后的价格
+    if slippage_enabled:
+        if is_buy:
+            slippage_rate = buy_slippage
+        else:
+            slippage_rate = sell_slippage
+        adjusted_price = price * (1 + slippage_rate if is_buy else 1 - slippage_rate)
+    else:
+        slippage_rate = 0
+        adjusted_price = price
+    
+    # 滑点成本
+    slippage_cost = abs(adjusted_price - price) * quantity
+    
+    # 调整后的成交金额
+    adjusted_amount = adjusted_price * quantity
+    
+    # 佣金（双向收取）
+    commission = adjusted_amount * commission_rate
+    commission = max(commission, min_commission)  # 最低佣金保底
+    
+    # 过户费（仅沪市股票，双向收取）
+    transfer_fee = 0
+    if is_shanghai:
+        transfer_fee = adjusted_amount * transfer_fee_rate
+    
+    # 印花税（仅卖出时收取）
+    stamp_tax = 0
+    if not is_buy:
+        stamp_tax = adjusted_amount * stamp_tax_rate
+    
+    # 总成本
+    total_cost = slippage_cost + commission + transfer_fee + stamp_tax
+    
+    # 买入成本 = 成交金额 + 所有费用
+    # 卖出成本 = 滑点成本 + 佣金 + 过户费 + 印花税
+    if is_buy:
+        total_cost = slippage_cost + commission + transfer_fee
+    else:
+        total_cost = slippage_cost + commission + transfer_fee + stamp_tax
+    
+    return {
+        'original_price': price,
+        'adjusted_price': round(adjusted_price, 3),
+        'slippage_rate': slippage_rate,
+        'slippage_cost': round(slippage_cost, 2),
+        'commission': round(commission, 2),
+        'transfer_fee': round(transfer_fee, 2) if is_shanghai else 0,
+        'stamp_tax': round(stamp_tax, 2) if not is_buy else 0,
+        'total_cost': round(total_cost, 2),
+        'is_shanghai': is_shanghai,
+        'original_amount': round(original_amount, 2),
+        'adjusted_amount': round(adjusted_amount, 2)
+    }
 
 
 class StrategyRunner:
@@ -91,6 +183,546 @@ class StrategyRunner:
         self.config = self._load_config()
         self.take_profit_threshold = self.config.get('take_profit_threshold', 0.15)
         self.stop_loss_threshold = self.config.get('stop_loss_threshold', -0.05)
+        
+        # 加载回测评分器
+        from trading.backtest_scorer import BacktestScoreCalculator
+        self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
+        
+        # 加载股票池移除配置
+        self._pool_removal_config = self._load_pool_removal_config()
+        
+        # 加载支撑位方法配置
+        self._support_methods_config = self._load_support_methods_config()
+    
+    def _load_pool_removal_config(self) -> Dict:
+        """加载股票池移除策略配置
+        
+        Returns:
+            策略名称 -> 配置字典的映射
+        """
+        try:
+            config_path = Path(__file__).parent.parent / "config" / "pool_removal_config.yaml"
+            if not config_path.exists():
+                logger.warning(f"股票池移除配置文件不存在: {config_path}")
+                return {}
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                yaml_config = yaml.safe_load(f) or {}
+            
+            config_map = {}
+            strategies = yaml_config.get('removal_strategies', {})
+            for name, cfg in strategies.items():
+                if cfg.get('is_enabled', True):
+                    config_map[name] = {
+                        'min_hold_days': cfg.get('min_hold_days', 2),
+                        'display_name': cfg.get('display_name', '')
+                    }
+                    display_name = cfg.get('display_name', '')
+                    if display_name:
+                        config_map[display_name] = config_map[name]
+                        if display_name.endswith('策略'):
+                            config_map[display_name[:-2]] = config_map[name]
+            
+            logger.info(f"加载股票池移除策略: {len(config_map)} 个策略")
+            return config_map
+        except Exception as e:
+            logger.warning(f"加载股票池移除配置失败: {str(e)}")
+            return {}
+    
+    def _load_support_methods_config(self) -> Dict:
+        """加载策略支撑位方法配置
+        
+        Returns:
+            策略名称 -> 支撑位配置字典
+        """
+        try:
+            config_path = Path(__file__).parent.parent / "config" / "support_methods.yaml"
+            if not config_path.exists():
+                logger.warning(f"支撑位方法配置文件不存在: {config_path}")
+                return {}
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f) or {}
+            
+            strategies_config = config.get('strategies', {})
+            logger.info(f"加载支撑位方法配置: {len(strategies_config)} 个策略")
+            return strategies_config
+        except Exception as e:
+            logger.warning(f"加载支撑位方法配置失败: {str(e)}")
+            return {}
+    
+    def _get_support_method_for_strategy(self, strategy_name: str) -> str:
+        """获取策略的支撑位计算方法
+        
+        Args:
+            strategy_name: 策略名称
+            
+        Returns:
+            支撑位计算方法（ma20/key_close_5/key_open/key_close）
+        """
+        strategy_config = self._support_methods_config.get(strategy_name, {})
+        if isinstance(strategy_config, dict):
+            return strategy_config.get('support_method', 'ma20')
+        elif isinstance(strategy_config, str):
+            return strategy_config
+        return 'ma20'
+    
+    def _get_strategy_removal_config(self, strategy_name: str) -> Dict:
+        """获取策略的移除配置
+        
+        Args:
+            strategy_name: 策略名称
+            
+        Returns:
+            移除配置字典
+        """
+        if strategy_name in self._pool_removal_config:
+            return self._pool_removal_config[strategy_name]
+        
+        if not strategy_name.endswith('策略'):
+            with_strategy = strategy_name + '策略'
+            if with_strategy in self._pool_removal_config:
+                return self._pool_removal_config[with_strategy]
+        
+        if strategy_name.endswith('策略'):
+            without_strategy = strategy_name[:-2]
+            if without_strategy in self._pool_removal_config:
+                return self._pool_removal_config[without_strategy]
+        
+        # 默认配置
+        return {'min_hold_days': 2}
+    
+    # ==================== 股票池持久化方法 ====================
+    
+    def _load_pool_from_file(self) -> Tuple[List[Dict], bool]:
+        """从文件加载股票池
+        
+        Returns:
+            (股票池列表, 是否首次运行)
+        """
+        pool_file = Path(POOL_PERSIST_FILE)
+        if not pool_file.exists():
+            logger.info("股票池文件不存在，首次运行将初始化")
+            return [], True
+        
+        try:
+            with open(pool_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            pool = data.get('pool', [])
+            last_date = data.get('last_date', '')
+            
+            logger.info(f"从文件加载股票池: {len(pool)} 只股票，上次运行日期: {last_date}")
+            return pool, False
+        except Exception as e:
+            logger.error(f"加载股票池文件失败: {str(e)}")
+            return [], True
+    
+    def _save_pool_to_file(self, pool: List[Dict], date: str):
+        """保存股票池到文件
+        
+        Args:
+            pool: 股票池列表
+            date: 当前日期
+        """
+        try:
+            data = {
+                'last_date': date,
+                'pool': pool,
+                'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            with open(POOL_PERSIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"股票池已保存: {len(pool)} 只股票")
+        except Exception as e:
+            logger.error(f"保存股票池文件失败: {str(e)}")
+    
+    # ==================== 预加载股票数据 ====================
+    
+    def _preload_stock_data(self, current_date: str, strategy_name: str = None):
+        """预加载所有股票数据到内存
+        
+        Args:
+            current_date: 当前日期
+            strategy_name: 策略名称，用于计算需要的历史数据天数
+        """
+        from datetime import datetime, timedelta
+        current_dt = datetime.strptime(current_date, '%Y-%m-%d')
+        
+        # 根据策略参数计算需要的历史数据天数
+        buffer_days = 60
+        required_days = buffer_days
+        
+        if strategy_name:
+            strategy = self.strategy_registry.get_strategy(strategy_name)
+            if strategy and hasattr(strategy, 'params'):
+                params = strategy.params
+                max_value = 0
+                
+                lookback_keys = [
+                    'lookback_days', 'pattern_days', 'limit_up_lookback_days',
+                    'lowest_point_lookback_days', 'surge_lookback_days', 'uptrend_lookback_days'
+                ]
+                period_keys = ['ma_period', 'ma_short_period', 'ma_long_period', 'kdj_n',
+                             'macd_short', 'macd_long', 'macd_signal', 'volume_ma_period']
+                
+                for key in lookback_keys + period_keys:
+                    if key in params:
+                        val = params[key]
+                        if isinstance(val, (int, float)):
+                            max_value = max(max_value, int(val))
+                
+                required_days = max_value + buffer_days
+        
+        # 扩展开始日期
+        extended_start = (current_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
+        logger.info(f"预加载股票数据: {extended_start} ~ {current_date} (历史: {required_days}天)")
+        
+        # 获取所有股票代码
+        stock_codes = self.db_manager.list_all_stocks()
+        total = len(stock_codes)
+        loaded = 0
+        skipped = 0
+        
+        for i, code in enumerate(stock_codes):
+            try:
+                df = self.db_manager.read_stock(code)
+                
+                if df is None or (hasattr(df, 'empty') and df.empty) or len(df) < 60:
+                    skipped += 1
+                    continue
+                
+                # 缓存原始数据
+                df_copy = df.copy()
+                df_copy['date'] = df_copy['date'].dt.strftime('%Y-%m-%d')
+                self.stock_data_cache[code] = df_copy
+                
+                # 获取股票名称
+                name = self._get_stock_name(code)
+                
+                # 过滤ST股票和退市股票
+                invalid = name.startswith('ST') or name.startswith('*ST')
+                if not invalid:
+                    for kw in ['退', '未知', '退市', '已退']:
+                        if kw in name:
+                            invalid = True
+                            break
+                
+                if invalid:
+                    skipped += 1
+                    continue
+                
+                # 缓存有效股票
+                df_filtered = df.copy()
+                df_filtered['date'] = df_filtered['date'].dt.strftime('%Y-%m-%d')
+                self.stock_filtered_cache[code] = df_filtered
+                loaded += 1
+                
+            except Exception as e:
+                logger.debug(f"预加载股票 {code} 失败: {str(e)}")
+                skipped += 1
+            
+            if (i + 1) % 500 == 0:
+                logger.info(f"预加载进度: {i + 1}/{total}, 有效股票: {loaded}, 跳过: {skipped}")
+        
+        logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, 总计 {total}")
+    
+    # ==================== 选股和评分 ====================
+    
+    def _execute_selection(self, strategy_name: str, current_date: str) -> List[Dict]:
+        """执行选股（从缓存读取，使用日期切片）
+        
+        Args:
+            strategy_name: 策略名称
+            current_date: 选股日期
+            
+        Returns:
+            选股结果列表
+        """
+        try:
+            # 确保策略已注册
+            if not self.strategy_registry.strategies:
+                self.strategy_registry.auto_register_from_directory()
+            
+            # 获取策略
+            from utils.strategy_name_mapper import get_english_name
+            mapped_name = get_english_name(strategy_name)
+            strategy = self.strategy_registry.get_strategy(mapped_name)
+            
+            if not strategy:
+                strategy = self.strategy_registry.get_strategy(strategy_name)
+            
+            if not strategy:
+                raise ValueError(f"策略 {strategy_name} 不存在")
+            
+            standardized_stocks = []
+            
+            # 从缓存遍历有效股票
+            for code, df in self.stock_filtered_cache.items():
+                try:
+                    # 日期切片
+                    df_to_date = df[df['date'] <= current_date].copy()
+                    
+                    if df_to_date.empty:
+                        continue
+                    
+                    # 反转数据为倒序
+                    if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                        df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                    
+                    # 获取股票名称
+                    name = self.stock_name_cache.get(code, "未知")
+                    
+                    # 执行选股
+                    signal_list = strategy.execute_selection(df_to_date, code, name)
+                    
+                    if signal_list:
+                        for signal in signal_list:
+                            stock_info = {
+                                'stock_code': code,
+                                'stock_name': name,
+                                'signal': signal,
+                                'detail_url': f"javascript:viewStockDetail('{code}')"
+                            }
+                            standardized_stocks.append(stock_info)
+                
+                except Exception as e:
+                    logger.debug(f"股票 {code} 选股失败: {str(e)}")
+                    continue
+            
+            logger.info(f"{strategy_name} 策略在 {current_date} 选出 {len(standardized_stocks)} 只股票")
+            return standardized_stocks
+            
+        except Exception as e:
+            logger.error(f"执行选股失败: {str(e)}")
+            return []
+    
+    def _score_stocks(self, stocks: List[Dict], strategy_name: str, current_date: str) -> List[Dict]:
+        """对股票进行评分
+        
+        Args:
+            stocks: 股票列表
+            strategy_name: 策略名称
+            current_date: 评分日期
+            
+        Returns:
+            带评分的股票列表
+        """
+        if not stocks:
+            return []
+        
+        # 获取策略的中文名称
+        strategy = self.strategy_registry.get_strategy(strategy_name)
+        strategy_display_name = strategy.name if strategy else strategy_name
+        
+        # 使用回测评分器进行批量评分
+        scored_stocks = self.score_calculator.calculate_batch_scores(
+            stocks=stocks,
+            score_date=current_date,
+            strategy_name=strategy_display_name
+        )
+        
+        return scored_stocks
+    
+    def _select_and_score_stocks(self, strategy_name: str, current_date: str, score_threshold: int = 60) -> List[Dict]:
+        """执行选股、评分、筛选，得到候选股票池
+        
+        Args:
+            strategy_name: 策略名称
+            current_date: 当前日期
+            score_threshold: 评分阈值
+            
+        Returns:
+            候选股票列表
+        """
+        logger.info(f"开始执行选股，策略: {strategy_name}，日期: {current_date}")
+        
+        # 执行选股
+        selected_stocks = self._execute_selection(strategy_name, current_date)
+        logger.info(f"选股完成，共选出 {len(selected_stocks)} 只股票")
+        
+        if not selected_stocks:
+            return []
+        
+        # 评分
+        logger.info(f"开始对 {len(selected_stocks)} 只股票进行评分")
+        scored_stocks = self._score_stocks(selected_stocks, strategy_name, current_date)
+        
+        # 筛选：去除否决票且评分达标
+        candidate_stocks = [
+            stock for stock in scored_stocks 
+            if not stock.get('veto_flag', False) and stock['score'] >= score_threshold
+        ]
+        
+        logger.info(f"筛选后待买入股票数: {len(candidate_stocks)}")
+        return candidate_stocks
+    
+    # ==================== 股票池移除检查 ====================
+    
+    def _calculate_support_level(self, stock: Dict, strategy_name: str, current_date: str) -> float:
+        """计算候选股票的支撑位
+        
+        Args:
+            stock: 股票信息
+            strategy_name: 策略名称
+            current_date: 当前日期
+            
+        Returns:
+            支撑位价格
+        """
+        stock_code = stock['stock_code']
+        support_method = self._get_support_method_for_strategy(strategy_name)
+        
+        df = self.stock_filtered_cache.get(stock_code)
+        if df is None:
+            return 0.0
+        
+        df_to_date = df[df['date'] <= current_date].copy()
+        if df_to_date.empty:
+            return 0.0
+        
+        if len(df_to_date) > 1 and df_to_date['date'].iloc[0] > df_to_date['date'].iloc[1]:
+            df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+        
+        if support_method == 'ma20':
+            if len(df_to_date) >= 20:
+                return round(df_to_date['close'].tail(20).mean(), 2)
+            
+        elif support_method in ['key_close_5', 'key_open', 'key_close']:
+            signal = stock.get('signal', {})
+            key_date = signal.get('key_date') if isinstance(signal, dict) else None
+            
+            if key_date:
+                key_date_str = str(key_date)[:10]
+                key_date_data = df_to_date[df_to_date['date'].astype(str).str[:10] == key_date_str]
+                
+                if not key_date_data.empty:
+                    if support_method == 'key_close_5':
+                        return round(float(key_date_data.iloc[0]['close']) * 0.95, 2)
+                    elif support_method == 'key_open':
+                        return round(float(key_date_data.iloc[0]['open']), 2)
+                    elif support_method == 'key_close':
+                        return round(float(key_date_data.iloc[0]['close']), 2)
+        
+        # fallback: 使用20日均线
+        if len(df_to_date) >= 20:
+            return round(df_to_date['close'].tail(20).mean(), 2)
+        
+        return 0.0
+    
+    def _check_pool_removal(self, current_date: str) -> List[Dict]:
+        """检查股票池中需要移除的股票
+        
+        移除条件：
+        1. 破支撑位：前一日收盘价 < 支撑位 × 0.98
+        2. 不满足上升趋势条件（持有 min_hold_days 天后生效）
+            - 收盘价 >= MA10
+            - 20日线性回归斜率 > 0
+            - 20日R²拟合度 >= 0.3
+        
+        Args:
+            current_date: 当前交易日期
+            
+        Returns:
+            移除的候选列表
+        """
+        from utils.trade_date_utils import get_previous_trading_day
+        
+        removed = []
+        remaining = []
+        
+        # 获取前一个交易日
+        prev_date = get_previous_trading_day(current_date)
+        prev_date_str = prev_date.strftime('%Y-%m-%d') if isinstance(prev_date, datetime.datetime) else prev_date
+        
+        for candidate in self.buy_candidate_pool:
+            stock_code = candidate['stock']['stock_code']
+            stock_name = candidate['stock']['stock_name']
+            strategy_name = candidate.get('strategy_name', '')
+            
+            # 获取移除配置
+            removal_config = self._get_strategy_removal_config(strategy_name)
+            min_hold_days = removal_config.get('min_hold_days', 2)
+            
+            # 计算持有天数
+            added_date = candidate.get('added_date', '')
+            if added_date:
+                if isinstance(added_date, datetime.datetime):
+                    added_date = added_date.strftime('%Y-%m-%d')
+                try:
+                    added_dt = datetime.datetime.strptime(added_date, '%Y-%m-%d')
+                    if isinstance(prev_date, datetime.datetime):
+                        hold_days = (prev_date - added_dt).days
+                    else:
+                        prev_dt = datetime.datetime.strptime(prev_date_str, '%Y-%m-%d')
+                        hold_days = (prev_dt - added_dt).days
+                except:
+                    hold_days = 0
+            else:
+                hold_days = 0
+            
+            # 获取股票数据
+            df = self.stock_filtered_cache.get(stock_code)
+            if df is None:
+                remaining.append(candidate)
+                continue
+            
+            df_to_date = df[df['date'] <= prev_date_str].copy()
+            if len(df_to_date) < 20:
+                remaining.append(candidate)
+                continue
+            
+            if df_to_date['date'].iloc[0] > df_to_date['date'].iloc[-1]:
+                df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+            
+            prev_close = df_to_date.iloc[-1]['close']
+            
+            # 移除判断
+            removal_reasons = []
+            should_remove = False
+            
+            # 条件1: 破支撑位移除
+            support_level = candidate.get('support_level', 0.0)
+            if support_level > 0 and prev_close > 0:
+                if prev_close < support_level * 0.98:
+                    should_remove = True
+                    drop_pct = (prev_close - support_level) / support_level * 100
+                    removal_reasons.append(f"跌破支撑位{support_level:.2f}{drop_pct:.1f}%")
+            
+            # 条件2: 趋势验证移除
+            if hold_days >= min_hold_days:
+                ma10 = df_to_date['close'].tail(10).mean()
+                prices = df_to_date['close'].tail(20).values
+                x = np.arange(len(prices))
+                slope, _, r_value, _, _ = stats.linregress(x, prices)
+                r_squared = r_value ** 2
+                
+                trend_ok = (prev_close >= ma10 and slope > 0 and r_squared >= 0.3)
+                
+                if not trend_ok:
+                    should_remove = True
+                    if prev_close < ma10:
+                        removal_reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
+                    if slope <= 0:
+                        removal_reasons.append(f"斜率{slope:.4f}<=0")
+                    if r_squared < 0.3:
+                        removal_reasons.append(f"R²{r_squared:.4f}<0.3")
+            
+            if should_remove:
+                removed.append(candidate)
+                logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
+                           f"收盘={prev_close:.2f}, 策略={strategy_name}, 持{hold_days}日, "
+                           f"原因: {'; '.join(removal_reasons)}")
+            else:
+                remaining.append(candidate)
+        
+        if removed:
+            logger.info(f"股票池移除: {len(removed)} 只, 剩余: {len(remaining)} 只")
+            self.buy_candidate_pool = remaining
+        
+        return removed
     
     def _load_config(self) -> Dict:
         """加载策略运行配置
@@ -306,109 +938,6 @@ class StrategyRunner:
             logger.error(f"获取股票名称失败 {stock_code}: {str(e)}")
             return stock_code
     
-    def _select_stocks(self, strategy_names: List[str], selection_date: str) -> List[Dict]:
-        """从选股结果表查询候选股票
-        
-        Args:
-            strategy_names: 策略名称列表
-            selection_date: 选股日期
-            
-        Returns:
-            候选股票列表
-        """
-        try:
-            # 构建查询条件
-            if strategy_names:
-                placeholders = ','.join(['?'] * len(strategy_names))
-                query = f"""
-                SELECT stock_code, stock_name, industry, sector, selection_date, selection_price, score
-                FROM stock_selection_record
-                WHERE is_active = 1 
-                AND selection_date >= date(?)
-                AND strategy_name IN ({placeholders})
-                ORDER BY score DESC
-                """
-                params = [selection_date] + strategy_names
-            else:
-                query = """
-                SELECT stock_code, stock_name, industry, sector, selection_date, selection_price, score
-                FROM stock_selection_record
-                WHERE is_active = 1 
-                AND selection_date >= date(?)
-                ORDER BY score DESC
-                """
-                params = [selection_date]
-            
-            # 执行查询
-            results = self.db_manager.query(query, tuple(params))
-            
-            # 转换为字典列表
-            stocks = []
-            for row in results:
-                stock = {
-                    'stock_code': row['stock_code'],
-                    'stock_name': row['stock_name'],
-                    'industry': row['industry'],
-                    'sector': row['sector'],
-                    'selection_date': row['selection_date'],
-                    'selection_price': row['selection_price'],
-                    'score': row['score']
-                }
-                stocks.append(stock)
-            
-            logger.info(f"从选股结果表查询到 {len(stocks)} 只候选股票")
-            return stocks
-        except Exception as e:
-            logger.error(f"查询候选股票失败: {str(e)}")
-            return []
-    
-    def _update_buy_candidate_pool(self, selected_stocks: List[Dict], trade_date: str):
-        """更新可买股票池
-        
-        Args:
-            selected_stocks: 候选股票列表
-            trade_date: 交易日期
-        """
-        try:
-            # 过滤条件：评分≥60、非ST/退市、不在持仓中
-            filtered_stocks = []
-            for stock in selected_stocks:
-                # 检查评分
-                if stock.get('score', 0) < 60:
-                    continue
-                
-                # 检查是否已持仓
-                if stock['stock_code'] in self.portfolio:
-                    continue
-                
-                # TODO [高优先级]: 检查是否为ST/退市股票
-                # 参考: doc/策略运行代码与文档差异报告.md - 待办事项
-                # 实现方式: 从akshare获取股票状态信息，过滤ST和退市股票
-                # 预期行为: 排除ST、*ST、退市股票
-                # is_st, is_delisted = check_stock_status(stock_code)
-                # if is_st or is_delisted:
-                #     continue
-                
-                filtered_stocks.append(stock)
-            
-            # 更新可买股票池
-            self.buy_candidate_pool = []
-            for stock in filtered_stocks:
-                candidate = {
-                    'stock_code': stock['stock_code'],
-                    'stock_name': stock['stock_name'],
-                    'score': stock['score'],
-                    'added_date': trade_date,
-                    'tracking_days': 1,
-                    'industry': stock['industry'],
-                    'sector': stock['sector']
-                }
-                self.buy_candidate_pool.append(candidate)
-            
-            logger.info(f"更新可买股票池，共 {len(self.buy_candidate_pool)} 只股票")
-        except Exception as e:
-            logger.error(f"更新可买股票池失败: {str(e)}")
-    
     def _execute_sell_operations(self, trade_date: str) -> List[Dict]:
         """执行卖出操作
         
@@ -502,26 +1031,38 @@ class StrategyRunner:
                 if len(self.portfolio) >= max_stocks:
                     break
                 
-                stock_code = candidate['stock_code']
+                # 适配新的股票池结构
+                stock_info = candidate.get('stock', candidate)
+                stock_code = stock_info['stock_code']
+                stock_name = stock_info['stock_name']
                 
-                # 获取股票数据
-                end_date = trade_date
-                start_date = (datetime.datetime.strptime(end_date, '%Y-%m-%d') - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
-                df = self._get_stock_data(stock_code, start_date, end_date)
-                
-                if df is None or df.empty:
+                # 获取股票数据（优先从缓存获取）
+                df = self.stock_filtered_cache.get(stock_code)
+                if df is None:
                     logger.warning(f"获取股票数据失败 {stock_code}，跳过买入检查")
                     continue
                 
+                # 日期切片
+                df_to_date = df[df['date'] <= trade_date].copy()
+                if df_to_date.empty:
+                    continue
+                
+                # 反转为倒序
+                if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                
+                # 检查是否已在持仓中
+                existing_pos = self.portfolio.get(stock_code)
+                
                 # 调用择时策略判断
-                timing_result = self.timing_strategy.get_timing_result(df, None, current_cash, use_prev_day_signal=False)
+                timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False)
                 
                 # 生成买入信号
                 if timing_result.is_buy:
                     # 计算买入数量
-                    current_price = df.iloc[-1]['close']
-                    buy_amount = min(current_cash * 0.2, 100000)  # 每只股票最多使用20%资金，或10万
-                    buy_quantity = int(buy_amount / current_price / 100) * 100  # 按100股整数倍
+                    current_price = df_to_date.iloc[-1]['close']
+                    buy_amount = min(current_cash * 0.2, 100000)
+                    buy_quantity = int(buy_amount / current_price / 100) * 100
                     
                     if buy_quantity <= 0:
                         continue
@@ -530,14 +1071,15 @@ class StrategyRunner:
                         'id': f"buy_{stock_code}_{trade_date}",
                         'date': trade_date,
                         'stock_code': stock_code,
-                        'stock_name': candidate['stock_name'],
+                        'stock_name': stock_name,
                         'signal_type': 'buy',
                         'quantity': buy_quantity,
                         'price': current_price,
                         'amount': current_price * buy_quantity,
                         'reason': timing_result.message,
-                        'strategy_name': 'N/A',
+                        'strategy_name': candidate.get('strategy_name', 'N/A'),
                         'timing_strategy': self.timing_strategy_name,
+                        'support_level': candidate.get('support_level', 0),
                         'executed': False,
                         'executed_date': None
                     }
@@ -545,7 +1087,7 @@ class StrategyRunner:
                     
                     # 更新持仓
                     self.portfolio[stock_code] = {
-                        'stock_name': candidate['stock_name'],
+                        'stock_name': stock_name,
                         'quantity': buy_quantity,
                         'buy_price': current_price,
                         'buy_date': trade_date,
@@ -553,8 +1095,10 @@ class StrategyRunner:
                         'profit_loss': 0.0,
                         'profit_rate': 0.0,
                         'holding_days': 0,
-                        'industry': candidate['industry'],
-                        'sector': candidate['sector']
+                        'industry': stock_info.get('industry', ''),
+                        'sector': stock_info.get('sector', ''),
+                        'selection_score': stock_info.get('score', 0),
+                        'support_level': candidate.get('support_level', 0)
                     }
                     
                     # 更新可用资金
@@ -563,11 +1107,17 @@ class StrategyRunner:
             logger.info(f"执行买入操作，生成 {len(buy_signals)} 个买入信号")
         except Exception as e:
             logger.error(f"执行买入操作失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
         
         return buy_signals
     
     def run_strategy(self, strategy_names: List[str], timing_strategy_name: str, config: Dict) -> Dict:
         """运行策略
+        
+        与回测引擎保持一致：
+        1. 首次运行：从数据库预加载全市场股票 → 执行选股 → 评分 → 初始化股票池
+        2. 后续运行：加载持久化股票池 → 检查移除条件 → 继续选股加入新股票
         
         Args:
             strategy_names: 选股策略列表
@@ -595,6 +1145,7 @@ class StrategyRunner:
             # 获取配置参数
             initial_cash = config.get('initial_cash', 1000000)
             max_stocks = config.get('max_stocks', 5)
+            score_threshold = config.get('score_threshold', 60)
             
             # 确定工作日期
             working_date = self.get_working_date()
@@ -603,16 +1154,7 @@ class StrategyRunner:
             # 检查是否已处理
             if self.check_if_processed(working_date):
                 logger.info(f"日期 {working_date} 已处理，直接返回结果")
-                # TODO [高优先级]: 加载并返回已处理的完整结果
-                # 参考: doc/策略运行代码与文档差异报告.md - 待办事项
-                # 实现方式: 从 daily_{date}.json 加载完整运行记录
-                # 预期行为: 返回完整的运行结果，包括持仓、信号、股票池信息
-                # daily_record = self._load_daily_record(working_date)
-                # return {"status": "success", "message": "日期已处理", "data": daily_record}
                 return {"status": "success", "message": "日期已处理", "data": {"date": working_date}}
-            
-            # 计算选股日期范围（近一个月）
-            selection_start_date = (datetime.datetime.strptime(working_date, '%Y-%m-%d') - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
             
             # 加载持仓信息
             portfolio_file = self.running_dir / f"portfolio_{working_date}.json"
@@ -626,7 +1168,7 @@ class StrategyRunner:
             timing_params = config.get('timing_params', {})
             strategy_params = timing_params.get(timing_strategy_name, {})
             
-            # 特殊处理：如果是海龟策略且config中直接包含海龟参数，合并到策略参数中
+            # 特殊处理：如果是海龟策略
             if timing_strategy_name == 'turtle':
                 turtle_specific_params = {
                     'n_entry': config.get('n_entry'),
@@ -638,7 +1180,6 @@ class StrategyRunner:
                     'preset': config.get('turtle_preset'),
                     'base_position_amount': config.get('base_position_amount')
                 }
-                # 只合并非None的参数
                 turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
                 strategy_params.update(turtle_specific_params)
             
@@ -650,40 +1191,126 @@ class StrategyRunner:
             
             logger.info(f"初始化择时策略: {timing_strategy_name}")
             
-            # 1. 选股
-            selected_stocks = self._select_stocks(strategy_names, selection_start_date)
+            # ========== 股票池初始化逻辑 ==========
             
-            # 2. 处理可买股票池
-            self._update_buy_candidate_pool(selected_stocks, working_date)
+            # 1. 尝试从持久化文件加载股票池
+            loaded_pool, is_first_run = self._load_pool_from_file()
             
-            # 3. 卖出操作
+            if is_first_run:
+                # 首次运行：从数据库预加载股票数据，执行选股初始化股票池
+                logger.info("首次运行，初始化股票池...")
+                
+                # 使用第一个策略进行选股（多策略可扩展）
+                strategy_name = strategy_names[0] if strategy_names else 'default'
+                
+                # 预加载股票数据
+                self._preload_stock_data(working_date, strategy_name)
+                
+                # 执行选股和评分
+                candidate_stocks = self._select_and_score_stocks(strategy_name, working_date, score_threshold)
+                
+                # 初始化股票池
+                for stock in candidate_stocks:
+                    # 计算支撑位
+                    support_level = self._calculate_support_level(stock, strategy_name, working_date)
+                    support_method = self._get_support_method_for_strategy(strategy_name)
+                    
+                    self.buy_candidate_pool.append({
+                        'stock': stock,
+                        'added_date': working_date,
+                        'strategy_name': strategy_name,
+                        'support_level': support_level,
+                        'support_method': support_method
+                    })
+                
+                logger.info(f"首次运行初始化股票池: {len(self.buy_candidate_pool)} 只股票")
+            else:
+                # 后续运行：使用已加载的股票池
+                self.buy_candidate_pool = loaded_pool
+                logger.info(f"从持久化文件加载股票池: {len(self.buy_candidate_pool)} 只股票")
+            
+            # 2. 检查股票池移除条件（破支撑位、趋势验证）
+            logger.info(f"开始检查股票池移除条件，当前股票池数量: {len(self.buy_candidate_pool)}")
+            removed = self._check_pool_removal(working_date)
+            if removed:
+                logger.info(f"股票池移除 {len(removed)} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
+            
+            # 3. 继续选股，加入新股票（与回测一致：使用前一天数据选股）
+            from utils.trade_date_utils import get_previous_trading_day
+            selection_date = get_previous_trading_day(working_date)
+            if isinstance(selection_date, str):
+                selection_date_str = selection_date
+            else:
+                selection_date_str = selection_date.strftime('%Y-%m-%d') if hasattr(selection_date, 'strftime') else str(selection_date)
+            
+            logger.info(f"执行选股日期: {selection_date_str}")
+            
+            for strategy_name in strategy_names:
+                # 执行选股和评分
+                new_candidates = self._select_and_score_stocks(strategy_name, selection_date_str, score_threshold)
+                
+                # 将新选出的股票加入股票池
+                for stock in new_candidates:
+                    # 检查是否已在池中
+                    if not any(item['stock']['stock_code'] == stock['stock_code'] for item in self.buy_candidate_pool):
+                        # 计算支撑位
+                        support_level = self._calculate_support_level(stock, strategy_name, selection_date_str)
+                        support_method = self._get_support_method_for_strategy(strategy_name)
+                        
+                        self.buy_candidate_pool.append({
+                            'stock': stock,
+                            'added_date': selection_date_str,
+                            'strategy_name': strategy_name,
+                            'support_level': support_level,
+                            'support_method': support_method
+                        })
+                        
+                        logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
+                                   f"支撑位={support_level:.2f}, 方法={support_method}")
+            
+            logger.info(f"选股后股票池数量: {len(self.buy_candidate_pool)}")
+            
+            # 4. 保存股票池到持久化文件
+            self._save_pool_to_file(self.buy_candidate_pool, working_date)
+            
+            # ========== 执行交易操作 ==========
+            
+            # 5. 卖出操作
             sell_signals = self._execute_sell_operations(working_date)
             
-            # 4. 买入操作
+            # 6. 买入操作
             buy_signals = self._execute_buy_operations(working_date, initial_cash, max_stocks)
             
-            # 5. 构建当日记录
+            # 7. 构建当日记录
             daily_record = {
                 "date": working_date,
                 "trading_date": working_date,
                 "status": "completed",
+                "is_first_run": is_first_run,
                 "pool_summary": {
                     "stock_count": len(self.buy_candidate_pool) + len(self.portfolio)
                 },
                 "pool_stocks": [
                     {
-                        "code": stock['stock_code'],
-                        "name": stock['stock_name'],
-                        "score": stock['score'],
-                        "days": stock.get('tracking_days', 1),
+                        "code": candidate['stock']['stock_code'],
+                        "name": candidate['stock']['stock_name'],
+                        "score": candidate['stock'].get('score', 0),
+                        "days": (datetime.datetime.strptime(working_date, '%Y-%m-%d') - 
+                                datetime.datetime.strptime(candidate.get('added_date', working_date), '%Y-%m-%d')).days + 1,
+                        "support_level": candidate.get('support_level', 0),
+                        "support_method": candidate.get('support_method', ''),
+                        "strategy": candidate.get('strategy_name', ''),
                         "status": "candidate"
-                    } for stock in self.buy_candidate_pool
+                    } for candidate in self.buy_candidate_pool
                 ] + [
                     {
                         "code": code,
                         "name": pos['stock_name'],
-                        "score": 0,  # 持仓股票不显示评分
+                        "score": 0,
                         "days": pos.get('holding_days', 0),
+                        "support_level": 0,
+                        "support_method": "",
+                        "strategy": "",
                         "status": "holding"
                     } for code, pos in self.portfolio.items()
                 ],
@@ -692,16 +1319,16 @@ class StrategyRunner:
                 "portfolio": self.portfolio
             }
             
-            # 6. 保存当日记录
+            # 8. 保存当日记录
             records_file = self.running_dir / f"daily_{working_date}.json"
             self._save_daily_record(working_date, daily_record, str(records_file))
             
-            # 7. 保存信号
+            # 9. 保存信号
             signals = sell_signals + buy_signals
             self.signals.extend(signals)
             self._save_signals(self.signals, str(signals_file))
             
-            # 8. 保存持仓信息
+            # 10. 保存持仓信息
             self._save_portfolio(self.portfolio, str(portfolio_file))
             
             logger.info(f"策略运行完成: {working_date}")
@@ -710,6 +1337,8 @@ class StrategyRunner:
                 "message": "策略运行完成",
                 "data": {
                     "run_date": working_date,
+                    "is_first_run": is_first_run,
+                    "pool_count": len(self.buy_candidate_pool),
                     "total_signals": len(signals),
                     "buy_signals": len(buy_signals),
                     "sell_signals": len(sell_signals),
@@ -725,6 +1354,8 @@ class StrategyRunner:
         
         except Exception as e:
             logger.error(f"策略运行失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {"status": "failed", "message": str(e)}
         finally:
             _strategy_run_lock.release()

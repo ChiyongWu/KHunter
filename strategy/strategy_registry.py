@@ -140,9 +140,8 @@ class StrategyRegistry:
         自动从目录加载策略
         导入所有非 _ 开头的 .py 文件
         """
-        # 如果已经有策略注册，跳过自动注册
-        if self.strategies:
-            return
+        # 注意：移除了"如果已经有策略注册，跳过自动注册"的检查
+        # 这样可以确保即使registry已经初始化过，仍然可以重新注册策略
         
         strategy_path = Path(strategy_dir)
         if not strategy_path.exists():
@@ -191,6 +190,8 @@ class StrategyRegistry:
                         
             except Exception as e:
                 print(f"  [ERROR] 加载 {module_name} 失败: {e}")
+                import traceback
+                traceback.print_exc()
     
     def run_strategy(self, strategy_name, stock_data_dict):
         """

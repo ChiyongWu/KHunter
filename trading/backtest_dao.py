@@ -658,8 +658,11 @@ class BacktestDAO:
                     result_id, stock_code, stock_name, selection_date,
                     buy_date, buy_price, buy_amount, quantity,
                     sell_date, sell_price, sell_type, return_rate,
-                    profit_loss, hold_days, support_level, trade_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    profit_loss, hold_days, support_level, trade_type,
+                    buy_commission, buy_transfer_fee,
+                    sell_commission, sell_transfer_fee, sell_stamp_tax,
+                    total_cost, net_profit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
             params_list = []
@@ -680,6 +683,21 @@ class BacktestDAO:
                 elif sell_date is None:
                     sell_date = ''
                 
+                # 计算总成本和净盈亏
+                total_cost = 0
+                net_profit = trade.get('profit_loss', 0) or 0
+                
+                # 如果是卖出记录，计算成本
+                if sell_date:
+                    total_cost = (
+                        (trade.get('buy_commission', 0) or 0) +
+                        (trade.get('buy_transfer_fee', 0) or 0) +
+                        (trade.get('sell_commission', 0) or 0) +
+                        (trade.get('sell_transfer_fee', 0) or 0) +
+                        (trade.get('sell_stamp_tax', 0) or 0)
+                    )
+                    net_profit = (trade.get('profit_loss', 0) or 0) - total_cost
+                
                 params = (
                     trade.get('result_id', 0),
                     trade.get('stock_code', ''),
@@ -696,7 +714,15 @@ class BacktestDAO:
                     trade.get('profit_loss', 0) or 0,
                     trade.get('hold_days', 0) or 0,
                     trade.get('support_level', 0) or 0,
-                    trade.get('trade_type', 'normal') or 'normal'
+                    trade.get('trade_type', 'normal') or 'normal',
+                    # 交易成本字段
+                    trade.get('buy_commission', 0) or 0,
+                    trade.get('buy_transfer_fee', 0) or 0,
+                    trade.get('sell_commission', 0) or 0,
+                    trade.get('sell_transfer_fee', 0) or 0,
+                    trade.get('sell_stamp_tax', 0) or 0,
+                    round(total_cost, 2),
+                    round(net_profit, 2)
                 )
                 params_list.append(params)
             

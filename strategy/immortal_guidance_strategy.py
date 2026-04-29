@@ -197,10 +197,12 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             # 计算K线实体长度
             body_length = abs(today['close'] - today['open'])
             
-            # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
+            # 计算上影线比例：(最高价 - 收盘价) / 最高价
             # 避免除零错误
-            total_length = upper_shadow + body_length
-            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+            if today['high'] > 0:
+                upper_shadow_ratio = upper_shadow / today['high']
+            else:
+                upper_shadow_ratio = 0
             
             upper_shadow_50_price = (today['close'] + today['high']) / 2
 
@@ -510,10 +512,12 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             # 计算K线实体长度
             body_length = abs(today['close'] - today['open'])
             
-            # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
+            # 计算上影线比例：(最高价 - 收盘价) / 最高价
             # 避免除零错误
-            total_length = upper_shadow + body_length
-            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+            if today['high'] > 0:
+                upper_shadow_ratio = upper_shadow / today['high']
+            else:
+                upper_shadow_ratio = 0
             
             if upper_shadow_ratio < self.params['upper_shadow_ratio']:
                 continue

@@ -170,8 +170,13 @@ param_tracker = get_param_tracker("config/strategy_params.yaml")
 
 # 加载策略
 logger.info("正在加载策略...")
-registry.auto_register_from_directory("strategy")
-logger.info(f"已加载 {len(registry.strategies)} 个策略")
+try:
+    registry.auto_register_from_directory("strategy")
+    logger.info(f"已加载 {len(registry.strategies)} 个策略")
+except Exception as e:
+    logger.error(f"加载策略失败: {str(e)}")
+    import traceback
+    logger.error(traceback.format_exc())
 
 # 注册trading蓝图
 from trading.routes import trading_bp
@@ -1455,7 +1460,7 @@ def get_strategies():
                 'params': original_params  # 使用原始参数，不是转换后的
             })
         
-        return jsonify({'success': True, 'data': strategies})
+        return jsonify({'success': True, 'strategies': strategies, 'data': strategies})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -3128,8 +3133,9 @@ def get_strategy_status():
         {"success": true, "data": {"date": "2026-04-24", "status": "completed", "strategy": "海龟策略"}}
     """
     try:
+        # 策略运行器未初始化时返回空数据默认值
         if not strategy_runner:
-            return jsonify({"success": False, "error": "策略运行器未初始化"})
+            return jsonify({"success": True, "data": {"date": "", "status": "not_initialized", "strategy": ""}})
         
         # 获取当前工作日期
         working_date = strategy_runner.get_working_date()
@@ -3159,8 +3165,9 @@ def get_portfolio():
         {"success": true, "data": {"positions": {...}, "initial_cash": 1000000}}
     """
     try:
+        # 策略运行器未初始化时返回空持仓默认值
         if not strategy_runner:
-            return jsonify({"success": False, "error": "策略运行器未初始化"})
+            return jsonify({"success": True, "data": {"positions": {}, "initial_cash": 1000000}})
         
         # 获取当前工作日期
         working_date = strategy_runner.get_working_date()
@@ -3191,8 +3198,9 @@ def get_signals():
         {"success": true, "data": {"signals": [...]}}
     """
     try:
+        # 策略运行器未初始化时返回空信号默认值
         if not strategy_runner:
-            return jsonify({"success": False, "error": "策略运行器未初始化"})
+            return jsonify({"success": True, "data": {"signals": []}})
         
         # 获取当前工作日期
         working_date = strategy_runner.get_working_date()
