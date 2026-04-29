@@ -10,13 +10,6 @@ removal_strategies:
     is_enabled: true
     remark: "加入股票池后立即验证趋势"
 
-  # 连阳回调策略
-  ContinuousRisingWithVolumeStrategyV2:
-    display_name: "连阳回调策略"
-    min_hold_days: 30
-    is_enabled: true
-    remark: "加入股票池7天后验证趋势"
-
   # 阻力突破策略
   ResistanceBreakoutStrategy:
     display_name: "阻力位突破策略"
@@ -66,13 +59,6 @@ removal_strategies:
     is_enabled: true
     remark: "加入股票池7天后验证趋势"
 
-  # 趋势共振反转策略
-  TrendResonanceReversalStrategy:
-    display_name: "趋势共振反转策略"
-    min_hold_days: 30
-    is_enabled: true
-    remark: "加入股票池10天后验证趋势"
-
   # 涨停横盘策略
   LimitUpSidewaysStrategy:
     display_name: "涨停横盘策略"
@@ -93,10 +79,3 @@ removal_strategies:
     min_hold_days: 30
     is_enabled: true
     remark: "加入股票池5天后验证趋势"
-
-  # 520560策略
-  MA20MA60Strategy:
-    display_name: "520560策略"
-    min_hold_days: 30
-    is_enabled: true
-    remark: "加入股票池后立即验证趋势"

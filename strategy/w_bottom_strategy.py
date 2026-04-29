@@ -489,7 +489,7 @@ class WBottomStrategy(BaseStrategy):
         # 条件5：支撑位不破
         support_days = self.params['support_days']
         support_ratio = self.params['support_ratio'] * 100
-        criteria.append(f"5. 支撑位不破：突破颈线后{support_days}天内收盘价不低于颈线{support_ratio:.0f}%")
+        criteria.append(f"5. 支撑位不破：突破颈线后至今收盘价不低于颈线{support_ratio:.0f}%")
         
         return criteria
 
@@ -563,7 +563,7 @@ class WBottomStrategy(BaseStrategy):
         3. 条件2：W形态过滤 - 最近40个交易日内形成双底结构
         4. 条件3：颈线突破确认 - 价格突破颈线（突破101%），且成交量是前5日均量的1.5倍以上
         5. 条件4：趋势确认 - 10日均线在30日均线之上
-        6. 条件5：支撑位不破 - 突破颈线后3天内收盘价不低于颈线2%
+        6. 条件5：支撑位不破 - 突破颈线后至今收盘价不低于颈线2%
         
         :param df: 股票数据DataFrame
         :param stock_name: 股票名称，用于过滤ST/退市股票
@@ -632,7 +632,7 @@ class WBottomStrategy(BaseStrategy):
             if not trend_ok:
                 return []
 
-            # 条件5：支撑位不破 - 突破颈线后3天内收盘价不低于颈线2%
+            # 条件5：支撑位不破 - 突破颈线后至今收盘价不低于颈线2%
             support_ok = self._check_fake_w_bottom(df_with_indicators, l1_idx, neckline, break_idx)
             if not support_ok:
                 return []

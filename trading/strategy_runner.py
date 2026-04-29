@@ -211,8 +211,10 @@ class StrategyRunner:
             
             config_map = {}
             strategies = yaml_config.get('removal_strategies', {})
+            strategy_count = 0  # 统计实际的策略数量
             for name, cfg in strategies.items():
                 if cfg.get('is_enabled', True):
+                    strategy_count += 1
                     config_map[name] = {
                         'min_hold_days': cfg.get('min_hold_days', 2),
                         'display_name': cfg.get('display_name', '')
@@ -223,7 +225,7 @@ class StrategyRunner:
                         if display_name.endswith('策略'):
                             config_map[display_name[:-2]] = config_map[name]
             
-            logger.info(f"加载股票池移除策略: {len(config_map)} 个策略")
+            logger.info(f"加载股票池移除策略: {strategy_count} 个策略")
             return config_map
         except Exception as e:
             logger.warning(f"加载股票池移除配置失败: {str(e)}")
@@ -669,15 +671,26 @@ class StrategyRunner:
                 remaining.append(candidate)
                 continue
             
-            df_to_date = df[df['date'] <= prev_date_str].copy()
-            if len(df_to_date) < 20:
-                remaining.append(candidate)
-                continue
+            # 判断是否为当日新加入的股票
+            is_today_added = (added_date == current_date) if added_date else False
             
-            if df_to_date['date'].iloc[0] > df_to_date['date'].iloc[-1]:
-                df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+            if is_today_added:
+                # 当日新加入的股票：使用当日收盘价进行支撑位判断
+                df_to_date = df[df['date'] <= current_date].copy()
+                price_for_check = df_to_date.iloc[0]['close'] if len(df_to_date) > 0 else 0
+            else:
+                # 非当日加入的股票：使用前一日收盘价
+                df_to_date = df[df['date'] <= prev_date_str].copy()
+                if len(df_to_date) < 20:
+                    remaining.append(candidate)
+                    continue
+                price_for_check = df_to_date.iloc[-1]['close']
             
-            prev_close = df_to_date.iloc[-1]['close']
+            # 用于趋势判断的数据（需要至少20天）
+            trend_df = df[df['date'] <= current_date].copy()
+            
+            if trend_df['date'].iloc[0] > trend_df['date'].iloc[-1]:
+                trend_df = trend_df.iloc[::-1].reset_index(drop=True)
             
             # 移除判断
             removal_reasons = []
@@ -685,26 +698,26 @@ class StrategyRunner:
             
             # 条件1: 破支撑位移除
             support_level = candidate.get('support_level', 0.0)
-            if support_level > 0 and prev_close > 0:
-                if prev_close < support_level * 0.98:
+            if support_level > 0 and price_for_check > 0:
+                if price_for_check < support_level * 0.98:
                     should_remove = True
-                    drop_pct = (prev_close - support_level) / support_level * 100
+                    drop_pct = (price_for_check - support_level) / support_level * 100
                     removal_reasons.append(f"跌破支撑位{support_level:.2f}{drop_pct:.1f}%")
             
-            # 条件2: 趋势验证移除
-            if hold_days >= min_hold_days:
-                ma10 = df_to_date['close'].tail(10).mean()
-                prices = df_to_date['close'].tail(20).values
+            # 条件2: 趋势验证移除（需要至少20天数据）
+            if hold_days >= min_hold_days and len(trend_df) >= 20:
+                ma10 = trend_df['close'].tail(10).mean()
+                prices = trend_df['close'].tail(20).values
                 x = np.arange(len(prices))
                 slope, _, r_value, _, _ = stats.linregress(x, prices)
                 r_squared = r_value ** 2
                 
-                trend_ok = (prev_close >= ma10 and slope > 0 and r_squared >= 0.3)
+                trend_ok = (price_for_check >= ma10 and slope > 0 and r_squared >= 0.3)
                 
                 if not trend_ok:
                     should_remove = True
-                    if prev_close < ma10:
-                        removal_reasons.append(f"收盘价{prev_close:.2f}<MA10{ma10:.2f}")
+                    if price_for_check < ma10:
+                        removal_reasons.append(f"收盘价{price_for_check:.2f}<MA10{ma10:.2f}")
                     if slope <= 0:
                         removal_reasons.append(f"斜率{slope:.4f}<=0")
                     if r_squared < 0.3:
@@ -713,7 +726,7 @@ class StrategyRunner:
             if should_remove:
                 removed.append(candidate)
                 logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
-                           f"收盘={prev_close:.2f}, 策略={strategy_name}, 持{hold_days}日, "
+                           f"收盘={price_for_check:.2f}, 策略={strategy_name}, 持{hold_days}日, "
                            f"原因: {'; '.join(removal_reasons)}")
             else:
                 remaining.append(candidate)
@@ -767,8 +780,39 @@ class StrategyRunner:
                 'check_interval': 60
             }
     
+    def _has_kline_data(self, date: str) -> bool:
+        """检查指定日期是否有K线数据
+        
+        Args:
+            date: 日期字符串 (YYYY-MM-DD)
+            
+        Returns:
+            True表示有K线数据，False表示没有
+        """
+        try:
+            # 从数据库检查是否有当日K线数据
+            from utils.db_manager import DBManager
+            db_manager = DBManager()
+            
+            # 查询是否有当日的股票数据
+            sql = f"""
+                SELECT COUNT(*) FROM stock_kline 
+                WHERE date = '{date}' 
+                LIMIT 1
+            """
+            result = db_manager.query(sql)
+            
+            return result[0]['COUNT(*)'] > 0 if result else False
+        except Exception as e:
+            logger.warning(f"检查K线数据失败: {str(e)}")
+            return False
+    
     def get_working_date(self) -> str:
         """获取当前工作日期
+        
+        判断逻辑：
+        - 当日有K线数据，工作日即为当日
+        - 当日没有K线数据（比如周末、盘中交易时间），则为前一个交易日
         
         Returns:
             工作日期字符串 (YYYY-MM-DD)
@@ -776,23 +820,22 @@ class StrategyRunner:
         today = datetime.datetime.now()
         today_str = today.strftime('%Y-%m-%d')
         
-        # 检查是否为交易日
-        if not is_trading_day(today_str):
-            # 非交易日，返回最近的交易日
-            working_date = get_previous_trading_day(today_str)
-            logger.info(f"今日非交易日，使用前一交易日: {working_date}")
-            return working_date
+        # 检查当日是否有K线数据
+        if self._has_kline_data(today_str):
+            # 有K线数据，使用今日
+            logger.info(f"当日有K线数据，使用今日作为工作日期: {today_str}")
+            return today_str
         
-        # 检查是否已收盘
-        if not is_market_closed():
-            # 盘中时间，返回昨日
-            working_date = get_previous_trading_day(today_str)
-            logger.info(f"当前为盘中时间，使用前一交易日: {working_date}")
-            return working_date
-        
-        # 已收盘，使用今日
-        logger.info(f"使用今日作为工作日期: {today_str}")
-        return today_str
+        # 没有K线数据，返回前一交易日
+        working_date = get_previous_trading_day(today_str)
+        logger.info(f"当日没有K线数据，使用前一交易日: {working_date}")
+        return working_date
+    
+    def _get_working_date_for_test(self, date_str: str) -> str:
+        """测试用方法：获取指定日期的工作日期"""
+        if self._has_kline_data(date_str):
+            return date_str
+        return get_previous_trading_day(date_str)
     
     def check_if_processed(self, date: str) -> bool:
         """检查指定日期是否已处理
@@ -970,19 +1013,44 @@ class StrategyRunner:
                 buy_price = position['buy_price']
                 profit_rate = (current_price - buy_price) / buy_price
                 
+                # 记录择时信号详情
+                stock_name = position['stock_name']
+                logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
+                           f"持仓: {position['quantity']}股 | "
+                           f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
+                           f"收益率: {profit_rate*100:.2f}% | "
+                           f"择时卖出: {timing_result.is_sell} | "
+                           f"信号: {timing_result.message}")
+                
                 # 生成卖出信号
                 if timing_result.is_sell or profit_rate >= self.take_profit_threshold or profit_rate <= self.stop_loss_threshold:
+                    # 确定卖出原因
+                    if timing_result.is_sell:
+                        reason = timing_result.message
+                        signal_type = 'strategy_sell'
+                    elif profit_rate >= self.take_profit_threshold:
+                        reason = f'止盈 (收益率: {profit_rate*100:.2f}%)'
+                        signal_type = 'take_profit'
+                    else:
+                        reason = f'止损 (收益率: {profit_rate*100:.2f}%)'
+                        signal_type = 'stop_loss'
+                    
+                    # 记录卖出决策
+                    logger.info(f"【卖出决策】{trade_date} {stock_code} {stock_name} | "
+                               f"数量: {position['quantity']}股 | 价格: ¥{current_price:.2f} | "
+                               f"金额: ¥{current_price * position['quantity']:.2f} | "
+                               f"原因: {reason}")
+                    
                     signal = {
                         'id': f"sell_{stock_code}_{trade_date}",
                         'date': trade_date,
                         'stock_code': stock_code,
-                        'stock_name': position['stock_name'],
-                        'signal_type': 'sell',
+                        'stock_name': stock_name,
+                        'signal_type': signal_type,
                         'quantity': position['quantity'],
                         'price': current_price,
                         'amount': current_price * position['quantity'],
-                        'reason': timing_result.message if timing_result.is_sell else 
-                                 '止盈' if profit_rate >= self.take_profit_threshold else '止损',
+                        'reason': reason,
                         'strategy_name': 'N/A',
                         'timing_strategy': self.timing_strategy_name,
                         'executed': False,
@@ -995,9 +1063,11 @@ class StrategyRunner:
             for stock_code in stocks_to_remove:
                 del self.portfolio[stock_code]
             
-            logger.info(f"执行卖出操作，生成 {len(sell_signals)} 个卖出信号")
+            logger.info(f"【卖出汇总】{trade_date} 执行卖出操作，生成 {len(sell_signals)} 个卖出信号")
         except Exception as e:
             logger.error(f"执行卖出操作失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
         
         return sell_signals
     
@@ -1018,33 +1088,39 @@ class StrategyRunner:
             # 检查可用资金和持仓数量
             current_cash = initial_cash - sum(p['quantity'] * p['buy_price'] for p in self.portfolio.values())
             if current_cash <= 0:
-                logger.info("可用资金不足，跳过买入操作")
+                logger.info(f"【买入检查】{trade_date} 可用资金不足 (¥{current_cash:.2f})，跳过买入操作")
                 return buy_signals
             
             if len(self.portfolio) >= max_stocks:
-                logger.info(f"持仓数量已达上限 {max_stocks}，跳过买入操作")
+                logger.info(f"【买入检查】{trade_date} 持仓数量已达上限 ({len(self.portfolio)}/{max_stocks})，跳过买入操作")
                 return buy_signals
+            
+            logger.info(f"【买入检查】{trade_date} 开始检查买入机会 | 可用资金: ¥{current_cash:.2f} | "
+                       f"持仓: {len(self.portfolio)}/{max_stocks} | 候选股票: {len(self.buy_candidate_pool)}")
             
             # 遍历可买股票池
             for candidate in self.buy_candidate_pool:
                 # 检查是否已达到最大持仓数
                 if len(self.portfolio) >= max_stocks:
+                    logger.info(f"【买入检查】{trade_date} 已达最大持仓数，停止检查")
                     break
                 
                 # 适配新的股票池结构
                 stock_info = candidate.get('stock', candidate)
                 stock_code = stock_info['stock_code']
                 stock_name = stock_info['stock_name']
+                score = stock_info.get('score', 0)
                 
                 # 获取股票数据（优先从缓存获取）
                 df = self.stock_filtered_cache.get(stock_code)
                 if df is None:
-                    logger.warning(f"获取股票数据失败 {stock_code}，跳过买入检查")
+                    logger.debug(f"【买入检查】{trade_date} {stock_code} {stock_name} 获取股票数据失败，跳过")
                     continue
                 
                 # 日期切片
                 df_to_date = df[df['date'] <= trade_date].copy()
                 if df_to_date.empty:
+                    logger.debug(f"【买入检查】{trade_date} {stock_code} {stock_name} 无有效数据，跳过")
                     continue
                 
                 # 反转为倒序
@@ -1057,15 +1133,37 @@ class StrategyRunner:
                 # 调用择时策略判断
                 timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False)
                 
+                # 记录择时信号详情
+                current_price = df_to_date.iloc[-1]['close']
+                logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
+                           f"评分: {score:.1f} | 现价: ¥{current_price:.2f} | "
+                           f"支撑位: ¥{candidate.get('support_level', 0):.2f} | "
+                           f"买入信号: {timing_result.is_buy} | "
+                           f"加仓信号: {timing_result.trade_type == 'add'} | "
+                           f"信号强度: {timing_result.signal_strength:.2f} | "
+                           f"信息: {timing_result.message}")
+                
                 # 生成买入信号
                 if timing_result.is_buy:
-                    # 计算买入数量
-                    current_price = df_to_date.iloc[-1]['close']
-                    buy_amount = min(current_cash * 0.2, 100000)
-                    buy_quantity = int(buy_amount / current_price / 100) * 100
+                    # 使用择时策略返回的买入数量，如果为0则使用默认计算
+                    if timing_result.buy_quantity > 0:
+                        buy_quantity = timing_result.buy_quantity
+                        quantity_source = '择时策略'
+                    else:
+                        # 默认计算买入数量
+                        buy_amount = min(current_cash * 0.2, 100000)
+                        buy_quantity = int(buy_amount / current_price / 100) * 100
+                        quantity_source = '默认公式'
                     
                     if buy_quantity <= 0:
+                        logger.debug(f"【买入检查】{trade_date} {stock_code} {stock_name} 买入数量不足100股，跳过")
                         continue
+                    
+                    # 记录买入决策
+                    logger.info(f"【买入决策】{trade_date} {stock_code} {stock_name} | "
+                               f"数量: {buy_quantity}股 ({quantity_source}) | 价格: ¥{current_price:.2f} | "
+                               f"金额: ¥{current_price * buy_quantity:.2f} | "
+                               f"信号: {timing_result.message}")
                     
                     signal = {
                         'id': f"buy_{stock_code}_{trade_date}",
@@ -1103,8 +1201,17 @@ class StrategyRunner:
                     
                     # 更新可用资金
                     current_cash -= current_price * buy_quantity
+                
+                # 记录加仓信号
+                elif timing_result.trade_type == 'add' and existing_pos:
+                    add_quantity = timing_result.buy_quantity if timing_result.buy_quantity > 0 else 100
+                    logger.info(f"【加仓信号】{trade_date} {stock_code} {stock_name} | "
+                               f"加仓数量: {add_quantity}股 | 价格: ¥{current_price:.2f} | "
+                               f"金额: ¥{current_price * add_quantity:.2f} | "
+                               f"加仓次数: {timing_result.add_count} | "
+                               f"信号: {timing_result.message}")
             
-            logger.info(f"执行买入操作，生成 {len(buy_signals)} 个买入信号")
+            logger.info(f"【买入汇总】{trade_date} 执行买入操作，生成 {len(buy_signals)} 个买入信号")
         except Exception as e:
             logger.error(f"执行买入操作失败: {str(e)}")
             import traceback
@@ -1196,15 +1303,17 @@ class StrategyRunner:
             # 1. 尝试从持久化文件加载股票池
             loaded_pool, is_first_run = self._load_pool_from_file()
             
+            # 预加载股票数据（无论是否首次运行，缓存为空时都需要预加载）
+            if not self.stock_filtered_cache:
+                strategy_name = strategy_names[0] if strategy_names else 'default'
+                logger.info(f"股票数据缓存为空，开始预加载...")
+                self._preload_stock_data(working_date, strategy_name)
+            
             if is_first_run:
-                # 首次运行：从数据库预加载股票数据，执行选股初始化股票池
+                # 首次运行：执行选股初始化股票池
                 logger.info("首次运行，初始化股票池...")
                 
-                # 使用第一个策略进行选股（多策略可扩展）
                 strategy_name = strategy_names[0] if strategy_names else 'default'
-                
-                # 预加载股票数据
-                self._preload_stock_data(working_date, strategy_name)
                 
                 # 执行选股和评分
                 candidate_stocks = self._select_and_score_stocks(strategy_name, working_date, score_threshold)
@@ -1235,13 +1344,8 @@ class StrategyRunner:
             if removed:
                 logger.info(f"股票池移除 {len(removed)} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
             
-            # 3. 继续选股，加入新股票（与回测一致：使用前一天数据选股）
-            from utils.trade_date_utils import get_previous_trading_day
-            selection_date = get_previous_trading_day(working_date)
-            if isinstance(selection_date, str):
-                selection_date_str = selection_date
-            else:
-                selection_date_str = selection_date.strftime('%Y-%m-%d') if hasattr(selection_date, 'strftime') else str(selection_date)
+            # 3. 继续选股，加入新股票（直接使用工作日期进行选股）
+            selection_date_str = working_date
             
             logger.info(f"执行选股日期: {selection_date_str}")
             

@@ -86,6 +86,14 @@ class BacktestScoreCalculator:
         """清空评分缓存"""
         self.date_cache.clear()
     
+    def is_tushare_available(self) -> bool:
+        """检查Tushare数据源是否可用"""
+        try:
+            token = self.moneyflow_scorer._load_tushare_token()
+            return bool(token)
+        except Exception:
+            return False
+    
     def _is_cache_valid(self, date: str) -> bool:
         """检查缓存是否有效"""
         return date in self.date_cache
@@ -446,11 +454,47 @@ class BacktestScoreCalculator:
         scored_stocks = []
         veto_count = 0
         
+        # 检查Tushare数据源是否可用
+        tushare_available = self.is_tushare_available()
+        if not tushare_available:
+            logger.info("Tushare数据源不可用，使用简化评分模式")
+        
         for stock in stocks:
             stock_code = stock['stock_code']
             hit_strategies = [strategy_name]
             
             try:
+                if not tushare_available:
+                    # Tushare不可用时使用简化评分
+                    # 计算策略权重作为技术面评分
+                    strategy_weight = 0
+                    for s in hit_strategies:
+                        weight = STRATEGY_WEIGHTS.get(s, 0)
+                        if weight == 0 and not s.endswith('策略'):
+                            name_with_suffix = s + '策略'
+                            weight = STRATEGY_WEIGHTS.get(name_with_suffix, 0)
+                        if weight == 0 and s.endswith('策略'):
+                            name_without_suffix = s[:-2]
+                            weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
+                        strategy_weight += weight
+                    
+                    # 综合评分 = 技术面评分（策略权重）
+                    stock['score'] = strategy_weight
+                    stock['technical_score'] = strategy_weight
+                    # 其他维度评分为0（没有tushare数据）
+                    stock['moneyflow_score'] = 0
+                    stock['fundamental_score'] = 0
+                    stock['sector_score'] = 0
+                    stock['event_score'] = 0
+                    stock['veto_flag'] = False
+                    stock['veto_reason'] = ''
+                    stock['veto_dimension'] = ''
+                    stock['score_level'] = '中性'
+                    stock['strategy_details'] = [{'name': s, 'weight': STRATEGY_WEIGHTS.get(s, 0) if STRATEGY_WEIGHTS.get(s, 0) != 0 else (STRATEGY_WEIGHTS.get(s + '策略', 0) if not s.endswith('策略') else STRATEGY_WEIGHTS.get(s[:-2], 0))} for s in hit_strategies]
+                    stock['total_strategy_weight'] = strategy_weight
+                    scored_stocks.append(stock)
+                    continue
+                
                 score_obj, veto = self.calculate_score(
                     stock_code, score_date, hit_strategies
                 )

@@ -177,11 +177,15 @@ class MorningStarStrategy(BaseStrategy):
                 key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
                 
                 # 构建选股信号
+                market_cap_val = latest.get('market_cap')
+                if market_cap_val is None:
+                    market_cap_val = latest['close'] * 2e8  # 默认市值计算
+                
                 signal_info = {
                     'date': latest_date,
                     'close': round(latest['close'], 2),
                     'volume_ratio': round(latest.get('volume_ratio', 1.0), 2),
-                    'market_cap': round(latest.get('market_cap', 0) / 1e8, 2),
+                    'market_cap': round(market_cap_val / 1e8, 2),
                     'reasons': ['启明星形态'],
                     'key_date': key_date_str,
                     'key_date_type': '启明星确认日',

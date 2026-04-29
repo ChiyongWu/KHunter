@@ -12,6 +12,11 @@
 # - key_close: 使用关键日收盘价作为支撑位
 
 strategies:
+  # 仙人指路策略
+  ImmortalGuidanceStrategy:
+    support_method: key_close_5
+    description: 仙人指路形态，使用关键日收盘价下跌5%作为支撑位
+
   # 涨停回马枪策略
   LimitUpPullbackStrategy:
     support_method: key_close_5
@@ -42,11 +47,6 @@ strategies:
     support_method: key_close_5
     description: 上升趋势加速拐点，使用关键日收盘价下跌5%作为支撑位
 
-  # 趋势共振反转策略
-  TrendResonanceReversalStrategy:
-    support_method: ma20
-    description: 多指标共振底部反转，使用20日均线作为支撑位
-
   # W底策略
   WBottomStrategy:
     support_method: ma20
@@ -66,16 +66,6 @@ strategies:
   BottomTrendInflectionStrategy:
     support_method: ma20
     description: 深度下跌后底部反转，使用20日均线作为支撑位
-
-  # 连阳回调策略
-  ContinuousRisingWithVolumeStrategyV2:
-    support_method: key_close_5
-    description: 连阳后倍量突破，缩量调整不跌破关键日收盘价以下5%
-
-  # 520560策略
-  MA20MA60Strategy:
-    support_method: ma20
-    description: 均线金叉+量能共振策略，使用20日均线作为支撑位
 
 # 默认支撑位计算方法（当策略未配置时使用）
 default_support_method: ma20

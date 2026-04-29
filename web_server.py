@@ -983,8 +983,13 @@ def run_selection():
                 # 优化：直接从strategies_to_run中获取策略，避免逐个跳过
                 strategies_to_execute = []
                 if strategies_to_run:
+                    # 去重处理：保持顺序的同时去除重复策略
+                    unique_strategies = list(dict.fromkeys(strategies_to_run))
+                    if len(unique_strategies) < len(strategies_to_run):
+                        func_logger.warning(f"检测到重复策略，已去重: {strategies_to_run} -> {unique_strategies}")
+                    
                     # 只获取指定的策略
-                    for strategy_name in strategies_to_run:
+                    for strategy_name in unique_strategies:
                         if strategy_name in registry.strategies:
                             # 使用 get_strategy 获取最新参数的策略对象
                             strategy = registry.get_strategy(strategy_name)
