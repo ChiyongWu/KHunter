@@ -23,6 +23,8 @@ from trading.backtest_scorer import BacktestScoreCalculator
 
 from trading.timing_strategies import TimingStrategyFactory
 from utils.strategy_name_mapper import get_english_name
+from trading.strategy_kelly_loader import KellyCalculator
+from utils.system_utils import sleep_preventer
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -124,6 +126,14 @@ class BacktestEngine:
         # 加载策略支撑位方法配置（从 config/support_methods.yaml）
         self._support_methods_config = self._load_support_methods_config()
         
+        # 初始化技术指标计算模块
+        from trading.technical_indicators import TechnicalIndicators
+        self.technical_indicators = TechnicalIndicators()
+        
+        # 初始化预加载管理器
+        from trading.preload_manager import PreloadManager
+        self.preload_manager = PreloadManager(self)
+        
     def run_backtest(self, strategy_name: str, config: Dict) -> Dict:
         """运行回测
         
@@ -142,6 +152,9 @@ class BacktestEngine:
         
         try:
             logger.info(f"开始回测策略: {strategy_name}")
+            
+            # 启动防止系统睡眠
+            sleep_preventer.start()
             
             # 清空上次的缓存数据
             self.stock_data_cache.clear()
@@ -215,8 +228,11 @@ class BacktestEngine:
             # 5. 预加载所有股票数据到内存（根据策略参数动态计算历史数据天数）
             self._preload_stock_data(start_date, end_date, strategy_name)
             
-            # 4. 初始化回测环境
-            initial_capital = config.get('initial_capital', 1000000)
+            # 6. 执行初始股票池预加载（在正式回测前，预加载前N个交易日的可选股票）
+            self._execute_stock_pool_preload(strategy_name, start_date, config)
+            
+            # 7. 初始化回测环境
+            initial_capital = config.get('initial_capital', 300000)
             current_capital = initial_capital
             positions = []  # 持仓列表
             trades = []     # 交易记录
@@ -309,7 +325,7 @@ class BacktestEngine:
                     # 检查是否已经在池中
                     if not any(item['stock']['stock_code'] == stock['stock_code'] for item in self.buy_candidate_pool):
                         # 计算支撑位（加入时直接计算并保存）
-                        support_level = self._calculate_support_level(stock, strategy_name, selection_date)
+                        support_level = self._calculate_support_level(stock, selection_date, strategy_name)
                         # 获取支撑位计算方法
                         support_method = self._get_support_method_for_strategy(strategy_name)
                         
@@ -337,9 +353,9 @@ class BacktestEngine:
                         added_date = candidate['added_date']
                         support_level = candidate.get('support_level', 0.0)
                         support_method = candidate.get('support_method', 'unknown')
-                        # 显示支撑位信息
+                        score = stock.get('score', 'N/A')
                         support_info = f"，支撑位={support_level:.2f}({support_method})" if support_level > 0 else "，支撑位=未计算"
-                        logger.info(f"  {i+1}. {stock['stock_code']} {stock['stock_name']}: 加入日期={added_date}，评分={stock['score']}{support_info}")
+                        logger.info(f"  {i+1}. {stock['stock_code']} {stock['stock_name']}: 加入日期={added_date}，评分={score}{support_info}")
                 remaining_candidates = []
                 
                 # 记录当日已买入的股票代码
@@ -448,13 +464,45 @@ class BacktestEngine:
                     buy_price = self._get_stock_price(stock_code, current_date, 'open')
                     logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格: {buy_price}")
                     
-                    # 计算买入数量：优先使用策略返回的数量，否则根据配置的买入金额计算
-                    if result and result.buy_quantity > 0:
-                        quantity = result.buy_quantity
+                    # 获取交易类型（首次建仓或加仓）
+                    trade_type = result.trade_type if result else 'new'
+                    
+                    # 计算买入数量
+                    if trade_type == 'add':
+                        # 加仓：优先使用策略返回的数量，否则使用配置的买入金额
+                        if result and result.buy_quantity > 0:
+                            quantity = result.buy_quantity
+                        else:
+                            config_buy_amount = config.get('buy_amount', 100000)
+                            quantity = int(config_buy_amount / buy_price) // 100 * 100
                     else:
-                        # 策略未返回有效数量，用配置的买入金额计算
-                        config_buy_amount = config.get('buy_amount', 100000)
-                        quantity = int(config_buy_amount / buy_price) // 100 * 100
+                        # 首次建仓：使用凯莉公式计算（获取完整参数）
+                        strategy_name = candidate.get('strategy_name', 'N/A')
+
+                        # 计算总资产（可用资金 + 持仓市值）
+                        total_assets = current_capital
+                        for position in positions:
+                            position_price = self._get_stock_price(position['stock_code'], current_date, 'close')
+                            if position_price is None or position_price <= 0:
+                                position_price = position['buy_price']
+                            total_assets += position['quantity'] * position_price
+
+                        kelly_result = KellyCalculator.calculate_position_amount_with_params(
+                            total_capital=total_assets,
+                            available_cash=current_capital,
+                            strategy_name=strategy_name
+                        )
+                        position_amount = kelly_result['amount']
+                        quantity = KellyCalculator.calculate_buy_quantity(
+                            position_amount=position_amount,
+                            price=buy_price
+                        )
+                        # 记录凯利公式参数到日志
+                        logger.info(f"【凯利公式计算】{current_date} {stock_code} {stock['stock_name']}: "
+                                   f"策略={strategy_name}, 胜率={kelly_result['win_rate']:.2f}, 盈亏比={kelly_result['profit_loss_ratio']:.2f}, "
+                                   f"凯利比例={kelly_result['kelly_ratio']:.4f}, 总资产={total_assets:.2f}, "
+                                   f"可用资金={current_capital:.2f}, 持仓市值={total_assets - current_capital:.2f}, "
+                                   f"计算金额={position_amount:.2f}")
                     
                     if quantity <= 0:
                         logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 计算买入数量为0")
@@ -503,7 +551,12 @@ class BacktestEngine:
                             'buy_amount': buy_amount,
                             'base_position_amount': base_position_amount,  # 首次建仓金额（用于加仓计算）
                             'buy_commission': buy_record['buy_commission'],
-                            'buy_transfer_fee': buy_record['buy_transfer_fee']
+                            'buy_transfer_fee': buy_record['buy_transfer_fee'],
+                            # 凯利公式参数
+                            'kelly_win_rate': kelly_result.get('win_rate') if 'kelly_result' in locals() else None,
+                            'kelly_profit_loss_ratio': kelly_result.get('profit_loss_ratio') if 'kelly_result' in locals() else None,
+                            'kelly_ratio': kelly_result.get('kelly_ratio') if 'kelly_result' in locals() else None,
+                            'kelly_strategy_name': kelly_result.get('strategy_name') if 'kelly_result' in locals() else None
                         })
                         buy_cost = buy_record['buy_commission'] + buy_record['buy_transfer_fee']
                         logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 佣金={buy_record['buy_commission']:.2f}, 过户费={buy_record['buy_transfer_fee']:.2f}, 首次建仓={base_position_amount}")
@@ -598,8 +651,108 @@ class BacktestEngine:
             logger.error(f"回测失败: {str(e)}")
             raise
         finally:
+            # 停止防止系统睡眠
+            sleep_preventer.stop()
+            
             # 释放回测锁，允许下一个任务执行
             _backtest_lock.release()
+    
+    def _execute_stock_pool_preload(self, strategy_name: str, start_date: str, config: Dict):
+        """执行初始股票池预加载
+        
+        在正式回测前，预加载前N个交易日的可选股票作为初始股票池，
+        确保回测第一天就能有可交易的股票。
+        
+        Args:
+            strategy_name: 选股策略名称（前端选择的策略）
+            start_date: 回测开始日期
+            config: 回测配置参数
+        """
+        # 获取预加载配置
+        preload_enabled = config.get('preload_enabled', True)
+        preload_days = config.get('preload_days', 5)
+        exclude_recent_days = config.get('preload_exclude_recent_days', 0)
+        
+        if not preload_enabled:
+            logger.info("预加载功能已禁用")
+            return
+        
+        logger.info(f"\n-------------------- 开始执行初始股票池预加载 --------------------")
+        logger.info(f"策略: {strategy_name}, 回测开始日期: {start_date}")
+        logger.info(f"预加载配置: preload_days={preload_days}, exclude_recent_days={exclude_recent_days}")
+        
+        try:
+            # 设置预加载配置
+            self.preload_manager.set_config(
+                enabled=preload_enabled,
+                preload_days=preload_days,
+                exclude_recent_days=exclude_recent_days
+            )
+            
+            # 执行预加载
+            preloaded_stocks = self.preload_manager.execute_preload(strategy_name, start_date)
+            
+            # 获取评分阈值（与正常选股一致）
+            score_threshold = config.get('score_threshold', 60)
+            logger.info(f"预加载评分阈值: {score_threshold}")
+            
+            # 统计信息
+            total_preload = len(preloaded_stocks)
+            filtered_by_veto = 0
+            filtered_by_score = 0
+            
+            # 将预加载的股票添加到可买股票池（格式与正常选股一致，需通过评分过滤）
+            for stock in preloaded_stocks:
+                # 评分过滤：与正常选股一致
+                if stock.get('veto_flag', False):
+                    logger.debug(f"预加载股票 {stock['stock_code']} 被否决标志过滤，veto_flag={stock.get('veto_flag')}")
+                    filtered_by_veto += 1
+                    continue
+                    
+                if stock.get('score', 0) < score_threshold:
+                    logger.debug(f"预加载股票 {stock['stock_code']} 评分不达标，score={stock.get('score', 0)} < {score_threshold}")
+                    filtered_by_score += 1
+                    continue
+                
+                stock_info = {
+                    'stock_code': stock['stock_code'],
+                    'stock_name': stock['stock_name'],
+                    'score': stock.get('score', 0),
+                    'veto_flag': stock.get('veto_flag', False),
+                    'reason': stock.get('reason', '')
+                }
+                
+                # 计算支撑位
+                support_level = self._calculate_support_level(stock_info, stock['preload_date'], stock['source_strategy'])
+                support_method = self._get_support_method_for_strategy(stock['source_strategy'])
+                
+                self.buy_candidate_pool.append({
+                    'stock': stock_info,
+                    'added_date': stock['preload_date'],
+                    'strategy_name': stock['source_strategy'],
+                    'support_level': support_level,
+                    'support_method': support_method
+                })
+                
+                if support_level > 0:
+                    logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
+                               f"支撑位={support_level:.2f}, 方法={support_method}, 评分={stock.get('score', 0)}")
+                else:
+                    logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
+                               f"支撑位计算失败, 评分={stock.get('score', 0)}")
+            
+            logger.info(f"预加载完成: 总数={total_preload}, 因否决过滤={filtered_by_veto}, 因评分过滤={filtered_by_score}, 最终={len(self.buy_candidate_pool)} 只股票")
+            
+            # 打印前5只股票作为示例
+            if self.buy_candidate_pool:
+                sample_stocks = self.buy_candidate_pool[:5]
+                logger.info(f"初始股票池示例: {[(s['stock']['stock_code'], s['stock']['stock_name']) for s in sample_stocks]}")
+                
+        except Exception as e:
+            logger.error(f"初始股票池预加载失败: {str(e)}")
+            # 预加载失败不影响回测继续，使用空股票池开始回测
+        
+        logger.info("-------------------- 初始股票池预加载结束 --------------------\n")
     
     def _load_trading_calendar(self, start_date: str, end_date: str):
         """加载交易日历数据（扩大范围，覆盖前一交易日查找需求）
@@ -871,7 +1024,7 @@ class BacktestEngine:
         # 未找到配置，返回默认方法
         return 'ma20'
     
-    def _calculate_support_level(self, stock, strategy_name, selection_date):
+    def _calculate_support_level(self, stock, selection_date, strategy_name=None):
         """计算候选股票的支撑位
         
         在加入股票池时调用，根据策略的支撑位计算方法和关键日计算支撑位。
@@ -883,17 +1036,24 @@ class BacktestEngine:
         
         Args:
             stock: 股票信息（包含 signal 字段，signal 中包含 key_date）
-            strategy_name: 策略名称（类名）
             selection_date: 选股日期
+            strategy_name: 策略名称（类名），也可以是支撑位方法名称（ma20/key_close_5/key_open/key_close）
             
-        Returns:
             float: 支撑位价格，计算失败返回0.0
         """
         # stock_code: 股票代码，类型str，从stock中获取
         stock_code = stock['stock_code']
         
         # 获取策略对应的支撑位计算方法
-        support_method = self._get_support_method_for_strategy(strategy_name)
+        # 如果 strategy_name 已经是支撑位方法名称（ma20/key_close_5/key_open/key_close），直接使用
+        # 如果 strategy_name 为 None，使用默认方法 ma20
+        valid_support_methods = ['ma20', 'key_close_5', 'key_open', 'key_close']
+        if strategy_name is None:
+            support_method = 'ma20'
+        elif strategy_name in valid_support_methods:
+            support_method = strategy_name
+        else:
+            support_method = self._get_support_method_for_strategy(strategy_name)
         
         # 获取K线数据
         df = self.stock_filtered_cache.get(stock_code)
@@ -902,7 +1062,11 @@ class BacktestEngine:
             return 0.0
         
         # 日期切片：只取到选股日期为止的数据
-        date_str = selection_date.strftime('%Y-%m-%d')
+        # 处理 selection_date 可能是字符串或 datetime 对象的情况
+        if isinstance(selection_date, str):
+            date_str = selection_date
+        else:
+            date_str = selection_date.strftime('%Y-%m-%d')
         df_to_date = df[df['date'] <= date_str].copy()
         if df_to_date.empty:
             logger.debug(f"支撑位计算: {stock_code} 选股日期 {date_str} 无数据")
@@ -1892,6 +2056,13 @@ class BacktestEngine:
         total_loss = sum(losing_returns) if losing_returns else 1
         profit_factor = total_win / total_loss if total_loss > 0 else 0
         
+        # 计算盈亏比（基于金额）
+        winning_profits = [t['profit_loss'] for t in completed_trades if t.get('profit_loss', 0) > 0]
+        losing_losses = [abs(t['profit_loss']) for t in completed_trades if t.get('profit_loss', 0) < 0]
+        avg_win = sum(winning_profits) / len(winning_profits) if winning_profits else 0
+        avg_loss = sum(losing_losses) / len(losing_losses) if losing_losses else 1
+        profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+        
         # 计算最大回撤
         capital_array = np.array(capital_history)
         running_max = np.maximum.accumulate(capital_array)
@@ -1901,10 +2072,11 @@ class BacktestEngine:
         # 计算夏普比率（假设无风险利率为2%）
         daily_returns = []
         for i in range(1, len(capital_history)):
-            daily_return = (capital_history[i] - capital_history[i-1]) / capital_history[i-1] * 100
+            daily_return = (capital_history[i] - capital_history[i-1]) / capital_history[i-1]  # 使用小数形式
             daily_returns.append(daily_return)
-        volatility = np.std(daily_returns) if daily_returns else 0
-        risk_free_rate = 2.0 / 252  # 日无风险利率
+        # 使用样本标准差（ddof=1），更符合金融行业惯例
+        volatility = np.std(daily_returns, ddof=1) if len(daily_returns) > 1 else 0
+        risk_free_rate = 0.02 / 252  # 日无风险利率（小数形式，年化2%）
         excess_returns = [r - risk_free_rate for r in daily_returns]
         sharpe_ratio = np.mean(excess_returns) / volatility * np.sqrt(252) if volatility > 0 else 0
         
@@ -1918,6 +2090,7 @@ class BacktestEngine:
             'max_return': max_return,
             'min_return': min_return,
             'profit_factor': profit_factor,
+            'profit_loss_ratio': round(profit_loss_ratio, 2),
             'max_drawdown': max_drawdown,
             'sharpe_ratio': sharpe_ratio
         }

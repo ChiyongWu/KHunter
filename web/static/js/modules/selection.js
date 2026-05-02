@@ -426,7 +426,7 @@ export async function exportSelectionResults() {
     
     try {
         // 调用后端API导出Excel
-        const response = await fetch('/api/trading/export_selection', {
+        const response = await fetch('/api/khunter/export_selection', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

@@ -9,6 +9,12 @@ strategy_runner:
   min_position_size: 0.01  # 单只股票最小仓位比例
   max_positions: 10  # 最大持仓数量
   
+  # 预加载配置（回测初始股票池预加载）
+  preload:
+    enabled: true          # 是否启用预加载功能
+    days: 5                # 预加载的交易天数（回测前N个交易日）
+    exclude_recent_days: 0 # 排除最近N天（避免使用未来数据）
+  
   # 交易成本参数
   trading:
     commission_rate: 0.00015     # 券商佣金率 0.015%（双向收取）
@@ -1507,7 +1513,7 @@ strategies:
           entry_atr: 0.02
           add_atr: 0.5
           exit_atr: 2.0
-          base_position_amount: 50000
+          base_position_amount: 20000
       short:
         description: 短线海龟，10日入场/5日离场，反应更灵敏
         display_name: 短线海龟(10/5)
@@ -1519,7 +1525,7 @@ strategies:
           entry_atr: 0.02
           add_atr: 0.5
           exit_atr: 2.0
-          base_position_amount: 50000
+          base_position_amount: 20000
       ultra_short:
         description: 超短海龟，6日入场/3日离场，适合强势股高频交易
         display_name: 超短海龟(6/3)
@@ -1531,7 +1537,7 @@ strategies:
           entry_atr: 0.02
           add_atr: 0.5
           exit_atr: 2.0
-          base_position_amount: 50000
+          base_position_amount: 20000
     params:
       preset: ultra_short
       n_entry: 12
@@ -1540,7 +1546,7 @@ strategies:
       entry_atr: 0.02
       add_atr: 0.5
       exit_atr: 2.0
-      base_position_amount: 50000
+      base_position_amount: 20000
   # 520560策略
   MA20MA60Strategy:
     support_method: ma20

@@ -598,12 +598,12 @@ CREATE TABLE IF NOT EXISTS backtest_config (
     -- stop_loss: 止损比例，类型REAL，默认-7，单位百分比
     take_profit REAL DEFAULT 21,
     -- take_profit: 止盈比例，类型REAL，默认21，单位百分比
-    initial_capital REAL DEFAULT 1000000,
-    -- initial_capital: 初始资金，类型REAL，默认1000000，单位元
+    initial_capital REAL DEFAULT 300000,
+    -- initial_capital: 初始资金，类型REAL，默认300000，单位元
     buy_amount REAL DEFAULT 100000,
     -- buy_amount: 每次买入金额，类型REAL，默认100000，单位元
-    max_daily_buys INTEGER DEFAULT 5,
-    -- max_daily_buys: 单日最大买入股票数量，类型INTEGER，默认5
+    max_daily_buys INTEGER DEFAULT 8,
+    -- max_daily_buys: 单日最大买入股票数量，类型INTEGER，默认8
     buy_point_lower REAL DEFAULT -1,
     -- buy_point_lower: 买点区间下限，类型REAL，默认-1，单位百分比（相对于支撑位置）
     buy_point_upper REAL DEFAULT 3,
@@ -646,12 +646,14 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     -- min_return: 最小单笔收益，类型REAL，默认0，单位百分比
     profit_factor REAL DEFAULT 0,
     -- profit_factor: 盈利因子，类型REAL，默认0
+    profit_loss_ratio REAL DEFAULT 0,
+    -- profit_loss_ratio: 盈亏比，类型REAL，默认0
     max_drawdown REAL DEFAULT 0,
     -- max_drawdown: 最大回撤，类型REAL，默认0，单位百分比
     sharpe_ratio REAL DEFAULT 0,
     -- sharpe_ratio: 夏普比率，类型REAL，默认0
-    initial_capital REAL DEFAULT 1000000,
-    -- initial_capital: 初始资金，类型REAL，默认1000000，单位元
+    initial_capital REAL DEFAULT 300000,
+    -- initial_capital: 初始资金，类型REAL，默认300000，单位元
     final_capital REAL DEFAULT 0,
     -- final_capital: 最终资金，类型REAL，默认0，单位元
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

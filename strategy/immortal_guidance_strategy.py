@@ -46,8 +46,8 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         default_params = {
             'surge_threshold': 0.06,
             'upper_shadow_ratio': 0.03,
-            'volume_ratio_min': 1.5,
-            'volume_ratio_max': 3.0,
+            'volume_ratio_min': 2.0,
+            'volume_ratio_max': None,
             'ma_periods': [5, 10, 20],
             'trend_lookback_days': 20,
             'trend_r_squared_threshold': 0.5,
@@ -218,10 +218,15 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             if not (upper_shadow_ratio >= self.params['upper_shadow_ratio']):
                 continue
 
-            if not (self.params['volume_ratio_min'] <= volume_ratio <= self.params['volume_ratio_max']):
+            volume_ratio_max = self.params.get('volume_ratio_max')
+            if volume_ratio_max is None:
+                if volume_ratio < self.params['volume_ratio_min']:
+                    continue
+            elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
+                continue
                 continue
 
-            if not (today['close'] > prev_close):
+            if not (today['close'] > today['open']):
                 continue
 
             if not (today['close'] > ma5):
@@ -378,10 +383,14 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not (upper_shadow_ratio >= self.params['upper_shadow_ratio']):
             return []
 
-        if not (self.params['volume_ratio_min'] <= volume_ratio <= self.params['volume_ratio_max']):
+        volume_ratio_max = self.params.get('volume_ratio_max')
+        if volume_ratio_max is None:
+            if volume_ratio < self.params['volume_ratio_min']:
+                return []
+        elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
             return []
 
-        if not (today['close'] > prev_close):
+        if not (today['close'] > today['open']):
             return []
 
         if not (today['close'] > ma5):

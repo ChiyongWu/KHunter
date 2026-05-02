@@ -94,6 +94,9 @@ async function initializeApp() {
     modules.stocks.loadHotIndustries();
     modules.stocks.loadHotAreas();
     
+    // 初始化策略执行器模块
+    modules.strategyRunner.default.initStrategyRunnerModule();
+    
     // 暴露全局函数（供HTML调用）
     window.switchPage = modules.navigation.switchPage;
     window.runSelection = modules.selection.runSelection;

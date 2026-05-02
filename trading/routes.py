@@ -44,9 +44,9 @@ def get_backtest_configs():
                         "hold_period": 10,
                         "stop_loss": -5,
                         "take_profit": 15,
-                        "initial_capital": 1000000,
+                        "initial_capital": 300000,
                         "buy_amount": 100000,
-                        "max_daily_buys": 5,
+                        "max_daily_buys": 8,
                         "support_level_method": "ma20",
                         "buy_point_lower": -1,
                         "buy_point_upper": 3,
@@ -101,9 +101,9 @@ def get_backtest_config(config_id):
                 "hold_period": 10,
                 "stop_loss": -5,
                 "take_profit": 15,
-                "initial_capital": 1000000,
+                "initial_capital": 300000,
                 "buy_amount": 100000,
-                "max_daily_buys": 5,
+                "max_daily_buys": 8,
                 "support_level_method": "ma20",
                 "buy_point_lower": -1,
                 "buy_point_upper": 3,
@@ -151,9 +151,9 @@ def create_backtest_config():
             "hold_period": 10,
             "stop_loss": -5,
             "take_profit": 15,
-            "initial_capital": 1000000,
+            "initial_capital": 300000,
             "buy_amount": 100000,
-            "max_daily_buys": 5,
+            "max_daily_buys": 8,
             "support_level_method": "ma20",
             "buy_point_lower": -1,
             "buy_point_upper": 3,
@@ -225,9 +225,9 @@ def update_backtest_config(config_id):
             "hold_period": 10,
             "stop_loss": -5,
             "take_profit": 15,
-            "initial_capital": 1000000,
+            "initial_capital": 300000,
             "buy_amount": 100000,
-            "max_daily_buys": 5,
+            "max_daily_buys": 8,
             "support_level_method": "ma20",
             "buy_point_lower": -1,
             "buy_point_upper": 3,
@@ -371,18 +371,18 @@ def run_backtest():
             max_hold_days = db_config.get('hold_period', 10)
             stop_loss = db_config.get('stop_loss', -7)
             take_profit = db_config.get('take_profit', 21)
-            initial_capital = db_config.get('initial_capital', 1000000)
+            initial_capital = db_config.get('initial_capital', 300000)
             buy_amount = db_config.get('buy_amount', 100000)
-            max_daily_buys = db_config.get('max_daily_buys', 5)
+            max_daily_buys = db_config.get('max_daily_buys', 8)
         else:
             # 数据库无配置时使用默认值
             score_threshold = 60
             max_hold_days = 10
             stop_loss = -7
             take_profit = 21
-            initial_capital = 1000000
+            initial_capital = 300000
             buy_amount = 100000
-            max_daily_buys = 5
+            max_daily_buys = 8
         
         # 温度约束参数（前端传入）
         enable_temp_limit = data.get('enable_temp_limit', 1)
@@ -401,7 +401,7 @@ def run_backtest():
                 logger.warning(f"读取海龟策略配置失败，使用默认值: {str(e)}")
                 turtle_params = {
                     'n_entry': 20, 'n_exit': 10, 'atr_period': 20,
-                    'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 50000
+                    'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
                 }
         
         # 验证参数
@@ -451,7 +451,7 @@ def run_backtest():
         
         # 构建保存到数据库的结果格式
         # 计算final_capital
-        final_capital = config.get('initial_capital', 1000000)
+        final_capital = config.get('initial_capital', 300000)
         if 'capital_history' in result and result['capital_history']:
             final_capital = result['capital_history'][-1]
         
@@ -471,9 +471,10 @@ def run_backtest():
             'max_return': result.get('performance', {}).get('max_return', 0),
             'min_return': result.get('performance', {}).get('min_return', 0),
             'profit_factor': result.get('performance', {}).get('profit_factor', 0),
+            'profit_loss_ratio': result.get('performance', {}).get('profit_loss_ratio', 0),
             'max_drawdown': result.get('performance', {}).get('max_drawdown', 0),
             'sharpe_ratio': result.get('performance', {}).get('sharpe_ratio', 0),
-            'initial_capital': config.get('initial_capital', 1000000),
+            'initial_capital': config.get('initial_capital', 300000),
             'final_capital': final_capital
         }
         
@@ -530,7 +531,7 @@ def run_backtest():
             capital_history = result['capital_history']
             dates = result['dates']
             equity_curve = []
-            initial_capital = config.get('initial_capital', 1000000)
+            initial_capital = config.get('initial_capital', 300000)
             
             # capital_history 是数字列表，每个元素是总资产值
             # dates 是对应的日期列表
@@ -648,8 +649,8 @@ def get_backtest_results():
                         "config_id": 1,
                         "start_date": "2024-01-01",
                         "end_date": "2024-06-30",
-                        "initial_capital": 1000000,
-                        "final_capital": 1105000,
+                        "initial_capital": 300000,
+                        "final_capital": 331500,
                         "total_return": 10.5,
                         "win_rate": 65.0,
                         "avg_win": 8.2,
@@ -691,18 +692,18 @@ def get_backtest_results():
             # 确保返回的字段名与前端期望的一致
             processed_result['winning_trades'] = processed_result.get('win_trades', 0)
             processed_result['losing_trades'] = processed_result.get('loss_trades', 0)
-            processed_result['profit_loss_ratio'] = processed_result.get('profit_factor', 0)
+            processed_result['profit_loss_ratio'] = processed_result.get('profit_loss_ratio', 0)
             processed_result['avg_hold_days'] = processed_result.get('hold_period', 0)
             processed_result['volatility'] = processed_result.get('volatility', 0)
             processed_result['sortino_ratio'] = processed_result.get('sortino_ratio', 0)
             
             # 确保初始资金和最终资金不为0
             if processed_result.get('initial_capital', 0) == 0:
-                processed_result['initial_capital'] = 1000000
+                processed_result['initial_capital'] = 300000
             if processed_result.get('final_capital', 0) == 0:
                 # 根据总收益率计算最终资金
                 total_return = processed_result.get('total_return', 0)
-                initial_capital = processed_result.get('initial_capital', 1000000)
+                initial_capital = processed_result.get('initial_capital', 300000)
                 processed_result['final_capital'] = initial_capital * (1 + total_return / 100)
             
             processed_results.append(processed_result)
@@ -743,8 +744,8 @@ def get_backtest_result(result_id):
                 "config_id": 1,
                 "start_date": "2024-01-01",
                 "end_date": "2024-06-30",
-                "initial_capital": 1000000,
-                "final_capital": 1105000,
+                "initial_capital": 300000,
+                "final_capital": 331500,
                 "total_return": 10.5,
                 "win_rate": 65.0,
                 "avg_win": 8.2,
@@ -803,18 +804,18 @@ def get_backtest_result(result_id):
         # 确保返回的字段名与前端期望的一致
         processed_result['winning_trades'] = processed_result.get('win_trades', 0)
         processed_result['losing_trades'] = processed_result.get('loss_trades', 0)
-        processed_result['profit_loss_ratio'] = processed_result.get('profit_factor', 0)
+        processed_result['profit_loss_ratio'] = processed_result.get('profit_loss_ratio', 0)
         processed_result['avg_hold_days'] = processed_result.get('hold_period', 0)
         processed_result['volatility'] = processed_result.get('volatility', 0)
         processed_result['sortino_ratio'] = processed_result.get('sortino_ratio', 0)
         
         # 确保初始资金和最终资金不为0
         if processed_result.get('initial_capital', 0) == 0:
-            processed_result['initial_capital'] = 1000000
+            processed_result['initial_capital'] = 300000
         if processed_result.get('final_capital', 0) == 0:
             # 根据总收益率计算最终资金
             total_return = processed_result.get('total_return', 0)
-            initial_capital = processed_result.get('initial_capital', 1000000)
+            initial_capital = processed_result.get('initial_capital', 300000)
             processed_result['final_capital'] = initial_capital * (1 + total_return / 100)
         
         # 处理交易记录中的Infinity值
@@ -1023,8 +1024,8 @@ def export_backtest_result(result_id):
             ("盈利交易", result.get('win_trades', 0)),
             ("亏损交易", result.get('loss_trades', 0)),
             ("胜率", f"{result.get('win_rate', 0):.2f}%"),
+            ("盈亏比", f"{result.get('profit_loss_ratio', 0):.2f}"),
             ("平均收益率", f"{result.get('avg_return', 0):.2f}%"),
-            ("盈亏比", f"{result.get('profit_factor', 0):.2f}"),
         ]
         for label, value in trade_rows:
             ws1.cell(row=row, column=1, value=label).border = border
@@ -1840,5 +1841,650 @@ def export_selection():
         return jsonify({
             'success': False,
             'message': f'导出选股结果失败：{str(e)}',
+            'data': None
+        }), 500
+
+
+# ==================== 执行方案管理接口 ====================
+
+@trading_bp.route('/execution/plans', methods=['GET'])
+def get_execution_plans():
+    """
+    获取所有执行方案列表接口
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plans": [
+                    {
+                        "id": "plan_id",
+                        "name": "方案名称",
+                        "description": "方案描述",
+                        "combination_count": 3,
+                        "config_ref": "default",
+                        "created_at": "2024-01-01T12:00:00",
+                        "updated_at": "2024-01-01T12:00:00"
+                    }
+                ],
+                "total_count": 1
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        
+        plans = ExecutionPlan.list_plans()
+        
+        plan_list = []
+        for plan in plans:
+            plan_list.append({
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'combination_count': len(plan.combinations),
+                'config_ref': plan.config_ref,
+                'created_at': plan.created_at,
+                'updated_at': plan.updated_at
+            })
+        
+        return jsonify({
+            'success': True,
+            'message': '获取执行方案列表成功',
+            'data': {
+                'plans': plan_list,
+                'total_count': len(plan_list)
+            }
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"获取执行方案列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取执行方案列表失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/<plan_id>', methods=['GET'])
+def get_execution_plan(plan_id):
+    """
+    获取单个执行方案详情接口
+    
+    参数:
+        plan_id: 方案ID (路径参数)
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "id": "plan_id",
+                "name": "方案名称",
+                "description": "方案描述",
+                "combinations": [
+                    {
+                        "id": "combo_id",
+                        "selection_strategy": "选股策略名称",
+                        "timing_strategy": "择时策略名称",
+                        "enabled": true
+                    }
+                ],
+                "config_ref": "default",
+                "created_at": "2024-01-01T12:00:00",
+                "updated_at": "2024-01-01T12:00:00"
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        
+        plan = ExecutionPlan.load(plan_id)
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'message': '方案不存在',
+                'data': None
+            }), 404
+        
+        combinations = []
+        for combo in plan.combinations:
+            combinations.append({
+                'id': combo.id,
+                'selection_strategy': combo.selection_strategy,
+                'timing_strategy': combo.timing_strategy,
+                'enabled': combo.enabled
+            })
+        
+        return jsonify({
+            'success': True,
+            'message': '获取执行方案详情成功',
+            'data': {
+                'id': plan.id,
+                'name': plan.name,
+                'description': plan.description,
+                'combinations': combinations,
+                'config_ref': plan.config_ref,
+                'created_at': plan.created_at,
+                'updated_at': plan.updated_at
+            }
+        }), 200
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': '方案不存在',
+            'data': None
+        }), 404
+    except Exception as e:
+        logger.error(f"获取执行方案详情失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取执行方案详情失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans', methods=['POST'])
+def create_execution_plan():
+    """
+    创建执行方案接口
+    
+    请求体:
+        {
+            "name": "方案名称",
+            "description": "方案描述",
+            "combinations": [
+                {
+                    "selection_strategy": "选股策略名称",
+                    "timing_strategy": "择时策略名称",
+                    "enabled": true
+                }
+            ],
+            "config_ref": "default"
+        }
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plan_id": "plan_id"
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan, StrategyCombination
+        
+        data = request.get_json() or {}
+        
+        if 'name' not in data or not data['name']:
+            return jsonify({
+                'success': False,
+                'message': '方案名称不能为空',
+                'data': None
+            }), 400
+        
+        plan = ExecutionPlan(
+            name=data['name'],
+            description=data.get('description', '')
+        )
+        
+        plan.config_ref = data.get('config_ref', 'default')
+        
+        # 添加策略组合
+        combinations = data.get('combinations', [])
+        for combo_data in combinations:
+            combo = StrategyCombination(
+                selection_strategy=combo_data.get('selection_strategy', ''),
+                timing_strategy=combo_data.get('timing_strategy', ''),
+                enabled=combo_data.get('enabled', True)
+            )
+            plan.add_combination(combo)
+        
+        # 验证并保存
+        if not plan.validate():
+            return jsonify({
+                'success': False,
+                'message': '方案验证失败，请确保至少包含一个有效的策略组合',
+                'data': None
+            }), 400
+        
+        plan.save()
+        
+        return jsonify({
+            'success': True,
+            'message': '创建执行方案成功',
+            'data': {
+                'plan_id': plan.id
+            }
+        }), 201
+    
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'data': None
+        }), 400
+    except Exception as e:
+        logger.error(f"创建执行方案失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'创建执行方案失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/<plan_id>', methods=['PUT'])
+def update_execution_plan(plan_id):
+    """
+    更新执行方案接口
+    
+    参数:
+        plan_id: 方案ID (路径参数)
+    
+    请求体:
+        {
+            "name": "方案名称",
+            "description": "方案描述",
+            "combinations": [
+                {
+                    "id": "combo_id",
+                    "selection_strategy": "选股策略名称",
+                    "timing_strategy": "择时策略名称",
+                    "enabled": true
+                }
+            ],
+            "config_ref": "default"
+        }
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plan_id": "plan_id"
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan, StrategyCombination
+        
+        data = request.get_json() or {}
+        
+        plan = ExecutionPlan.load(plan_id)
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'message': '方案不存在',
+                'data': None
+            }), 404
+        
+        # 更新基本信息
+        if 'name' in data:
+            plan.name = data['name']
+        if 'description' in data:
+            plan.description = data['description']
+        if 'config_ref' in data:
+            plan.config_ref = data['config_ref']
+        
+        # 更新策略组合
+        if 'combinations' in data:
+            plan.combinations = []
+            for combo_data in data['combinations']:
+                combo = StrategyCombination(
+                    combination_id=combo_data.get('id'),
+                    selection_strategy=combo_data.get('selection_strategy', ''),
+                    timing_strategy=combo_data.get('timing_strategy', ''),
+                    enabled=combo_data.get('enabled', True)
+                )
+                plan.add_combination(combo)
+        
+        # 验证并保存
+        if not plan.validate():
+            return jsonify({
+                'success': False,
+                'message': '方案验证失败',
+                'data': None
+            }), 400
+        
+        plan.save()
+        
+        return jsonify({
+            'success': True,
+            'message': '更新执行方案成功',
+            'data': {
+                'plan_id': plan.id
+            }
+        }), 200
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': '方案不存在',
+            'data': None
+        }), 404
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'data': None
+        }), 400
+    except Exception as e:
+        logger.error(f"更新执行方案失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'更新执行方案失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/<plan_id>', methods=['DELETE'])
+def delete_execution_plan(plan_id):
+    """
+    删除执行方案接口
+    
+    参数:
+        plan_id: 方案ID (路径参数)
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plan_id": "plan_id"
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        
+        plan = ExecutionPlan.load(plan_id)
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'message': '方案不存在',
+                'data': None
+            }), 404
+        
+        plan.delete()
+        
+        return jsonify({
+            'success': True,
+            'message': '删除执行方案成功',
+            'data': {
+                'plan_id': plan_id
+            }
+        }), 200
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': '方案不存在',
+            'data': None
+        }), 404
+    except Exception as e:
+        logger.error(f"删除执行方案失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'删除执行方案失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/<plan_id>/run', methods=['POST'])
+def run_execution_plan(plan_id):
+    """
+    运行执行方案接口
+    
+    参数:
+        plan_id: 方案ID (路径参数)
+    
+    请求体:
+        {
+            "initial_cash": 300000,
+            "max_stocks": 8,
+            "score_threshold": 60,
+            "n_entry": 20,
+            "n_exit": 10,
+            "atr_period": 20,
+            "entry_atr": 0.02,
+            "add_atr": 0.5,
+            "exit_atr": 2.0,
+            "base_position_amount": 20000,
+            "turtle_preset": "default"
+        }
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "run_date": "2024-01-01",
+                "plan_id": "plan_id",
+                "plan_name": "方案名称",
+                "is_first_run": false,
+                "pool_count": 10,
+                "total_signals": 5,
+                "buy_signals": 3,
+                "sell_signals": 2,
+                "final_portfolio": {
+                    "position_count": 5
+                },
+                "combination_results": [
+                    {
+                        "combination_id": "combo_id",
+                        "selection_strategy": "选股策略",
+                        "timing_strategy": "择时策略",
+                        "selected_count": 5,
+                        "pool_count_after": 10
+                    }
+                ]
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        from trading.strategy_runner import StrategyRunner
+        
+        # 加载方案
+        plan = ExecutionPlan.load(plan_id)
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'message': '方案不存在',
+                'data': None
+            }), 404
+        
+        # 获取请求配置
+        data = request.get_json() or {}
+        
+        config = {
+            'initial_cash': data.get('initial_cash', 300000),
+            'max_stocks': data.get('max_stocks', 8),
+            'score_threshold': data.get('score_threshold', 60),
+            'n_entry': data.get('n_entry'),
+            'n_exit': data.get('n_exit'),
+            'atr_period': data.get('atr_period'),
+            'entry_atr': data.get('entry_atr'),
+            'add_atr': data.get('add_atr'),
+            'exit_atr': data.get('exit_atr'),
+            'base_position_amount': data.get('base_position_amount'),
+            'turtle_preset': data.get('turtle_preset')
+        }
+        
+        # 创建策略运行器并执行方案
+        runner = StrategyRunner()
+        result = runner.run_plan(plan, config)
+        
+        if result['status'] == 'success':
+            return jsonify({
+                'success': True,
+                'message': result.get('message', '方案执行成功'),
+                'data': result.get('data', {})
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'message': result.get('message', '方案执行失败'),
+                'data': None
+            }), 500
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': '方案不存在',
+            'data': None
+        }), 404
+    except Exception as e:
+        logger.error(f"运行执行方案失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'运行执行方案失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/import', methods=['POST'])
+def import_execution_plan():
+    """
+    导入执行方案接口
+    
+    请求体:
+        {
+            "plan_data": {
+                "id": "plan_id",
+                "name": "方案名称",
+                "description": "方案描述",
+                "combinations": [
+                    {
+                        "id": "combo_id",
+                        "selection_strategy": "选股策略名称",
+                        "timing_strategy": "择时策略名称",
+                        "enabled": true
+                    }
+                ],
+                "config_ref": "default",
+                "created_at": "2024-01-01T12:00:00",
+                "updated_at": "2024-01-01T12:00:00"
+            }
+        }
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "plan_id": "plan_id"
+            }
+        }
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        
+        data = request.get_json() or {}
+        plan_data = data.get('plan_data')
+        
+        if not plan_data:
+            return jsonify({
+                'success': False,
+                'message': '缺少方案数据',
+                'data': None
+            }), 400
+        
+        # 创建新方案，生成新的ID
+        plan = ExecutionPlan.from_dict(plan_data)
+        
+        # 生成新ID避免冲突
+        from uuid import uuid4
+        plan.id = str(uuid4())
+        plan.created_at = datetime.datetime.now().isoformat()
+        plan.updated_at = datetime.datetime.now().isoformat()
+        
+        # 验证并保存
+        if not plan.validate():
+            return jsonify({
+                'success': False,
+                'message': '方案验证失败',
+                'data': None
+            }), 400
+        
+        plan.save()
+        
+        return jsonify({
+            'success': True,
+            'message': '导入执行方案成功',
+            'data': {
+                'plan_id': plan.id
+            }
+        }), 201
+    
+    except ValueError as e:
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'data': None
+        }), 400
+    except Exception as e:
+        logger.error(f"导入执行方案失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'导入执行方案失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/execution/plans/<plan_id>/export', methods=['GET'])
+def export_execution_plan(plan_id):
+    """
+    导出执行方案接口
+    
+    参数:
+        plan_id: 方案ID (路径参数)
+    
+    返回:
+        JSON文件下载
+    """
+    try:
+        from trading.strategy_execution_plan import ExecutionPlan
+        from flask import make_response
+        from urllib.parse import quote
+        
+        plan = ExecutionPlan.load(plan_id)
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'message': '方案不存在',
+                'data': None
+            }), 404
+        
+        # 导出为JSON
+        plan_dict = plan.to_dict()
+        
+        response = make_response(json.dumps(plan_dict, ensure_ascii=False, indent=2))
+        response.headers['Content-Type'] = 'application/json'
+        response.headers['Content-Disposition'] = f'attachment; filename="{quote(f"{plan.name}.json")}"'
+        
+        return response
+    
+    except FileNotFoundError:
+        return jsonify({
+            'success': False,
+            'message': '方案不存在',
+            'data': None
+        }), 404
+    except Exception as e:
+        logger.error(f"导出执行方案失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'导出执行方案失败: {str(e)}',
             'data': None
         }), 500

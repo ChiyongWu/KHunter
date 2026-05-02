@@ -860,7 +860,7 @@ def run_selection():
                 try:
                     # 读取完整数据，如果指定了结束日期，则只读取到该日期的数据
                     full_df = db_manager.read_stock(code, end_date=end_date)
-                    if not full_df.empty and len(full_df) >= 20:
+                    if not full_df.empty and len(full_df) >= 30:
                         # 按日期降序排序（最新的在前）
                         full_df = full_df.sort_values('date', ascending=False)
                         # 从 stock_names 字典中获取股票名称
@@ -3089,12 +3089,7 @@ except Exception as e:
     strategy_runner = None
 
 
-@app.route('/strategy-runner')
-def strategy_runner_page():
-    """
-    策略运行页面
-    """
-    return render_template('strategy_runner.html')
+
 
 
 @app.route('/api/strategy/run', methods=['POST'])
@@ -3103,9 +3098,9 @@ def run_strategy():
     运行策略
     
     参数：
-        strategy_names: 选股策略列表
+        strategies: 选股策略列表（兼容 strategy_names）
         timing_strategy: 择时策略名称
-        config: 配置参数
+        config: 配置参数（包含 max_stocks 最大持仓数等）
     
     返回：
         {"status": "success", "message": "策略运行完成", "data": {...}}
@@ -3116,7 +3111,8 @@ def run_strategy():
         
         # 获取请求参数
         data = request.json or {}
-        strategy_names = data.get('strategy_names', [])
+        # 兼容两种参数名称：strategies 和 strategy_names
+        strategy_names = data.get('strategies', data.get('strategy_names', []))
         timing_strategy = data.get('timing_strategy', 'support')
         config = data.get('config', {})
         
@@ -3167,12 +3163,12 @@ def get_portfolio():
     获取持仓信息
     
     返回：
-        {"success": true, "data": {"positions": {...}, "initial_cash": 1000000}}
+        {"success": true, "data": {"positions": {...}, "initial_cash": 300000}}
     """
     try:
         # 策略运行器未初始化时返回空持仓默认值
         if not strategy_runner:
-            return jsonify({"success": True, "data": {"positions": {}, "initial_cash": 1000000}})
+            return jsonify({"success": True, "data": {"positions": {}, "initial_cash": 300000}})
         
         # 获取当前工作日期
         working_date = strategy_runner.get_working_date()
@@ -3186,7 +3182,7 @@ def get_portfolio():
             "success": True, 
             "data": {
                 "positions": portfolio,
-                "initial_cash": 1000000  # 初始资金100万
+                "initial_cash": 300000  # 初始资金30万
             }
         })
     except Exception as e:

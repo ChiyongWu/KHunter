@@ -520,3 +520,109 @@
     color: #0c2d6b;
     border: 1px solid #7dd3fc;
 }
+
+/* 策略执行器样式 */
+.execution-status {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.execution-status.status-idle {
+    background: #f0fdf4;
+    color: #16a34a;
+}
+
+.execution-status.status-running {
+    background: #fffbeb;
+    color: #d97706;
+    animation: pulse 1.5s infinite;
+}
+
+.execution-status.status-error {
+    background: #fef2f2;
+    color: #dc2626;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.save-status {
+    display: none;
+    padding: 6px 12px;
+    background: #f0fdf4;
+    color: #16a34a;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.save-status.show {
+    display: inline-block;
+}
+
+.strategy-combo-item {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+}
+
+.combo-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.combo-body {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.combo-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.combo-field label {
+    font-weight: 600;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.combo-field span {
+    color: #1f2937;
+    font-size: 13px;
+}
+
+.plan-list-item {
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.plan-list-item:hover {
+    background: #f3f4f6;
+}
+
+.plan-list-item.active {
+    background: #e74c3c;
+    color: white;
+}
+
+.plan-list-item.active .text-muted {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.log-container {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #374151;
+}

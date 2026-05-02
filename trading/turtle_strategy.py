@@ -72,7 +72,7 @@ class TurtleStrategy(TimingStrategy):
         self.entry_atr = self.config.get('entry_atr', preset['entry_atr'])    # 入场ATR比例
         self.add_atr = self.config.get('add_atr', preset['add_atr'])          # 加仓ATR间隔
         self.exit_atr = self.config.get('exit_atr', preset['exit_atr'])        # 出场ATR止损倍数
-        self.base_position_amount = self.config.get('base_position_amount', 50000)  # 底仓金额（元）
+        self.base_position_amount = self.config.get('base_position_amount', 20000)  # 底仓金额（元）
         self.use_fixed_amount = self.config.get('use_fixed_amount', True)  # 是否使用固定金额
         
         # 向后兼容旧参数名

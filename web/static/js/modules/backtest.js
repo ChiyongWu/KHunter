@@ -7,10 +7,10 @@ let backtestConfig = {
     strategy_name: '',
     start_date: '',
     end_date: '',
-    initial_capital: 1000000,
+    initial_capital: 300000,
     score_threshold: 60,
     buy_amount: 100000,
-    max_daily_buys: 5,
+    max_daily_buys: 8,
     support_level_method: 'ma20',
     timing_strategy: 'support',
     timing_params: {
@@ -221,7 +221,7 @@ async function saveBacktestParams() {
             hold_period: parseInt(maxHoldDaysInput?.value) || 10,
             stop_loss: parseFloat(stopLossInput?.value) * 100, // 转换为百分比
             take_profit: parseFloat(takeProfitInput?.value) * 100, // 转换为百分比
-            initial_capital: parseFloat(initialCapitalInput?.value) || 1000000,
+            initial_capital: parseFloat(initialCapitalInput?.value) || 300000,
             buy_amount: parseFloat(buyAmountInput?.value) || 100000,
             max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5,
             // 温度约束参数
@@ -281,7 +281,7 @@ async function loadBacktestParams() {
             const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
             const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
             
-            if (initialCapitalInput) initialCapitalInput.value = params.initial_capital || 1000000;
+            if (initialCapitalInput) initialCapitalInput.value = params.initial_capital || 300000;
             if (scoreThresholdInput) scoreThresholdInput.value = params.score_threshold || 60;
             if (buyAmountInput) buyAmountInput.value = params.buy_amount || 100000;
             if (maxDailyBuysInput) maxDailyBuysInput.value = params.max_daily_buys || 5;
@@ -340,10 +340,10 @@ async function runBacktest() {
         
         // 加载保存的回测配置
         let savedParams = {  
-            initial_capital: 1000000,
+            initial_capital: 300000,
             score_threshold: 60,
             buy_amount: 100000,
-            max_daily_buys: 5,
+            max_daily_buys: 8,
             stop_loss: 0.05,
             take_profit: 0.15,
             max_hold_days: 10
@@ -357,7 +357,7 @@ async function runBacktest() {
                 if (data.success && data.data.configs && data.data.configs.length > 0) {
                     const config = data.data.configs[0];
                     savedParams = {
-                        initial_capital: config.initial_capital || 1000000,
+                        initial_capital: config.initial_capital || 300000,
                         score_threshold: config.score_threshold || 60,
                         buy_amount: config.buy_amount || 100000,
                         max_daily_buys: config.max_daily_buys || 5,
@@ -718,6 +718,7 @@ function displayBacktestHistory(results) {
                         ${(result.total_return || 0).toFixed(2)}%
                     </td>
                     <td>${(result.win_rate || 0).toFixed(2)}%</td>
+                    <td>${(result.profit_loss_ratio || 0).toFixed(2)}</td>
                     <td>${(result.max_drawdown || 0).toFixed(2)}%</td>
                     <td>${(result.sharpe_ratio || 0).toFixed(2)}</td>
                     <td>
@@ -1134,11 +1135,13 @@ function displayBacktestResultOnConfigPage(result) {
     // 更新绩效指标卡片
     const totalReturnEl = document.getElementById('backtest-total-return');
     const winRateEl = document.getElementById('backtest-win-rate');
+    const profitLossRatioEl = document.getElementById('backtest-profit-loss-ratio');
     const maxDrawdownEl = document.getElementById('backtest-max-drawdown');
     const sharpeRatioEl = document.getElementById('backtest-sharpe-ratio');
     
     if (totalReturnEl) totalReturnEl.textContent = `${(result.total_return || 0).toFixed(2)}%`;
     if (winRateEl) winRateEl.textContent = `${(result.win_rate || 0).toFixed(2)}%`;
+    if (profitLossRatioEl) profitLossRatioEl.textContent = (result.profit_loss_ratio || 0).toFixed(2);
     if (maxDrawdownEl) maxDrawdownEl.textContent = `${(result.max_drawdown || 0).toFixed(2)}%`;
     if (sharpeRatioEl) sharpeRatioEl.textContent = (result.sharpe_ratio || 0).toFixed(2);
     
