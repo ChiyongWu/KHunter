@@ -357,6 +357,8 @@ class KHunterAPI:
                     'score': float(record.get('score', 0)),
                     'industry': record.get('industry'),
                     'sector': record.get('sector'),
+                    'key_date': record.get('key_date'),  # 关键日（形态实际形成日期）
+                    'selection_date': record.get('hunting_date'),  # 选入日期
                     'selection_price': selection_price,
                     'current_price': current_price,
                     'current_yield': round(current_yield, 2),

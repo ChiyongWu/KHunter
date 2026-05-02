@@ -762,14 +762,19 @@ CREATE TABLE IF NOT EXISTS khunter (
     -- industry: 所属行业，类型VARCHAR(50)，可选，例如银行
     sector VARCHAR(50),
     -- sector: 所属板块，类型VARCHAR(50)，可选，例如金融
+    key_date DATE,
+    -- key_date: 关键日日期，类型DATE，可选，格式YYYY-MM-DD
+    -- 说明：形态实际形成的第一天（T日），用于追溯信号起源
+    -- 示例：仙人指路形态的上影线日、连阳回调的倍量阳线日
     hunting_date DATE NOT NULL,
-    -- hunting_date: 狩猎日期，类型DATE，必填，格式YYYY-MM-DD
+    -- hunting_date: 选入日期，类型DATE，必填，格式YYYY-MM-DD
+    -- 说明：股票被系统选入股票池的日期（T+N日）
     strategy_name VARCHAR(100) NOT NULL,
     -- strategy_name: 策略名称，类型VARCHAR(100)，必填，例如多方炮策略
     support_level REAL NOT NULL,
     -- support_level: 支撑位价格，类型REAL，必填，精确到小数点后两位，例如10.50
     current_price REAL NOT NULL,
-    -- current_price: 当前价格（狩猎日收盘价），类型REAL，必填，精确到小数点后两位，例如10.60
+    -- current_price: 当前价格（选入日收盘价），类型REAL，必填，精确到小数点后两位，例如10.60
     price_diff REAL NOT NULL,
     -- price_diff: 价格差，类型REAL，必填，计算值=current_price-support_level，例如0.10
     price_diff_percent REAL NOT NULL,
@@ -855,3 +860,26 @@ CREATE TABLE IF NOT EXISTS market_temperature (
 -- 为 market_temperature 表创建索引
 CREATE INDEX IF NOT EXISTS idx_market_temp_date ON market_temperature(trade_date);
 -- idx_market_temp_date: 交易日期索引，用于快速查询特定日期的温度数据
+
+
+-- ============================================
+-- 数据库迁移脚本
+-- ============================================
+-- 迁移版本: v1.2
+-- 迁移日期: 2026-05-03
+-- 迁移内容: 为 khunter 表添加 key_date 字段，记录形态实际形成日期
+-- ============================================
+
+-- 检查 khunter 表是否存在 key_date 字段，如果不存在则添加
+-- SQLite 不支持直接检查字段存在性，使用异常处理
+-- 以下脚本在 SQLite 中执行时会忽略错误（ON CONFLICT IGNORE 或 条件判断）
+
+-- 为 khunter 表添加 key_date 字段（关键日日期，形态实际形成日期）
+-- 该字段记录形态实际形成的第一天（T日），用于追溯信号起源
+-- 示例：仙人指路形态的上影线日、连阳回调的倍量阳线日
+-- 注意：如果字段已存在，此语句会报错，可以安全忽略
+ALTER TABLE khunter ADD COLUMN key_date DATE;
+-- key_date: 关键日日期，类型DATE，可选，格式YYYY-MM-DD
+
+-- 添加索引以提高按关键日查询的性能（可选）
+-- CREATE INDEX IF NOT EXISTS idx_khunter_key_date ON khunter(key_date);

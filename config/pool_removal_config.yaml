@@ -6,7 +6,7 @@ removal_strategies:
   # 仙人指路策略
   ImmortalGuidanceStrategy:
     display_name: "仙人指路策略"
-    min_hold_days: 30
+    min_hold_days: 5
     is_enabled: true
     remark: "加入股票池后立即验证趋势"
 

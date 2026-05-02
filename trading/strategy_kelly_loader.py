@@ -200,11 +200,8 @@ class KellyCalculator:
         # 计算基于凯莉比例的金额
         amount_by_kelly = total_capital * kelly_ratio
         
-        # 计算可用资金上限（可用资金的50%）
-        max_by_cash = available_cash * max_position_ratio
-        
-        # 取较小值
-        amount = min(amount_by_kelly, max_by_cash)
+        # 使用凯莉公式计算的金额，但不超过可用资金（兜底逻辑）
+        amount = min(amount_by_kelly, available_cash)
         
         # 应用最小投资金额约束
         if amount < min_invest_amount:
@@ -266,11 +263,8 @@ class KellyCalculator:
         # 计算基于凯莉比例的金额
         amount_by_kelly = total_capital * kelly_ratio
         
-        # 计算可用资金上限（可用资金的50%）
-        max_by_cash = available_cash * max_position_ratio
-        
-        # 取较小值
-        amount = min(amount_by_kelly, max_by_cash)
+        # 使用凯莉公式计算的金额，但不超过可用资金（兜底逻辑）
+        amount = min(amount_by_kelly, available_cash)
         
         # 应用最小投资金额约束
         if amount < min_invest_amount:

@@ -788,6 +788,8 @@ export function renderKHunterTrackingResult(data, container, huntingDate) {
                         <th>排名</th>
                         <th>股票代码</th>
                         <th>股票名称</th>
+                        <th>关键日</th>
+                        <th>选入日期</th>
                         <th>行业</th>
                         <th>板块</th>
                         <th>选入价</th>
@@ -815,6 +817,10 @@ export function renderKHunterTrackingResult(data, container, huntingDate) {
         const currentReturn = item.current_yield || 0;
         const highestPrice = item.highest_price || 0;
         const highestReturn = item.highest_yield || 0;
+        // 关键日日期（形态实际形成日期）
+        const keyDate = item.key_date || item.signal_date || '-';
+        // 选入日期
+        const selectionDate = item.selection_date || item.hunting_date || '-';
         
         // 累计统计数据
         totalReturn += currentReturn;
@@ -831,6 +837,8 @@ export function renderKHunterTrackingResult(data, container, huntingDate) {
                 <td>${item.rank_position}</td>
                 <td><a href="javascript:void(0)" onclick="viewStockDetail('${item.stock_code}')" class="stock-link">${item.stock_code}</a></td>
                 <td>${item.stock_name}</td>
+                <td>${keyDate}</td>
+                <td>${selectionDate}</td>
                 <td>${item.industry || '-'}</td>
                 <td>${item.sector || '-'}</td>
                 <td>¥${selectionPrice.toFixed(2)}</td>

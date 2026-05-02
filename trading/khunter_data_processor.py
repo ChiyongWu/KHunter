@@ -363,7 +363,8 @@ class KHunterDataProcessor:
                 'stock_name': record['stock_name'],
                 'industry': record.get('industry'),
                 'sector': record.get('sector'),
-                'hunting_date': hunting_date,
+                'key_date': key_date,  # 关键日（形态实际形成日期）
+                'hunting_date': hunting_date,  # 选入日期
                 'strategy_name': strategy_name,
                 'support_level': support_level,
                 'current_price': current_price,
@@ -379,6 +380,7 @@ class KHunterDataProcessor:
             
             logger.info(
                 f"{stock_code} 符合买点条件: "
+                f"关键日={key_date} 选入日={hunting_date} "
                 f"支撑位={support_level} 当前价={current_price} "
                 f"价格差百分比={buy_point_result['price_diff_percent']}%"
             )
@@ -443,17 +445,16 @@ class KHunterDataProcessor:
             
             # 6a. 海龟策略额外过滤：狩猎日收盘价超过关键日收盘价105%则舍弃
             # 避免选入已经涨太多的股票，保留距离关键日涨幅不大的首次买点机会
-            if timing_strategy_name == 'turtle':
-                key_date = self._extract_key_date(record)
-                if key_date:
-                    key_date_close = self._get_key_date_close(stock_code, key_date)
-                    if key_date_close and current_price > key_date_close * 1.05:
-                        price_ratio = round((current_price / key_date_close - 1) * 100, 2)
-                        logger.info(
-                            f"{stock_code} 海龟策略过滤: 狩猎日收盘价={current_price} "
-                            f"关键日收盘价={key_date_close} 涨幅={price_ratio}% > 5%，舍弃"
-                        )
-                        return None
+            key_date = self._extract_key_date(record) if timing_strategy_name == 'turtle' else None
+            if timing_strategy_name == 'turtle' and key_date:
+                key_date_close = self._get_key_date_close(stock_code, key_date)
+                if key_date_close and current_price > key_date_close * 1.05:
+                    price_ratio = round((current_price / key_date_close - 1) * 100, 2)
+                    logger.info(
+                        f"{stock_code} 海龟策略过滤: 狩猎日收盘价={current_price} "
+                        f"关键日收盘价={key_date_close} 涨幅={price_ratio}% > 5%，舍弃"
+                    )
+                    return None
             
             # 7. 获取支撑位（如果有）
             support_level = timing_result.support_level if timing_result.support_level > 0 else current_price
@@ -483,7 +484,8 @@ class KHunterDataProcessor:
                 'stock_name': record['stock_name'],
                 'industry': record.get('industry'),
                 'sector': record.get('sector'),
-                'hunting_date': hunting_date,
+                'key_date': key_date,  # 关键日（形态实际形成日期）
+                'hunting_date': hunting_date,  # 选入日期
                 'strategy_name': strategy_name,
                 'support_level': support_level,
                 'current_price': current_price,
@@ -499,6 +501,7 @@ class KHunterDataProcessor:
             
             logger.info(
                 f"{stock_code} {timing_strategy_display}发出买入信号: "
+                f"关键日={key_date or 'N/A'} 选入日={hunting_date} "
                 f"当前价={current_price} 支撑位={support_level} "
                 f"信号={timing_result.message}"
             )

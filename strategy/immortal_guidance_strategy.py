@@ -41,21 +41,10 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         """
         初始化仙人指路策略
 
-        :param params: 用户自定义参数字典，会覆盖默认参数
+        :param params: 从 config/strategy_params.yaml 加载的参数字典
         """
-        default_params = {
-            'surge_threshold': 0.06,
-            'upper_shadow_ratio': 0.03,
-            'volume_ratio_min': 2.0,
-            'volume_ratio_max': None,
-            'ma_periods': [5, 10, 20],
-            'trend_lookback_days': 20,
-            'trend_r_squared_threshold': 0.5,
-            'anti_body_window': 3,
-            'anti_body_ratio': 0.50,
-            'strategy_weight': 70,
-            'lookback_days': 6,
-        }
+        # 所有参数必须从配置文件读取，不使用硬编码默认值
+        default_params = {}
 
         if params:
             default_params.update(params)
@@ -80,7 +69,15 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         close_series = result['close'].iloc[::-1]
         volume_series = result['volume'].iloc[::-1]
 
+        # 处理 ma_periods 参数：支持列表、字符串或其他格式
         ma_periods = self.params['ma_periods']
+        if isinstance(ma_periods, str):
+            # 如果是字符串，按逗号分割并转换为整数列表
+            ma_periods = [int(p.strip()) for p in ma_periods.split(',') if p.strip()]
+        elif not isinstance(ma_periods, list):
+            # 如果不是列表也不是字符串，使用默认值
+            ma_periods = [5, 10, 20]
+
         for period in ma_periods:
             result[f'ma{period}'] = close_series.rolling(window=period, min_periods=1).mean().iloc[::-1].values
 
@@ -224,11 +221,8 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                     continue
             elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
                 continue
-                continue
 
-            if not (today['close'] > today['open']):
-                continue
-
+            # 收阳线限制已去除（十字星+长上影也是有效仙人指路形态）
             if not (today['close'] > ma5):
                 continue
 
@@ -307,9 +301,14 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
         confirmed_day_idx = None
 
+        # 数据是倒序的（最新在index=0），所以信号日后的日子应该在更小的索引位置
+        # 例如：signal_day_idx = 3（过去某天），信号日后第一天是 index=2，第二天是 index=1
         for day_idx in range(window):
             check_idx = signal_day_idx - (day_idx + 1)
             if check_idx < 0:
+                # 如果已经到了最新数据（index=0），说明没有更多后续数据可检查
+                # 在实时场景中，最新一天出现信号时，还没有后续确认数据
+                # 在回测场景中，如果信号出现在最新一天，也无法进行确认
                 break
 
             day_data = df.iloc[check_idx]
@@ -334,6 +333,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not result['confirmed']:
             return result
 
+        # 检查确认后是否稳定
         for post_idx in range(1, post_confirmation_window + 1):
             check_idx = confirmed_day_idx - post_idx
             if check_idx < 0:
@@ -390,9 +390,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
             return []
 
-        if not (today['close'] > today['open']):
-            return []
-
+        # 收阳线限制已去除（十字星+长上影也是有效仙人指路形态）
         if not (today['close'] > ma5):
             return []
 

@@ -4,6 +4,7 @@
 from flask import Blueprint, request, jsonify, send_file
 from trading.backtest_dao import BacktestDAO
 from trading.backtest_engine import BacktestEngine
+from trading.backtest_batch_queue import BacktestBatchQueue
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
 from utils.strategy_name_mapper import get_english_name
@@ -77,6 +78,373 @@ def get_backtest_configs():
         return jsonify({
             'success': False,
             'message': f'获取回测配置列表失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+# ==================== 批量回测任务队列接口 ====================
+
+
+@trading_bp.route('/backtest/batch/submit', methods=['POST'])
+def submit_batch_backtest():
+    """
+    提交批量回测任务
+
+    请求体:
+        {
+            "tasks": [
+                {
+                    "strategy_name": "涨停横盘策略",
+                    "start_date": "2026-01-01",
+                    "end_date": "2026-03-31",
+                    "timing_strategy": "turtle",
+                    "support_level_method": "ma20"
+                }
+            ],
+            "config": {
+                "initial_capital": 300000,
+                "score_threshold": 60,
+                "max_daily_buys": 3
+            }
+        }
+
+    返回:
+        {
+            "success": true/false,
+            "data": {
+                "batch_id": "batch_xxx",
+                "total_tasks": 5
+            }
+        }
+    """
+    try:
+        data = request.get_json() or {}
+
+        tasks = data.get('tasks', [])
+        config = data.get('config', {})
+
+        if not tasks:
+            return jsonify({
+                'success': False,
+                'message': '任务列表为空',
+                'data': None
+            }), 400
+
+        # 创建批量任务队列
+        batch_queue = BacktestBatchQueue.create_batch(tasks, config)
+
+        logger.info(f"提交批量回测任务: {batch_queue.batch_id}, 任务数: {len(tasks)}")
+
+        return jsonify({
+            'success': True,
+            'message': '批量任务提交成功',
+            'data': {
+                'batch_id': batch_queue.batch_id,
+                'total_tasks': len(tasks)
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"提交批量回测任务失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'提交批量回测任务失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/batch/start', methods=['POST'])
+def start_batch_backtest():
+    """
+    开始批量回测执行
+
+    请求体:
+        {
+            "batch_id": "batch_xxx"
+        }
+
+    返回:
+        {
+            "success": true/false,
+            "message": "批量任务已开始执行"
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        batch_id = data.get('batch_id')
+
+        if not batch_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少 batch_id',
+                'data': None
+            }), 400
+
+        # 获取执行器
+        batch_queue = BacktestBatchQueue.get_executor(batch_id)
+
+        if not batch_queue:
+            return jsonify({
+                'success': False,
+                'message': '批量任务不存在',
+                'data': None
+            }), 404
+
+        if batch_queue.status == 'running':
+            return jsonify({
+                'success': False,
+                'message': '批量任务已在执行中',
+                'data': None
+            }), 400
+
+        # 启动执行
+        batch_queue.start()
+
+        logger.info(f"开始批量回测执行: {batch_id}")
+
+        return jsonify({
+            'success': True,
+            'message': '批量任务已开始执行',
+            'data': {
+                'batch_id': batch_id
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"开始批量回测执行失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'开始批量回测执行失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/batch/status', methods=['GET'])
+def get_batch_backtest_status():
+    """
+    查询批量回测执行状态
+
+    参数:
+        batch_id: 批量任务ID (query参数)
+
+    返回:
+        {
+            "success": true/false,
+            "data": {
+                "batch_id": "batch_xxx",
+                "status": "running",
+                "total_tasks": 5,
+                "completed_tasks": 2,
+                "failed_tasks": 0,
+                "current_task": {
+                    "index": 2,
+                    "strategy_name": "涨停横盘策略",
+                    "status": "running"
+                }
+            }
+        }
+    """
+    try:
+        batch_id = request.args.get('batch_id')
+
+        if not batch_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少 batch_id',
+                'data': None
+            }), 400
+
+        # 获取执行器
+        batch_queue = BacktestBatchQueue.get_executor(batch_id)
+
+        if not batch_queue:
+            return jsonify({
+                'success': False,
+                'message': '批量任务不存在',
+                'data': None
+            }), 404
+
+        # 获取状态
+        status = batch_queue.get_status()
+
+        return jsonify({
+            'success': True,
+            'data': status
+        })
+
+    except Exception as e:
+        logger.error(f"查询批量回测状态失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'查询批量回测状态失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/batch/results', methods=['GET'])
+def get_batch_backtest_results():
+    """
+    获取批量回测执行结果
+
+    参数:
+        batch_id: 批量任务ID (query参数)
+
+    返回:
+        {
+            "success": true/false,
+            "data": {
+                "batch_id": "batch_xxx",
+                "status": "completed",
+                "results": [...]
+            }
+        }
+    """
+    try:
+        batch_id = request.args.get('batch_id')
+
+        if not batch_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少 batch_id',
+                'data': None
+            }), 400
+
+        # 获取执行器
+        batch_queue = BacktestBatchQueue.get_executor(batch_id)
+
+        if not batch_queue:
+            return jsonify({
+                'success': False,
+                'message': '批量任务不存在',
+                'data': None
+            }), 404
+
+        # 获取结果
+        results = batch_queue.get_results()
+
+        return jsonify({
+            'success': True,
+            'data': results
+        })
+
+    except Exception as e:
+        logger.error(f"获取批量回测结果失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取批量回测结果失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/batch/cancel', methods=['POST'])
+def cancel_batch_backtest():
+    """
+    取消批量回测执行
+
+    请求体:
+        {
+            "batch_id": "batch_xxx"
+        }
+
+    返回:
+        {
+            "success": true/false,
+            "message": "批量任务已取消"
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        batch_id = data.get('batch_id')
+
+        if not batch_id:
+            return jsonify({
+                'success': False,
+                'message': '缺少 batch_id',
+                'data': None
+            }), 400
+
+        # 获取执行器
+        batch_queue = BacktestBatchQueue.get_executor(batch_id)
+
+        if not batch_queue:
+            return jsonify({
+                'success': False,
+                'message': '批量任务不存在',
+                'data': None
+            }), 404
+
+        # 停止执行
+        batch_queue.stop()
+
+        logger.info(f"取消批量回测执行: {batch_id}")
+
+        return jsonify({
+            'success': True,
+            'message': '批量任务已取消',
+            'data': {
+                'batch_id': batch_id
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"取消批量回测执行失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'取消批量回测执行失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/batch/list', methods=['GET'])
+def list_batch_backtest():
+    """
+    获取批量回测任务列表
+
+    返回:
+        {
+            "success": true/false,
+            "data": {
+                "batches": [...]
+            }
+        }
+    """
+    try:
+        from pathlib import Path
+
+        batch_queue_dir = Path("data/backtest_batch")
+        batches = []
+
+        if batch_queue_dir.exists():
+            for queue_file in batch_queue_dir.glob("queue_*.json"):
+                try:
+                    with open(queue_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        batches.append({
+                            'batch_id': data.get('batch_id'),
+                            'status': data.get('status'),
+                            'total_tasks': len(data.get('tasks', [])),
+                            'created_at': data.get('created_at'),
+                            'started_at': data.get('started_at'),
+                            'completed_at': data.get('completed_at')
+                        })
+                except Exception as e:
+                    logger.warning(f"读取批量任务文件失败: {queue_file}, error: {str(e)}")
+
+        # 按创建时间倒序排列
+        batches.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'batches': batches
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"获取批量回测任务列表失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'获取批量回测任务列表失败: {str(e)}',
             'data': None
         }), 500
 

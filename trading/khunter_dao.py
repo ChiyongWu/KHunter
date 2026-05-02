@@ -25,7 +25,7 @@ class KHunterDAO:
     # 字段列表
     FIELDS = [
         'stock_code', 'stock_name', 'industry', 'sector',
-        'hunting_date', 'strategy_name', 'support_level', 'current_price',
+        'key_date', 'hunting_date', 'strategy_name', 'support_level', 'current_price',
         'price_diff', 'price_diff_percent', 'buy_range', 'score', 'score_date', 'selection_record_id',
         'timing_strategy', 'timing_signal'
     ]
@@ -188,6 +188,7 @@ class KHunterDAO:
                 
                 sql = f"""
                 SELECT stock_code, stock_name, industry, sector,
+                       key_date, hunting_date,
                        support_level, current_price, price_diff, price_diff_percent,
                        buy_range, strategy_name, score_date, score,
                        timing_strategy, timing_signal
@@ -203,6 +204,7 @@ class KHunterDAO:
                 
                 sql = f"""
                 SELECT stock_code, stock_name, industry, sector,
+                       key_date, hunting_date,
                        support_level, current_price, price_diff, price_diff_percent,
                        buy_range, strategy_name, score_date, score,
                        timing_strategy, timing_signal
@@ -437,11 +439,11 @@ class KHunterDAO:
             sql = f"""
             INSERT INTO {self.TABLE_NAME} (
                 stock_code, stock_name, industry, sector,
-                hunting_date, strategy_name, support_level, current_price,
+                key_date, hunting_date, strategy_name, support_level, current_price,
                 price_diff, price_diff_percent, buy_range, score, score_date, selection_record_id,
                 timing_strategy, timing_signal,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """
             
             # 2. 准备参数
@@ -450,6 +452,7 @@ class KHunterDAO:
                 result['stock_name'],
                 result.get('industry'),
                 result.get('sector'),
+                result.get('key_date'),  # 关键日日期（形态实际形成日期）
                 result['hunting_date'],
                 result['strategy_name'],
                 result['support_level'],
@@ -470,7 +473,8 @@ class KHunterDAO:
             # 4. 记录日志
             logger.debug(
                 f"插入记录: {result['stock_code']} "
-                f"{result['hunting_date']} {result['strategy_name']}"
+                f"关键日={result.get('key_date')} "
+                f"选入日={result['hunting_date']} {result['strategy_name']}"
             )
             
             return True
@@ -494,6 +498,7 @@ class KHunterDAO:
             # 1. 构建更新 SQL
             sql = f"""
             UPDATE {self.TABLE_NAME} SET
+                key_date = ?,
                 support_level = ?,
                 current_price = ?,
                 price_diff = ?,
@@ -509,6 +514,7 @@ class KHunterDAO:
             
             # 2. 准备参数
             params = (
+                result.get('key_date'),  # 关键日日期（形态实际形成日期）
                 result['support_level'],
                 result['current_price'],
                 result['price_diff'],
@@ -530,7 +536,8 @@ class KHunterDAO:
             # 4. 记录日志
             logger.debug(
                 f"更新记录: {result['stock_code']} "
-                f"{result['hunting_date']} {result['strategy_name']}"
+                f"关键日={result.get('key_date')} "
+                f"选入日={result['hunting_date']} {result['strategy_name']}"
             )
             
             return True

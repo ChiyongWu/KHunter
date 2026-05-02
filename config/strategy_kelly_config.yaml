@@ -10,7 +10,7 @@ strategies:
 
   ImmortalGuidanceStrategy:
     win_rate: 0.28
-    profit_loss_ratio: 3.6
+    profit_loss_ratio: 4
     description: 仙人指路策略
 
   LimitUpPullbackStrategy:

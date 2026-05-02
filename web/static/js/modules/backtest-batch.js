@@ -350,11 +350,12 @@ class BacktestUIManager {
    * @returns {string} HTML内容
    */
   formatResultContent(task, result) {
-    // 计算收益率，确保它是一个数字
-    const totalReturn = parseFloat(result.total_return) || 0;
-    const winRate = parseFloat(result.win_rate) || 0;
-    const maxDrawdown = parseFloat(result.max_drawdown) || 0;
-    const sharpeRatio = parseFloat(result.sharpe_ratio) || 0;
+    // 获取绩效指标（支持两种格式：直接字段或performance子对象）
+    const performance = result.performance || result;
+    const totalReturn = parseFloat(performance.total_return) || 0;
+    const winRate = parseFloat(performance.win_rate) || 0;
+    const maxDrawdown = parseFloat(performance.max_drawdown) || 0;
+    const sharpeRatio = parseFloat(performance.sharpe_ratio) || 0;
     
     // 确保trades是一个数组
     const trades = Array.isArray(result.trades) ? result.trades : [];
@@ -951,7 +952,7 @@ export {
 
 /**
  * 执行批量回测
- * 按顺序执行所有待执行的任务，显示进度，处理结果
+ * 改为后端任务队列执行，支持浏览器关闭后继续执行
  */
 async function executeBacktestBatch() {
   try {
@@ -970,7 +971,7 @@ async function executeBacktestBatch() {
       score_threshold: 60,
       buy_amount: 100000,
       max_daily_buys: 5,
-      stop_loss: -0.05,  // 修复：应该是负数，表示 -5%（止损 5%）
+      stop_loss: -0.05,
       take_profit: 0.15,
       max_hold_days: 10
     };
@@ -987,8 +988,8 @@ async function executeBacktestBatch() {
             score_threshold: config.score_threshold || 60,
             buy_amount: config.buy_amount || 100000,
             max_daily_buys: config.max_daily_buys || 5,
-            stop_loss: (config.stop_loss || -5) / 100, // 转换为小数
-            take_profit: (config.take_profit || 15) / 100, // 转换为小数
+            stop_loss: config.stop_loss || -5,  // 数据库存的是百分比，直接使用
+            take_profit: config.take_profit || 15,  // 数据库存的是百分比，直接使用
             max_hold_days: config.hold_period || 10
           };
         }
@@ -997,91 +998,191 @@ async function executeBacktestBatch() {
       console.error('加载回测配置失败:', error);
     }
 
-    // 逐个执行任务
-    for (let i = 0; i < tasks.length; i++) {
-      const task = tasks[i];
-      
-      // 更新任务状态
-      backtestTaskManager.updateTaskStatus(task.id, 'running');
-      
-      // 显示执行进度
-      const progress = Math.round((i / tasks.length) * 100);
-      backtestUIManager.showProgress({
-        strategyName: task.strategy_name,  // 使用中文名称显示
-        currentIndex: i + 1,
-        totalCount: tasks.length,
-        progress: progress,
-        remainingTime: `${Math.round((tasks.length - i - 1) * 2.5)}小时`
-      });
+    // 构建任务列表
+    const taskList = tasks.map(task => ({
+      strategy_name: task.strategy_name,
+      start_date: task.start_date,
+      end_date: task.end_date,
+      timing_strategy: task.timing_strategy || 'turtle',
+      support_level_method: task.support_level_method || 'ma20'
+    }));
 
-      // 执行回测（不带重试）
-      try {
-        // 构建回测参数
-        const backtestParams = {
-          config_name: `${task.strategy_name}_${task.start_date}_${task.end_date}`,
-          strategy_name: task.strategy_name,
-          start_date: task.start_date,
-          end_date: task.end_date,
+    // 1. 提交批量任务到后端
+    const submitResponse = await fetch('/api/trading/backtest/batch/submit', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        tasks: taskList,
+        config: {
           initial_capital: savedParams.initial_capital,
           score_threshold: savedParams.score_threshold,
-          buy_amount: savedParams.buy_amount,
           max_daily_buys: savedParams.max_daily_buys,
-          timing_strategy: task.timing_strategy,
-          support_level_method: task.support_level_method,
-          stop_loss: savedParams.stop_loss * 100, // 转换为百分比
-          take_profit: savedParams.take_profit * 100, // 转换为百分比
+          stop_loss: savedParams.stop_loss,
+          take_profit: savedParams.take_profit,
           max_hold_days: savedParams.max_hold_days
-        };
+        }
+      })
+    });
 
-        // 执行回测
-        console.log(`执行回测任务 ${i + 1}/${tasks.length}: ${task.strategy_name}`);
-        const response = await fetch('/api/trading/backtest/run', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(backtestParams)
+    if (!submitResponse.ok) {
+      throw new Error('提交批量任务失败');
+    }
+
+    const submitData = await submitResponse.json();
+    if (!submitData.success) {
+      throw new Error(submitData.message || '提交批量任务失败');
+    }
+
+    const batchId = submitData.data.batch_id;
+    console.log(`批量任务已提交: ${batchId}, 任务数: ${submitData.data.total_tasks}`);
+
+    // 2. 开始执行
+    const startResponse = await fetch('/api/trading/backtest/batch/start', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ batch_id: batchId })
+    });
+
+    if (!startResponse.ok) {
+      throw new Error('启动批量任务失败');
+    }
+
+    const startData = await startResponse.json();
+    if (!startData.success) {
+      throw new Error(startData.message || '启动批量任务失败');
+    }
+
+    console.log(`批量任务已开始执行: ${batchId}`);
+
+    // 3. 轮询进度
+    await pollBatchStatus(batchId, tasks.length);
+
+    // 4. 获取最终结果
+    const resultsResponse = await fetch(`/api/trading/backtest/batch/results?batch_id=${batchId}`);
+    if (resultsResponse.ok) {
+      const resultsData = await resultsResponse.json();
+      if (resultsData.success && resultsData.data.results) {
+        // 更新任务状态和结果
+        resultsData.data.results.forEach((result, index) => {
+          const task = tasks[index];
+          if (task) {
+            if (result.status === 'completed' && result.result) {
+              backtestTaskManager.updateTaskStatus(task.id, 'completed', result.result);
+              backtestUIManager.addResultTab(task, result.result);
+            } else if (result.status === 'failed') {
+              backtestTaskManager.updateTaskStatus(task.id, 'failed');
+              if (result.error) {
+                backtestUIManager.showError(`${task.strategy_name}: ${result.error}`);
+              }
+            }
+          }
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        if (data.success) {
-          // 保存结果
-          const result = data.data;
-          backtestTaskManager.updateTaskStatus(task.id, 'completed', result);
-          
-          // 添加结果页签
-          backtestUIManager.addResultTab(task, result);
-          
-          // 显示成功信息
-          backtestUIManager.showInfo(`任务 ${i + 1}/${tasks.length} 执行完成: ${task.strategy_name}`, 'success');
-        } else {
-          throw new Error(data.message || '执行回测失败');
-        }
-      } catch (error) {
-        // 标记任务失败
-        console.error(`执行任务 ${task.id} 失败:`, error);
-        backtestTaskManager.updateTaskStatus(task.id, 'failed');
-        backtestUIManager.showError(`执行任务 ${i + 1} 失败: ${error.message}`);
       }
     }
 
-    // 执行完成后隐藏进度
+    // 执行完成
     backtestUIManager.hideProgress();
-    
-    // 恢复按钮状态
     backtestUIManager.elements.startExecutionBtn.disabled = false;
-    
-    // 显示完成信息
     backtestUIManager.showInfo('批量回测执行完成', 'success');
-    
+
   } catch (error) {
     console.error('批量回测执行失败:', error);
     backtestUIManager.showError(`批量回测执行失败: ${error.message}`);
     backtestUIManager.hideProgress();
     backtestUIManager.elements.startExecutionBtn.disabled = false;
   }
+}
+
+/**
+ * 轮询批量任务状态
+ * @param {string} batchId - 批量任务ID
+ * @param {number} totalTasks - 总任务数
+ */
+async function pollBatchStatus(batchId, totalTasks) {
+  const pollInterval = 5000; // 5秒轮询一次
+  const displayedTaskIndices = new Set(); // 记录已显示的任务索引
+
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/trading/backtest/batch/status?batch_id=${batchId}`);
+        if (!response.ok) {
+          throw new Error('查询状态失败');
+        }
+
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error(data.message || '查询状态失败');
+        }
+
+        const status = data.data;
+        console.log(`批量任务状态: ${status.status}, 进度: ${status.completed_tasks}/${status.total_tasks}`);
+
+        // 更新 UI 进度
+        if (status.current_task) {
+          backtestUIManager.showProgress({
+            strategyName: status.current_task.strategy_name || '执行中',
+            currentIndex: status.completed_tasks + 1,
+            totalCount: status.total_tasks,
+            progress: Math.round((status.completed_tasks / status.total_tasks) * 100),
+            remainingTime: `${Math.round((status.total_tasks - status.completed_tasks - 1) * 2.5)}小时`
+          });
+        }
+
+        // 实时检查并显示已完成的任务结果
+        if (status.task_results && status.task_results.length > 0) {
+          status.task_results.forEach((taskResult, index) => {
+            if (taskResult.status === 'completed' && taskResult.result && !displayedTaskIndices.has(index)) {
+              // 创建临时任务对象用于显示结果
+              const tempTask = {
+                id: index + 1,
+                strategy_name: taskResult.strategy_name,
+                start_date: taskResult.start_date || '',
+                end_date: taskResult.end_date || ''
+              };
+              backtestTaskManager.updateTaskStatus(tempTask.id, 'completed', taskResult.result);
+              backtestUIManager.addResultTab(tempTask, taskResult.result);
+              displayedTaskIndices.add(index);
+              console.log(`已显示任务 ${index + 1} 的结果: ${taskResult.strategy_name}`);
+            }
+          });
+        }
+
+        // 检查是否完成
+        if (status.status === 'completed' || status.status === 'failed') {
+          // 显示剩余未显示的完成任务
+          if (status.task_results && status.task_results.length > 0) {
+            status.task_results.forEach((taskResult, index) => {
+              if (taskResult.status === 'completed' && taskResult.result && !displayedTaskIndices.has(index)) {
+                const tempTask = {
+                  id: index + 1,
+                  strategy_name: taskResult.strategy_name,
+                  start_date: taskResult.start_date || '',
+                  end_date: taskResult.end_date || ''
+                };
+                backtestTaskManager.updateTaskStatus(tempTask.id, 'completed', taskResult.result);
+                backtestUIManager.addResultTab(tempTask, taskResult.result);
+                displayedTaskIndices.add(index);
+              }
+            });
+          }
+          resolve();
+          return;
+        }
+
+        // 继续轮询
+        setTimeout(poll, pollInterval);
+
+      } catch (error) {
+        console.error('轮询状态失败:', error);
+        reject(error);
+      }
+    };
+
+    poll();
+  });
 }

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import logging
 
-from utils.strategy_name_mapper import get_chinese_name
+from utils.strategy_name_mapper import get_chinese_name, get_english_name
 
 logger = logging.getLogger(__name__)
 
@@ -201,10 +201,13 @@ class PreloadManager:
             选股结果列表
         """
         try:
+            # 将中文策略名称转换为英文名称
+            english_strategy_name = get_english_name(strategy_name)
+            
             # 使用策略注册器获取策略
-            strategy = self.backtest_engine.strategy_registry.get_strategy(strategy_name)
+            strategy = self.backtest_engine.strategy_registry.get_strategy(english_strategy_name)
             if not strategy:
-                logger.error(f"策略 {strategy_name} 不存在")
+                logger.error(f"策略 {strategy_name}（英文：{english_strategy_name}）不存在")
                 return []
 
             cache_size = len(self.backtest_engine.stock_filtered_cache)
