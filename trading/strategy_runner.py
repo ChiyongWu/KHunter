@@ -201,6 +201,16 @@ class StrategyRunner:
         # 初始化预加载管理器（复用过回测引擎的预加载机制）
         from trading.preload_manager import PreloadManager
         self.preload_manager = PreloadManager(self)
+        
+        # ========== 新增：移动止损、亏损冷却期、连续亏损限制相关状态 ==========
+        # 移动止损：持仓期间最高收益率
+        self.position_highest_profit = {}  # {stock_code: highest_profit}
+        
+        # 亏损冷却池：单笔亏损超阈值后加入冷却
+        self.loss_cool_down_pool = {}  # {stock_code: cool_down_end_date}
+        
+        # 连续亏损计数：记录每只股票的连续亏损次数
+        self.consecutive_loss_count = {}  # {stock_code: consecutive_loss_count}
     
     def _load_pool_removal_config(self) -> Dict:
         """加载股票池移除策略配置
@@ -502,9 +512,19 @@ class StrategyRunner:
                 support_level = self._calculate_support_level(stock_info, stock['preload_date'], stock['source_strategy'])
                 support_method = self._get_support_method_for_strategy(stock['source_strategy'])
 
+                # 从预加载数据中提取关键日
+                key_date = stock.get('signal', {}).get('key_date')
+                if key_date:
+                    if hasattr(key_date, 'strftime'):
+                        key_date = key_date.strftime('%Y-%m-%d')
+                    key_date = str(key_date)
+                else:
+                    key_date = stock.get('preload_date', stock['preload_date'])
+
                 self.buy_candidate_pool.append({
                     'stock': stock_info,
                     'added_date': stock['preload_date'],
+                    'key_date': key_date,                      # 关键日（形态实际形成日期）
                     'strategy_name': stock['source_strategy'],
                     'support_level': support_level,
                     'support_method': support_method
@@ -512,7 +532,7 @@ class StrategyRunner:
 
                 if support_level > 0:
                     logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
-                               f"支撑位={support_level:.2f}, 方法={support_method}, 评分={stock.get('score', 0)}")
+                               f"关键日={key_date}, 支撑位={support_level:.2f}, 方法={support_method}, 评分={stock.get('score', 0)}")
                 else:
                     logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
                                f"支撑位计算失败, 评分={stock.get('score', 0)}")
@@ -926,6 +946,52 @@ class StrategyRunner:
             logger.error(traceback.format_exc())
             return {}
     
+    def _check_cool_down(self, stock_code: str, current_date: str) -> bool:
+        """检查股票是否在冷却期内
+        
+        Args:
+            stock_code: 股票代码
+            current_date: 当前日期字符串
+            
+        Returns:
+            True表示在冷却期内，False表示不在冷却期
+        """
+        if stock_code not in self.loss_cool_down_pool:
+            return False
+        
+        cool_down_end = self.loss_cool_down_pool[stock_code]
+        if isinstance(cool_down_end, str):
+            cool_down_end_date = datetime.datetime.strptime(cool_down_end, '%Y-%m-%d').date()
+        else:
+            cool_down_end_date = cool_down_end
+        
+        current_date_obj = datetime.datetime.strptime(current_date, '%Y-%m-%d').date()
+        
+        if current_date_obj <= cool_down_end_date:
+            return True
+        else:
+            # 冷却期结束，移除
+            del self.loss_cool_down_pool[stock_code]
+            return False
+    
+    def _get_future_trading_day(self, start_date: str, days: int) -> str:
+        """获取指定日期之后的第N个交易日
+        
+        Args:
+            start_date: 起始日期字符串
+            days: 往后多少个交易日
+            
+        Returns:
+            目标交易日字符串
+        """
+        # 粗略估计：每个交易日约1天（忽略周末）
+        # 实际实现可以从交易日历获取
+        current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+        # 考虑周末，平均每个交易日约1.4天
+        estimated_days = int(days * 1.4)
+        future_date = current_date + datetime.timedelta(days=estimated_days)
+        return future_date.strftime('%Y-%m-%d')
+    
     def _has_kline_data(self, date: str) -> bool:
         """检查指定日期是否有K线数据
         
@@ -1159,6 +1225,35 @@ class StrategyRunner:
                 buy_price = position['buy_price']
                 profit_rate = (current_price - buy_price) / buy_price
                 
+                # ========== 新增：移动止损逻辑 ==========
+                # 获取移动止损配置
+                enable_trailing_stop = self.config.get('enable_trailing_stop', True)
+                trailing_base_stop = self.config.get('trailing_base_stop', -6)
+                trailing_profit_levels = self.config.get('trailing_profit_levels', [
+                    {'profit_threshold': 5, 'stop_level': 0},
+                    {'profit_threshold': 10, 'stop_level': 3},
+                    {'profit_threshold': 15, 'stop_level': 5},
+                    {'profit_threshold': 20, 'stop_level': 8}
+                ])
+                
+                # 计算当前止损线
+                current_stop = self.stop_loss_threshold
+                if enable_trailing_stop:
+                    # 获取持仓期间最高收益率
+                    highest_profit = self.position_highest_profit.get(stock_code, profit_rate * 100)
+                    # 更新最高收益率
+                    if profit_rate * 100 > highest_profit:
+                        highest_profit = profit_rate * 100
+                        self.position_highest_profit[stock_code] = highest_profit
+                    
+                    # 根据最高收益率计算移动止损线
+                    for level in trailing_profit_levels:
+                        if highest_profit >= level['profit_threshold']:
+                            current_stop = level['stop_level'] / 100  # 转换为小数
+                    
+                    logger.info(f"  移动止损: 最高收益={highest_profit:.2f}%, 当前止损线={current_stop*100:.2f}%")
+                # ========== 移动止损逻辑结束 ==========
+                
                 # 记录择时信号详情
                 stock_name = position['stock_name']
                 logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
@@ -1169,7 +1264,7 @@ class StrategyRunner:
                            f"信号: {timing_result.message}")
                 
                 # 生成卖出信号
-                if timing_result.is_sell or profit_rate >= self.take_profit_threshold or profit_rate <= self.stop_loss_threshold:
+                if timing_result.is_sell or profit_rate >= self.take_profit_threshold or profit_rate <= current_stop:
                     # 确定卖出原因
                     if timing_result.is_sell:
                         reason = timing_result.message
@@ -1177,6 +1272,9 @@ class StrategyRunner:
                     elif profit_rate >= self.take_profit_threshold:
                         reason = f'止盈 (收益率: {profit_rate*100:.2f}%)'
                         signal_type = 'take_profit'
+                    elif enable_trailing_stop and current_stop > self.stop_loss_threshold:
+                        reason = f'移动止损 (收益率: {profit_rate*100:.2f}%, 止损线: {current_stop*100:.2f}%)'
+                        signal_type = 'trailing_stop'
                     else:
                         reason = f'止损 (收益率: {profit_rate*100:.2f}%)'
                         signal_type = 'stop_loss'
@@ -1209,6 +1307,42 @@ class StrategyRunner:
             for stock_code in stocks_to_remove:
                 del self.portfolio[stock_code]
             
+            # ========== 新增：卖出后更新冷却池和连续亏损计数 ==========
+            for sell_signal in sell_signals:
+                stock_code = sell_signal['stock_code']
+                profit_rate = sell_signal['profit_rate'] if 'profit_rate' in sell_signal else 0
+                
+                # 获取配置
+                enable_loss_cool_down = self.config.get('enable_loss_cool_down', True)
+                enable_consecutive_loss_limit = self.config.get('enable_consecutive_loss_limit', True)
+                cool_down_threshold = self.config.get('cool_down_threshold', -8)
+                cool_down_days = self.config.get('cool_down_days', 20)
+                max_consecutive_losses = self.config.get('max_consecutive_losses', 2)
+                consecutive_loss_cool_down = self.config.get('consecutive_loss_cool_down', 30)
+                
+                # 更新连续亏损计数
+                if enable_consecutive_loss_limit:
+                    if profit_rate > 0:
+                        # 盈利，重置计数
+                        self.consecutive_loss_count[stock_code] = 0
+                    else:
+                        # 亏损，增加计数
+                        current_count = self.consecutive_loss_count.get(stock_code, 0) + 1
+                        self.consecutive_loss_count[stock_code] = current_count
+                        
+                        # 检查是否达到连续亏损限制
+                        if current_count >= max_consecutive_losses:
+                            cool_down_end = self._get_future_trading_day(trade_date, consecutive_loss_cool_down)
+                            self.loss_cool_down_pool[stock_code] = cool_down_end
+                            logger.warning(f"  股票 {stock_code} 连续亏损 {current_count} 次，加入冷却池至 {cool_down_end}")
+                
+                # 检查是否触发亏损冷却期（单笔亏损超阈值）
+                elif enable_loss_cool_down and profit_rate * 100 <= cool_down_threshold:
+                    cool_down_end = self._get_future_trading_day(trade_date, cool_down_days)
+                    self.loss_cool_down_pool[stock_code] = cool_down_end
+                    logger.warning(f"  股票 {stock_code} 单笔亏损 {profit_rate*100:.2f}% 超过阈值 {cool_down_threshold}%，加入冷却池至 {cool_down_end}")
+            # ========== 冷却池和连续亏损计数更新结束 ==========
+            
             logger.info(f"【卖出汇总】{trade_date} 执行卖出操作，生成 {len(sell_signals)} 个卖出信号")
         except Exception as e:
             logger.error(f"执行卖出操作失败: {str(e)}")
@@ -1232,8 +1366,12 @@ class StrategyRunner:
         try:
             # 检查可用资金
             current_cash = initial_cash - sum(p['quantity'] * p['buy_price'] for p in self.portfolio.values())
+            # 可用资金小于2000元时不执行任何买入
+            if current_cash < 2000:
+                logger.info(f"【买入检查】{trade_date} 可用资金不足2000元 (¥{current_cash:.2f})，跳过买入操作")
+                return buy_signals
             if current_cash <= 0:
-                logger.info(f"【买入检查】{trade_date} 可用资金不足 (¥{current_cash:.2f})，跳过买入操作")
+                logger.info(f"【买入检查】{trade_date} 可用资金为负 (¥{current_cash:.2f})，跳过买入操作")
                 return buy_signals
             
             logger.info(f"【买入检查】{trade_date} 开始检查买入机会 | 可用资金: ¥{current_cash:.2f} | "
@@ -1247,6 +1385,26 @@ class StrategyRunner:
                 stock_code = stock_info['stock_code']
                 stock_name = stock_info['stock_name']
                 score = stock_info.get('score', 0)
+                
+                # ========== 新增：检查冷却期和连续亏损限制 ==========
+                enable_loss_cool_down = self.config.get('enable_loss_cool_down', True)
+                enable_consecutive_loss_limit = self.config.get('enable_consecutive_loss_limit', True)
+                max_consecutive_losses = self.config.get('max_consecutive_losses', 2)
+                
+                # 检查冷却期
+                if enable_loss_cool_down or enable_consecutive_loss_limit:
+                    if self._check_cool_down(stock_code, trade_date):
+                        cool_down_end = self.loss_cool_down_pool.get(stock_code, 'N/A')
+                        logger.info(f"【买入检查】{trade_date} {stock_code} 在冷却期内（至 {cool_down_end}），跳过")
+                        continue
+                
+                # 检查连续亏损限制
+                if enable_consecutive_loss_limit:
+                    consecutive_count = self.consecutive_loss_count.get(stock_code, 0)
+                    if consecutive_count >= max_consecutive_losses:
+                        logger.info(f"【买入检查】{trade_date} {stock_code} 连续亏损 {consecutive_count} 次，达到限制 {max_consecutive_losses}，跳过")
+                        continue
+                # ========== 冷却期和连续亏损限制检查结束 ==========
                 
                 # 获取股票数据（优先从缓存获取）
                 df = self.stock_filtered_cache.get(stock_code)
@@ -1502,9 +1660,19 @@ class StrategyRunner:
                             support_level = self._calculate_support_level(stock, strategy_name, selection_date_str)
                             support_method = self._get_support_method_for_strategy(strategy_name)
                             
+                            # 提取关键日（从策略信号中获取，默认为选入日期）
+                            key_date = stock.get('signal', {}).get('key_date')
+                            if key_date:
+                                if hasattr(key_date, 'strftime'):
+                                    key_date = key_date.strftime('%Y-%m-%d')
+                                key_date = str(key_date)
+                            else:
+                                key_date = selection_date_str
+
                             self.buy_candidate_pool.append({
                                 'stock': stock,
                                 'added_date': selection_date_str,
+                                'key_date': key_date,                      # 关键日（形态实际形成日期）
                                 'strategy_name': strategy_name,
                                 'support_level': support_level,
                                 'support_method': support_method
@@ -1725,9 +1893,19 @@ class StrategyRunner:
                         support_level = self._calculate_support_level(stock, selection_strategy, working_date)
                         support_method = self._get_support_method_for_strategy(selection_strategy)
                         
+                        # 提取关键日（从策略信号中获取，默认为选入日期）
+                        key_date = stock.get('signal', {}).get('key_date')
+                        if key_date:
+                            if hasattr(key_date, 'strftime'):
+                                key_date = key_date.strftime('%Y-%m-%d')
+                            key_date = str(key_date)
+                        else:
+                            key_date = working_date
+
                         self.buy_candidate_pool.append({
                             'stock': stock,
                             'added_date': working_date,
+                            'key_date': key_date,                      # 关键日（形态实际形成日期）
                             'strategy_name': selection_strategy,
                             'support_level': support_level,
                             'support_method': support_method

@@ -134,6 +134,16 @@ class BacktestEngine:
         from trading.preload_manager import PreloadManager
         self.preload_manager = PreloadManager(self)
         
+        # ========== 新增：移动止损、亏损冷却期、连续亏损限制相关状态 ==========
+        # 移动止损：持仓期间最高收益率
+        self.position_highest_profit = {}  # {stock_code: highest_profit}
+        
+        # 亏损冷却池：单笔亏损超阈值后加入冷却
+        self.loss_cool_down_pool = {}  # {stock_code: cool_down_end_date}
+        
+        # 连续亏损计数：记录每只股票的连续亏损次数
+        self.consecutive_loss_count = {}  # {stock_code: consecutive_loss_count}
+        
     def run_backtest(self, strategy_name: str, config: Dict) -> Dict:
         """运行回测
         
@@ -329,17 +339,28 @@ class BacktestEngine:
                         # 获取支撑位计算方法
                         support_method = self._get_support_method_for_strategy(strategy_name)
                         
+                        # 提取关键日（从策略信号中获取，默认为选入日期）
+                        key_date = stock.get('signal', {}).get('key_date')
+                        if key_date:
+                            # 确保 key_date 是字符串格式
+                            if hasattr(key_date, 'strftime'):
+                                key_date = key_date.strftime('%Y-%m-%d')
+                            key_date = str(key_date)
+                        else:
+                            key_date = selection_date.strftime('%Y-%m-%d') if hasattr(selection_date, 'strftime') else str(selection_date)
+
                         self.buy_candidate_pool.append({
                             'stock': stock,
                             'added_date': selection_date,
+                            'key_date': key_date,                    # 关键日（形态实际形成日期）
                             'strategy_name': strategy_name,
                             'support_level': support_level,       # 支撑位价格
                             'support_method': support_method      # 支撑位计算方法
                         })
-                        # 记录加入日志（包含支撑位信息）
+                        # 记录加入日志（包含关键日和支撑位信息）
                         if support_level > 0:
                             logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池, "
-                                       f"支撑位={support_level:.2f}, 方法={support_method}")
+                                       f"关键日={key_date}, 支撑位={support_level:.2f}, 方法={support_method}")
                         else:
                             logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池, 支撑位计算失败")
                         new_added += 1
@@ -379,9 +400,32 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
+                    # ========== 新增：检查冷却期和连续亏损限制 ==========
+                    # 获取配置（从config中获取，如果没有则使用默认值）
+                    enable_loss_cool_down = config.get('enable_loss_cool_down', True)
+                    enable_consecutive_loss_limit = config.get('enable_consecutive_loss_limit', True)
+                    max_consecutive_losses = config.get('max_consecutive_losses', 2)
+                    
+                    # 检查冷却期
+                    if enable_loss_cool_down or enable_consecutive_loss_limit:
+                        if self._check_cool_down(stock_code, current_date):
+                            cool_down_end = self.loss_cool_down_pool.get(stock_code, 'N/A')
+                            logger.info(f"股票 {stock_code} 在冷却期内（至 {cool_down_end}），跳过")
+                            remaining_candidates.append(candidate)
+                            continue
+                    
+                    # 检查连续亏损限制
+                    if enable_consecutive_loss_limit:
+                        consecutive_count = self.consecutive_loss_count.get(stock_code, 0)
+                        if consecutive_count >= max_consecutive_losses:
+                            logger.info(f"股票 {stock_code} 连续亏损 {consecutive_count} 次，达到限制 {max_consecutive_losses}，跳过")
+                            remaining_candidates.append(candidate)
+                            continue
+                    # ========== 冷却期和连续亏损限制检查结束 ==========
+                    
                     # 检查当日最大买入限制
                     if daily_buys >= max_daily_buys:
-                        logger.info(f"达到当日最大买入限制: {max_daily_buys}")
+                        logger.info(f"【未执行买入】{stock_code} {stock.get('stock_name', '')}: 达到今日买入次数{max_daily_buys}次限制，未执行")
                         remaining_candidates.append(candidate)
                         continue
                     
@@ -511,6 +555,11 @@ class BacktestEngine:
                     
                     # 确保不超过可用资金
                     buy_amount = quantity * buy_price
+                    # 可用资金小于2000元时跳过实际买入执行，但仍保留在候选池
+                    if current_capital < 2000:
+                        logger.info(f"【未执行买入】{stock_code} {stock['stock_name']}: 可用资金不足2000元（当前{current_capital:.2f}元），跳过执行")
+                        remaining_candidates.append(candidate)
+                        continue
                     if buy_amount > current_capital:
                         logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 资金不足（需要{buy_amount:.2f}，可用{current_capital:.2f}）")
                         remaining_candidates.append(candidate)
@@ -726,9 +775,19 @@ class BacktestEngine:
                 support_level = self._calculate_support_level(stock_info, stock['preload_date'], stock['source_strategy'])
                 support_method = self._get_support_method_for_strategy(stock['source_strategy'])
                 
+                # 从预加载数据中提取关键日
+                key_date = stock.get('signal', {}).get('key_date')
+                if key_date:
+                    if hasattr(key_date, 'strftime'):
+                        key_date = key_date.strftime('%Y-%m-%d')
+                    key_date = str(key_date)
+                else:
+                    key_date = stock.get('preload_date', stock['preload_date'])
+
                 self.buy_candidate_pool.append({
                     'stock': stock_info,
                     'added_date': stock['preload_date'],
+                    'key_date': key_date,                      # 关键日（形态实际形成日期）
                     'strategy_name': stock['source_strategy'],
                     'support_level': support_level,
                     'support_method': support_method
@@ -736,7 +795,7 @@ class BacktestEngine:
                 
                 if support_level > 0:
                     logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
-                               f"支撑位={support_level:.2f}, 方法={support_method}, 评分={stock.get('score', 0)}")
+                               f"关键日={key_date}, 支撑位={support_level:.2f}, 方法={support_method}, 评分={stock.get('score', 0)}")
                 else:
                     logger.info(f"预加载股票 {stock['stock_code']} {stock['stock_name']} 加入股票池, "
                                f"支撑位计算失败, 评分={stock.get('score', 0)}")
@@ -1180,7 +1239,8 @@ class BacktestEngine:
             raise ValueError("YAML配置无启用的策略")
         
         BacktestEngine._pool_removal_config_cache = config_map
-        logger.info(f"从YAML配置加载股票池移除策略: {len([k for k in config_map.keys() if not k.endswith('策略') and not k.endswith('拐点')])} 个策略")
+        enabled_count = len([name for name, cfg in strategies.items() if cfg.get('is_enabled', True)])
+        logger.info(f"从YAML配置加载股票池移除策略: {enabled_count} 个策略")
         
         return config_map
 
@@ -1793,6 +1853,26 @@ class BacktestEngine:
         stop_loss = config.get('stop_loss', -7)  # 止损7%
         hold_period = config.get('hold_period', 10)
         
+        # 获取移动止损配置
+        enable_trailing_stop = config.get('enable_trailing_stop', True)
+        trailing_base_stop = config.get('trailing_base_stop', -6)
+        trailing_profit_levels = config.get('trailing_profit_levels', [
+            {'profit_threshold': 5, 'stop_level': 0},
+            {'profit_threshold': 10, 'stop_level': 3},
+            {'profit_threshold': 15, 'stop_level': 5},
+            {'profit_threshold': 20, 'stop_level': 8}
+        ])
+        
+        # 获取亏损冷却期配置
+        enable_loss_cool_down = config.get('enable_loss_cool_down', True)
+        cool_down_threshold = config.get('cool_down_threshold', -8)
+        cool_down_days = config.get('cool_down_days', 20)
+        
+        # 获取连续亏损限制配置
+        enable_consecutive_loss_limit = config.get('enable_consecutive_loss_limit', True)
+        max_consecutive_losses = config.get('max_consecutive_losses', 2)
+        consecutive_loss_cool_down = config.get('consecutive_loss_cool_down', 30)
+        
         for position in positions:
             stock_code = position['stock_code']
             stock_name = position['stock_name']
@@ -1844,9 +1924,28 @@ class BacktestEngine:
                 if return_rate >= take_profit:
                     sell_type = 'take_profit'
                     logger.info(f"  触发止盈: 收益率 {return_rate:.2f}% >= {take_profit}%")
-                elif return_rate <= stop_loss:
-                    sell_type = 'stop_loss'
-                    logger.info(f"  触发止损: 收益率 {return_rate:.2f}% <= {stop_loss}%")
+                else:
+                    # 计算当前止损线（支持移动止损）
+                    current_stop = stop_loss
+                    if enable_trailing_stop:
+                        # 获取持仓期间最高收益率
+                        highest_profit = self.position_highest_profit.get(stock_code, return_rate)
+                        # 更新最高收益率
+                        if return_rate > highest_profit:
+                            highest_profit = return_rate
+                            self.position_highest_profit[stock_code] = highest_profit
+                        
+                        # 根据最高收益率计算移动止损线
+                        for level in trailing_profit_levels:
+                            if highest_profit >= level['profit_threshold']:
+                                current_stop = level['stop_level']
+                        
+                        logger.info(f"  移动止损: 最高收益={highest_profit:.2f}%, 当前止损线={current_stop}%")
+                    
+                    # 检查是否触发止损（包括移动止损）
+                    if return_rate <= current_stop:
+                        sell_type = 'trailing_stop' if current_stop > stop_loss else 'stop_loss'
+                        logger.info(f"  触发{'移动' if current_stop > stop_loss else ''}止损: 收益率 {return_rate:.2f}% <= {current_stop}%")
                 
                 # 2. 如果未触发止盈止损，调用择时策略获取信号
                 if not sell_type and self.timing_strategy:
@@ -1926,7 +2025,102 @@ class BacktestEngine:
                 # 继续持有
                 remaining_positions.append(position)
         
+        # ========== 卖出后更新冷却池和连续亏损计数 ==========
+        for sell_record in sell_records:
+            stock_code = sell_record['stock_code']
+            return_rate = sell_record['return_rate']
+            
+            # 更新连续亏损计数
+            if enable_consecutive_loss_limit:
+                if return_rate > 0:
+                    # 盈利，重置计数
+                    self.consecutive_loss_count[stock_code] = 0
+                    logger.info(f"  股票 {stock_code} 盈利，连续亏损计数重置为0")
+                else:
+                    # 亏损，增加计数
+                    current_count = self.consecutive_loss_count.get(stock_code, 0) + 1
+                    self.consecutive_loss_count[stock_code] = current_count
+                    logger.info(f"  股票 {stock_code} 亏损，连续亏损计数: {current_count}")
+                    
+                    # 检查是否达到连续亏损限制
+                    if current_count >= max_consecutive_losses:
+                        # 添加到冷却池
+                        if enable_loss_cool_down or enable_consecutive_loss_limit:
+                            cool_down_end = self._get_future_trading_day(current_date, consecutive_loss_cool_down)
+                            self.loss_cool_down_pool[stock_code] = cool_down_end
+                            logger.warning(f"  股票 {stock_code} 连续亏损 {current_count} 次，加入冷却池至 {cool_down_end}")
+            
+            # 检查是否触发亏损冷却期（单笔亏损超阈值）
+            elif enable_loss_cool_down and return_rate <= cool_down_threshold:
+                cool_down_end = self._get_future_trading_day(current_date, cool_down_days)
+                self.loss_cool_down_pool[stock_code] = cool_down_end
+                logger.warning(f"  股票 {stock_code} 单笔亏损 {return_rate:.2f}% 超过阈值 {cool_down_threshold}%，加入冷却池至 {cool_down_end}")
+        
         return remaining_positions, sell_records
+    
+    def _check_cool_down(self, stock_code: str, current_date: datetime.date) -> bool:
+        """检查股票是否在冷却期内
+        
+        Args:
+            stock_code: 股票代码
+            current_date: 当前日期
+            
+        Returns:
+            True表示在冷却期内，False表示不在冷却期
+        """
+        if stock_code not in self.loss_cool_down_pool:
+            return False
+        
+        cool_down_end = self.loss_cool_down_pool[stock_code]
+        if isinstance(cool_down_end, str):
+            # 如果是字符串格式的日期，转换为date对象
+            try:
+                cool_down_end = datetime.datetime.strptime(cool_down_end, '%Y-%m-%d').date()
+            except ValueError:
+                # 解析失败，移除该条目
+                del self.loss_cool_down_pool[stock_code]
+                return False
+        
+        if current_date <= cool_down_end:
+            return True
+        else:
+            # 冷却期结束，移除
+            del self.loss_cool_down_pool[stock_code]
+            return False
+    
+    def _get_future_trading_day(self, start_date: datetime.date, days: int) -> datetime.date:
+        """获取指定交易日之后的第N个交易日
+        
+        Args:
+            start_date: 起始日期
+            days: 往后多少个交易日
+            
+        Returns:
+            目标交易日
+        """
+        # 获取排序后的交易日列表
+        if not self._sorted_trading_dates:
+            return start_date + datetime.timedelta(days=days * 2)  # 粗略估计
+        
+        start_str = start_date.strftime('%Y-%m-%d')
+        if start_str in self._sorted_trading_dates:
+            start_idx = self._sorted_trading_dates.index(start_str)
+        else:
+            # 找到最近的交易日索引
+            for i, td in enumerate(self._sorted_trading_dates):
+                if td >= start_str:
+                    start_idx = i
+                    break
+            else:
+                return start_date + datetime.timedelta(days=days * 2)
+        
+        # 获取第N个交易日
+        target_idx = start_idx + days
+        if target_idx < len(self._sorted_trading_dates):
+            return datetime.datetime.strptime(self._sorted_trading_dates[target_idx], '%Y-%m-%d').date()
+        else:
+            # 超出范围，使用粗略估计
+            return start_date + datetime.timedelta(days=days * 2)
     
     def _create_sell_record(self, position: Dict, sell_date: datetime.date, sell_price: float,
                             quantity: int, sell_amount: float, return_rate: float, hold_days: int, 
