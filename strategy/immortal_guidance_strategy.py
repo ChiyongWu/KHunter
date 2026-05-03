@@ -46,7 +46,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         default_params = {
             'surge_threshold': 0.06,
             'upper_shadow_ratio': 0.03,
-            'volume_ratio_min': 2.0,
+            'volume_ratio_min': 1.5,
             'volume_ratio_max': None,
             'ma_periods': [5, 10, 20],
             'trend_lookback_days': 20,
