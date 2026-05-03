@@ -236,7 +236,8 @@ class PreloadManager:
                     stock_name = self.backtest_engine.stock_name_cache.get(code, "未知")
                     
                     # 使用与回测引擎一致的 execute_selection 方法
-                    signal_list = strategy.execute_selection(df_slice, code, stock_name)
+                    # selection_date 为预加载日期（每个日期单独执行选股）
+                    signal_list = strategy.execute_selection(df_slice, code, stock_name, selection_date=date)
                     
                     # 处理选股结果
                     if signal_list:

@@ -1562,8 +1562,8 @@ class BacktestEngine:
                     
                     # 使用标准的 execute_selection 流程，确保指标被正确计算
                     # execute_selection 包含：数据验证 -> 快速过滤 -> 计算指标 -> 选股条件检查
-                    # 这样每天的选股结果将根据不同的日期数据而变化
-                    signal_list = strategy.execute_selection(df_to_date, code, name)
+                    # selection_date 传入选股日期，确保使用正确的日期进行数据时效性检查
+                    signal_list = strategy.execute_selection(df_to_date, code, name, selection_date=date_str)
                     
                     # 处理选股结果
                     if signal_list:

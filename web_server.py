@@ -73,10 +73,16 @@ def clean_data_for_json(obj):
             return None
         return float(obj)
     elif isinstance(obj, np.integer):
+        # 处理numpy int
         return int(obj)
+    elif isinstance(obj, np.bool_):
+        # 处理numpy bool
+        return bool(obj)
     elif isinstance(obj, np.ndarray):
+        # 处理numpy数组
         return clean_data_for_json(obj.tolist())
     elif isinstance(obj, pd.Timestamp):
+        # 处理pandas时间戳
         return obj.strftime('%Y-%m-%d %H:%M:%S')
     else:
         return obj
@@ -1149,6 +1155,7 @@ def run_selection():
         # 不再自动保存选股结果，由前端手动触发保存
         # 清理数据中的NaN和Inf值
         cleaned_results = clean_data_for_json(results)
+        cleaned_filter_stats = clean_data_for_json(filter_stats)
         
         # 将结果中的键从类名转换为中文名称
         if strategy_display_names:
@@ -1236,7 +1243,7 @@ def run_selection():
                         'matched': matched_results,
                         'count': len(matched_results)
                     },
-                    'filter_stats': filter_stats,
+                    'filter_stats': cleaned_filter_stats,
                     'b1_match': True,
                     'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
@@ -1249,7 +1256,7 @@ def run_selection():
         return jsonify({
             'success': True,
             'data': cleaned_results,
-            'filter_stats': filter_stats,
+            'filter_stats': cleaned_filter_stats,
             'b1_match': False,
             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'selection_date': end_date if end_date else datetime.now().strftime('%Y-%m-%d'),  # 添加选股日期

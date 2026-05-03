@@ -113,42 +113,45 @@ class BaseStrategy(ABC):
         """
         return []
     
-    def execute_selection(self, df, stock_code='', stock_name=''):
+    def execute_selection(self, df, stock_code='', stock_name='', selection_date=None):
         """
         标准化的选股执行过程
-        
+
         执行流程：
             1. 数据验证（包括检查已退市股票）
             2. 快速过滤（优先使用带lookback的版本）
             3. 计算指标
             4-N. 选股条件检查
-        
+
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param stock_code: 股票代码
         :param stock_name: 股票名称
+        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用今天
         :return: 选股信号列表
         """
-        # 第1步：数据验证（包括检查已退市股票）
         if not self._validate_data(df):
             return []
-        
-        # 第2步：快速过滤
-        # 优先使用 _quick_filter_with_lookback（支持回溯查找）
-        # 如果子类没有实现，则回退到 quick_filter
+
         if hasattr(self, '_quick_filter_with_lookback'):
             if not self._quick_filter_with_lookback(df):
                 return []
         elif not self.quick_filter(df):
             return []
-        
-        # 第3步：计算指标
+
         try:
             df = self.calculate_indicators(df)
         except Exception:
             return []
-        
-        # 第4-N步：选股条件检查（由子类实现）
-        return self.select_stocks(df, stock_name)
+
+        if selection_date is None:
+            from datetime import datetime
+            selection_date = datetime.now().strftime('%Y-%m-%d')
+            if hasattr(self, '_has_kline_data'):
+                if not self._has_kline_data(selection_date):
+                    if hasattr(self, '_get_previous_date_with_kline_data'):
+                        selection_date = self._get_previous_date_with_kline_data(selection_date)
+
+        return self.select_stocks(df, stock_name, selection_date=selection_date)
     
     def analyze_stock(self, stock_code, stock_name, df):
         """

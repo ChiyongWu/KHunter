@@ -37,6 +37,8 @@ class ImmortalGuidanceStrategy(BaseStrategy):
     支持lookback_days参数，可在最近N个交易日内追溯寻找已确认的仙人指路信号。
     """
 
+    _kline_date_cache = {}
+
     def __init__(self, params=None):
         """
         初始化仙人指路策略
@@ -54,7 +56,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             'anti_body_window': 3,
             'anti_body_ratio': 0.50,
             'strategy_weight': 70,
-            'lookback_days': 6,
+            'lookback_days': 3,
         }
 
         if params:
@@ -129,12 +131,13 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         except Exception:
             return 0.0, 0.0
 
-    def select_stocks(self, df, stock_name='') -> list:
+    def select_stocks(self, df, stock_name='', selection_date=None) -> list:
         """
         执行仙人指路策略选股
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param stock_name: 股票名称
+        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用当前日期进行时效性检查
         :return: 选股结果列表（只包含确认成功的信号）
         """
         if not self._validate_data(df):
@@ -146,19 +149,22 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not self._quick_filter_with_lookback(df):
             return []
 
+        if not self._check_data_freshness(df, selection_date=selection_date):
+            return []
+
         result = self.calculate_indicators(df)
 
         if len(result) < 30:
             return []
 
         try:
-            lookback_days = self.params.get('lookback_days', 6)
+            lookback_days = self.params.get('lookback_days', 3)
             selection_result = self._check_immortal_guidance_with_lookback(result, lookback_days)
             return selection_result
         except Exception as e:
             return []
 
-    def _check_immortal_guidance_with_lookback(self, df, lookback_days=6) -> list:
+    def _check_immortal_guidance_with_lookback(self, df, lookback_days=3) -> list:
         """
         检查仙人指路形态（支持回溯查找）
 
@@ -468,6 +474,129 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
         return False
 
+    def _check_data_freshness(self, df, max_days_old=5, selection_date=None) -> bool:
+        """
+        检查数据时效性，确保股票在选股日有数据
+
+        如果指定了selection_date，则检查数据的最新日期是否等于selection_date。
+        如果selection_date没有K线数据，自动调整为前一个有数据的日期。
+        如果未指定selection_date，则检查数据最新日期距离今天是否在max_days_old天内。
+
+        :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :param max_days_old: 最大允许的天数间隔（仅在未指定selection_date时使用）
+        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用当前日期判断
+        :return: True表示数据新鲜（可以选股），False表示数据过旧（应该排除）
+        """
+        if df is None or df.empty:
+            return False
+
+        try:
+            from datetime import datetime, timedelta
+            from utils.db_manager import DBManager
+
+            latest_date = df.iloc[0]['date']
+
+            if hasattr(latest_date, 'date'):
+                latest_date = latest_date.date()
+            elif isinstance(latest_date, str):
+                latest_date = datetime.strptime(str(latest_date).split()[0], '%Y-%m-%d').date()
+            else:
+                latest_date = latest_date
+
+            if selection_date is not None:
+                if isinstance(selection_date, str):
+                    target_date_str = selection_date.split()[0]
+
+                    has_kline_data = self._has_kline_data(target_date_str)
+                    if not has_kline_data:
+                        adjusted_date_str = self._get_previous_date_with_kline_data(target_date_str)
+                        adjusted_date = datetime.strptime(adjusted_date_str, '%Y-%m-%d').date()
+
+                        if latest_date == adjusted_date:
+                            return True
+
+                        days_diff = abs((latest_date - adjusted_date).days)
+                        if days_diff <= max_days_old:
+                            return True
+
+                        return False
+                    else:
+                        target_date = datetime.strptime(target_date_str, '%Y-%m-%d').date()
+                        if latest_date != target_date:
+                            return False
+                        return True
+                elif hasattr(selection_date, 'date'):
+                    target_date = selection_date.date()
+                else:
+                    target_date = selection_date
+
+                if latest_date != target_date:
+                    return False
+
+                return True
+            else:
+                today = datetime.now().date()
+                days_diff = (today - latest_date).days
+
+                if days_diff > max_days_old:
+                    return False
+
+                return True
+
+        except Exception:
+            return False
+
+    def _has_kline_data(self, date_str: str) -> bool:
+        """
+        检查指定日期是否有K线数据
+
+        通过数据库查询判断，比 is_trading_day 更准确（包含节假日判断）
+        使用类级别缓存避免重复查询
+
+        :param date_str: 日期字符串 (YYYY-MM-DD)
+        :return: True表示有K线数据，False表示没有
+        """
+        if date_str in self._kline_date_cache:
+            return self._kline_date_cache[date_str]
+
+        try:
+            from utils.db_manager import DBManager
+            db_manager = DBManager()
+
+            sql = f"SELECT COUNT(*) FROM stock_kline WHERE date = '{date_str}' LIMIT 1"
+            result = db_manager.query(sql)
+
+            has_data = result[0]['COUNT(*)'] > 0 if result else False
+            self._kline_date_cache[date_str] = has_data
+
+            return has_data
+        except Exception:
+            return False
+
+    def _get_previous_date_with_kline_data(self, date_str: str, max_search_days=30) -> str:
+        """
+        获取指定日期前一个有K线数据的日期
+
+        :param date_str: 日期字符串 (YYYY-MM-DD)
+        :param max_search_days: 最大搜索天数，默认30天
+        :return: 前一个有K线数据的日期字符串
+        """
+        try:
+            from datetime import datetime, timedelta
+
+            date = datetime.strptime(date_str, '%Y-%m-%d')
+
+            for i in range(1, max_search_days + 1):
+                prev_date = date - timedelta(days=i)
+                prev_date_str = prev_date.strftime('%Y-%m-%d')
+
+                if self._has_kline_data(prev_date_str):
+                    return prev_date_str
+
+            return date_str
+        except Exception:
+            return date_str
+
     def _quick_filter_with_lookback(self, df) -> bool:
         """
         快速过滤（支持回溯）- 检查最近N天是否有潜在的仙人指路形态
@@ -481,7 +610,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if df is None or df.empty:
             return False
 
-        lookback_days = self.params.get('lookback_days', 6)
+        lookback_days = self.params.get('lookback_days', 3)
         lookback_days = min(lookback_days, len(df) - 1, 4)
 
         if lookback_days < 2:
