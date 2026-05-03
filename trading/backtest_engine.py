@@ -137,6 +137,8 @@ class BacktestEngine:
         # ========== 新增：移动止损、亏损冷却期、连续亏损限制相关状态 ==========
         # 移动止损：持仓期间最高收益率
         self.position_highest_profit = {}  # {stock_code: highest_profit}
+        # 移动止损：持仓期间最高价
+        self.position_highest_price = {}  # {stock_code: highest_price}
         
         # 亏损冷却池：单笔亏损超阈值后加入冷却
         self.loss_cool_down_pool = {}  # {stock_code: cool_down_end_date}
@@ -584,6 +586,9 @@ class BacktestEngine:
                         # 更新加仓次数和加仓价格
                         existing_pos['add_count'] = result.add_count if result and hasattr(result, 'add_count') else existing_pos.get('add_count', 0) + 1
                         existing_pos['last_add_price'] = buy_price
+                        # 更新最高价（如果加仓价格更高）
+                        if buy_price > self.position_highest_price.get(stock_code, buy_price):
+                            self.position_highest_price[stock_code] = buy_price
                         logger.info(f"【加仓#{existing_pos['add_count']}】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
                                    f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
@@ -607,6 +612,8 @@ class BacktestEngine:
                             'kelly_ratio': kelly_result.get('kelly_ratio') if 'kelly_result' in locals() else None,
                             'kelly_strategy_name': kelly_result.get('strategy_name') if 'kelly_result' in locals() else None
                         })
+                        # 记录初始最高价
+                        self.position_highest_price[stock_code] = buy_price
                         buy_cost = buy_record['buy_commission'] + buy_record['buy_transfer_fee']
                         logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 佣金={buy_record['buy_commission']:.2f}, 过户费={buy_record['buy_transfer_fee']:.2f}, 首次建仓={base_position_amount}")
                     
@@ -1883,8 +1890,9 @@ class BacktestEngine:
             trading_days = self._get_trading_dates(buy_date_str, current_date_str)
             hold_days = len(trading_days) - 1
             
-            # 获取当日开盘价
+            # 获取当日开盘价和最高价
             open_price = self._get_stock_price(stock_code, current_date, 'open')
+            high_price = self._get_stock_price(stock_code, current_date, 'high')
             
             # 计算含成本的收益率
             # 买入成本
@@ -1905,13 +1913,23 @@ class BacktestEngine:
             estimated_net_proceed = gross_sell_amount - sell_commission_estimate - sell_transfer_fee_estimate - sell_stamp_tax_estimate
             return_rate = (estimated_net_proceed - actual_cost) / actual_cost * 100
             
+            # 获取买入价和当前最高价
+            buy_price = position['buy_price']
+            current_highest_price = self.position_highest_price.get(stock_code, buy_price)
+            # 更新最高价
+            if high_price > current_highest_price:
+                current_highest_price = high_price
+                self.position_highest_price[stock_code] = current_highest_price
+            # 计算最高价收益率
+            highest_price_return = (current_highest_price - buy_price) / buy_price * 100
+            
             # 根据是否有择时策略决定卖出规则描述
             if self.timing_strategy:
                 sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 由策略决定卖出"
             else:
                 sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 持有期={hold_period}天"
             logger.info(f"检查持仓 - {stock_code} {stock_name}: 买入日期={buy_date_str}, "
-                       f"持有天数={hold_days}, 收益率(含成本)={return_rate:.2f}%, {sell_rule}")
+                       f"持有天数={hold_days}, 收益率(含成本)={return_rate:.2f}%, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, {sell_rule}")
             
             # 初始化卖出决策
             sell_type = None
@@ -1927,25 +1945,32 @@ class BacktestEngine:
                 else:
                     # 计算当前止损线（支持移动止损）
                     current_stop = stop_loss
+                    stop_price = buy_price * (1 + stop_loss / 100)
                     if enable_trailing_stop:
-                        # 获取持仓期间最高收益率
+                        # 获取持仓期间最高收益率（保留原逻辑兼容）
                         highest_profit = self.position_highest_profit.get(stock_code, return_rate)
                         # 更新最高收益率
                         if return_rate > highest_profit:
                             highest_profit = return_rate
                             self.position_highest_profit[stock_code] = highest_profit
                         
-                        # 根据最高收益率计算移动止损线
+                        # 基于最高价计算移动止损价
+                        current_stop_level = stop_loss
                         for level in trailing_profit_levels:
-                            if highest_profit >= level['profit_threshold']:
-                                current_stop = level['stop_level']
+                            if highest_price_return >= level['profit_threshold']:
+                                current_stop_level = level['stop_level']
                         
-                        logger.info(f"  移动止损: 最高收益={highest_profit:.2f}%, 当前止损线={current_stop}%")
+                        # 计算止损价：买入价 × (1 + 止损百分比)
+                        stop_price = buy_price * (1 + current_stop_level / 100)
+                        # 计算止损收益率（用于日志）
+                        current_stop = current_stop_level
+                        
+                        logger.info(f"  移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
                     
                     # 检查是否触发止损（包括移动止损）
-                    if return_rate <= current_stop:
+                    if open_price <= stop_price:
                         sell_type = 'trailing_stop' if current_stop > stop_loss else 'stop_loss'
-                        logger.info(f"  触发{'移动' if current_stop > stop_loss else ''}止损: 收益率 {return_rate:.2f}% <= {current_stop}%")
+                        logger.info(f"  触发{'移动' if current_stop > stop_loss else ''}止损: 当前价 {open_price:.2f} <= 止损价 {stop_price:.2f}")
                 
                 # 2. 如果未触发止盈止损，调用择时策略获取信号
                 if not sell_type and self.timing_strategy:
