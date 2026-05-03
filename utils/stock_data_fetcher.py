@@ -645,16 +645,23 @@ class StockDataFetcher:
             
             if klines:
                 records = []
+                # 腾讯财经对688/689(科创板)返回的成交量单位是"股"，
+                # 对其他板块返回的单位是"手"（1手=100股）。
+                # 统一转换为"手"单位存入数据库，与Tushare保持一致
+                is_kcb = stock_code.startswith('688') or stock_code.startswith('689')
                 for item in klines:
                     # 腾讯格式: [日期, 开盘, 收盘, 最高, 最低, 成交量, ...]
                     if len(item) >= 6 and isinstance(item, list):
+                        raw_vol = int(float(item[5]))
+                        # 科创板成交量从"股"转换为"手"（÷100）
+                        volume = raw_vol // 100 if is_kcb else raw_vol
                         records.append({
                             'date': str(item[0]),
                             'open': float(item[1]),
                             'close': float(item[2]),
                             'high': float(item[3]),
                             'low': float(item[4]),
-                            'volume': int(float(item[5])),
+                            'volume': volume,
                             'amount': 0,
                             'turnover': 0,
                         })
@@ -799,6 +806,9 @@ class StockDataFetcher:
                     if df is not None and len(df) > 0:
                         # 转换为标准格式
                         df['date'] = pd.to_datetime(df['trade_date'])
+                        # Tushare的vol列单位是"手"，统一重命名为volume
+                        # 与数据库字段名和腾讯财经返回格式保持一致
+                        df = df.rename(columns={'vol': 'volume'})
                         df = df.sort_values('date', ascending=False)
                         logger.debug(f"Tushare 获取 {len(df)} 条更新数据")
                         return df

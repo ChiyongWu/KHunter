@@ -239,8 +239,8 @@ strategies:
         min: 0.4
         type: float
       anti_body_window:
-        default: 3
-        description: 反包时间窗口(天)
+        default: 4
+        description: 反包时间窗口(天)，且当天必须是反包日
         display_name: 反包窗口(天)
         group: 反包参数
         max: 5
@@ -298,12 +298,12 @@ strategies:
         min: 0.02
         type: float
       volume_ratio_max:
-        default: 3.0
-        description: 放量上限倍数
+        default: null
+        description: 放量上限倍数（null表示不设上限）
         display_name: 放量上限
         group: 成交量参数
-        max: 4.0
-        min: 2.5
+        max: null
+        min: null
         type: float
       volume_ratio_min:
         default: 1.5
@@ -330,13 +330,13 @@ strategies:
       anti_body_ratio: 0.5
       anti_body_window: 3
       lookback_days: 6
-      ma_periods: 5,10,20
+      ma_periods: [5, 10, 20]
       strategy_weight: 70
       surge_threshold: 0.06
       trend_lookback_days: 20
       trend_r_squared_threshold: 0.5
       upper_shadow_ratio: 0.03
-      volume_ratio_max: 3.0
+      volume_ratio_max: null
       volume_ratio_min: 1.5
     support_method: key_open
   LimitUpPullbackStrategy:

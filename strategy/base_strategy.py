@@ -119,7 +119,7 @@ class BaseStrategy(ABC):
         
         执行流程：
             1. 数据验证（包括检查已退市股票）
-            2. 快速过滤
+            2. 快速过滤（优先使用带lookback的版本）
             3. 计算指标
             4-N. 选股条件检查
         
@@ -132,8 +132,13 @@ class BaseStrategy(ABC):
         if not self._validate_data(df):
             return []
         
-        # 第2步：快速过滤（由子类实现）
-        if not self.quick_filter(df):
+        # 第2步：快速过滤
+        # 优先使用 _quick_filter_with_lookback（支持回溯查找）
+        # 如果子类没有实现，则回退到 quick_filter
+        if hasattr(self, '_quick_filter_with_lookback'):
+            if not self._quick_filter_with_lookback(df):
+                return []
+        elif not self.quick_filter(df):
             return []
         
         # 第3步：计算指标

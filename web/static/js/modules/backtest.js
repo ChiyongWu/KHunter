@@ -29,9 +29,11 @@ let backtestConfig = {
             std_dev: 2
         }
     },
-    stop_loss: -0.05,  // 修复：应该是负数，表示 -5%（止损 5%）
+    stop_loss: -0.05,  // 止损 5%
     take_profit: 0.15,
-    max_hold_days: 10
+    max_hold_days: 10,
+    enable_friday_buy_ban: true,      // 周五禁买
+    enable_dynamic_stop_loss: true    // 持股3天内动态止损（2/3）
 };
 
 /**
@@ -214,6 +216,8 @@ async function saveBacktestParams() {
         const maxHoldDaysInput = document.getElementById('params-max-hold-days');
         const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
         const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
+        const enableFridayBuyBanInput = document.getElementById('params-enable-friday-buy-ban');
+        const enableDynamicStopLossInput = document.getElementById('params-enable-dynamic-stop-loss');
         
         const params = {
             config_name: '默认配置',
@@ -226,7 +230,10 @@ async function saveBacktestParams() {
             max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5,
             // 温度约束参数
             enable_temp_limit: parseInt(enableTempLimitSelect?.value) || 1,
-            temp_limit_mode: tempLimitModeSelect?.value || 'both'
+            temp_limit_mode: tempLimitModeSelect?.value || 'both',
+            // 新增：周五禁买和动态止损
+            enable_friday_buy_ban: enableFridayBuyBanInput?.checked ? 1 : 0,
+            enable_dynamic_stop_loss: enableDynamicStopLossInput?.checked ? 1 : 0
         };
         
         // 调用后端API保存配置
@@ -280,6 +287,8 @@ async function loadBacktestParams() {
             const maxHoldDaysInput = document.getElementById('params-max-hold-days');
             const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
             const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
+            const enableFridayBuyBanInput = document.getElementById('params-enable-friday-buy-ban');
+            const enableDynamicStopLossInput = document.getElementById('params-enable-dynamic-stop-loss');
             
             if (initialCapitalInput) initialCapitalInput.value = params.initial_capital || 300000;
             if (scoreThresholdInput) scoreThresholdInput.value = params.score_threshold || 60;
@@ -291,6 +300,9 @@ async function loadBacktestParams() {
             // 温度约束参数
             if (enableTempLimitSelect) enableTempLimitSelect.value = params.enable_temp_limit !== undefined ? params.enable_temp_limit : 1;
             if (tempLimitModeSelect) tempLimitModeSelect.value = params.temp_limit_mode || 'both';
+            // 新增：周五禁买和动态止损
+            if (enableFridayBuyBanInput) enableFridayBuyBanInput.checked = params.enable_friday_buy_ban !== 0;
+            if (enableDynamicStopLossInput) enableDynamicStopLossInput.checked = params.enable_dynamic_stop_loss !== 0;
         }
     } catch (error) {
         console.error('加载回测配置失败:', error);
@@ -346,7 +358,9 @@ async function runBacktest() {
             max_daily_buys: 8,
             stop_loss: 0.05,
             take_profit: 0.15,
-            max_hold_days: 10
+            max_hold_days: 10,
+            enable_friday_buy_ban: 1,
+            enable_dynamic_stop_loss: 1
         };
         
         // 从后端API加载配置
@@ -363,7 +377,9 @@ async function runBacktest() {
                         max_daily_buys: config.max_daily_buys || 5,
                         stop_loss: (config.stop_loss || -5) / 100, // 转换为小数
                         take_profit: (config.take_profit || 15) / 100, // 转换为小数
-                        max_hold_days: config.hold_period || 10
+                        max_hold_days: config.hold_period || 10,
+                        enable_friday_buy_ban: config.enable_friday_buy_ban !== 0 ? 1 : 0,
+                        enable_dynamic_stop_loss: config.enable_dynamic_stop_loss !== 0 ? 1 : 0
                     };
                 }
             }
@@ -400,7 +416,10 @@ async function runBacktest() {
             timing_params: backtestConfig.timing_params,
             stop_loss: savedParams.stop_loss * 100, // 转换为百分比
             take_profit: savedParams.take_profit * 100, // 转换为百分比
-            max_hold_days: savedParams.max_hold_days
+            max_hold_days: savedParams.max_hold_days,
+            // 新增：周五禁买和动态止损
+            enable_friday_buy_ban: savedParams.enable_friday_buy_ban !== undefined ? savedParams.enable_friday_buy_ban : 1,
+            enable_dynamic_stop_loss: savedParams.enable_dynamic_stop_loss !== undefined ? savedParams.enable_dynamic_stop_loss : 1
         };
         
         // 显示加载状态

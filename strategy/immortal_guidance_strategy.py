@@ -41,10 +41,21 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         """
         初始化仙人指路策略
 
-        :param params: 从 config/strategy_params.yaml 加载的参数字典
+        :param params: 用户自定义参数字典，会覆盖默认参数
         """
-        # 所有参数必须从配置文件读取，不使用硬编码默认值
-        default_params = {}
+        default_params = {
+            'surge_threshold': 0.06,
+            'upper_shadow_ratio': 0.03,
+            'volume_ratio_min': 2.0,
+            'volume_ratio_max': None,
+            'ma_periods': [5, 10, 20],
+            'trend_lookback_days': 20,
+            'trend_r_squared_threshold': 0.5,
+            'anti_body_window': 3,
+            'anti_body_ratio': 0.50,
+            'strategy_weight': 70,
+            'lookback_days': 6,
+        }
 
         if params:
             default_params.update(params)
@@ -69,15 +80,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         close_series = result['close'].iloc[::-1]
         volume_series = result['volume'].iloc[::-1]
 
-        # 处理 ma_periods 参数：支持列表、字符串或其他格式
         ma_periods = self.params['ma_periods']
-        if isinstance(ma_periods, str):
-            # 如果是字符串，按逗号分割并转换为整数列表
-            ma_periods = [int(p.strip()) for p in ma_periods.split(',') if p.strip()]
-        elif not isinstance(ma_periods, list):
-            # 如果不是列表也不是字符串，使用默认值
-            ma_periods = [5, 10, 20]
-
         for period in ma_periods:
             result[f'ma{period}'] = close_series.rolling(window=period, min_periods=1).mean().iloc[::-1].values
 
@@ -159,128 +162,142 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         """
         检查仙人指路形态（支持回溯查找）
 
+        逻辑：
+        - T日（index=0）= 反包日 = 今天收盘需要收复信号日上影线
+        - T-1, T-2, T-3 = 信号日候选
+
+        流程：
+        1. 首先检查今天（T日）是否满足反包条件（收盘 > MA5）
+        2. 在最近lookback天内寻找信号日（上影线形态）
+        3. 确认条件：今天收盘 >= 信号日的上影线50%位置
+
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :param lookback_days: 回溯天数，查找最近N个交易日内出现的信号
         :return: 选股结果列表（只包含确认成功的信号）
         """
-        lookback_days = min(lookback_days, len(df) - 3)
-
-        if lookback_days < 1:
+        if len(df) < 4:
             return []
 
-        for day_offset in range(lookback_days):
-            today_idx = day_offset
-            prev_idx = day_offset + 1
+        today_idx = 0
+        today = df.iloc[today_idx]
+        today_close = today['close']
+        today_ma5 = today.get('ma5', 0)
+
+        if today_close < today_ma5:
+            return []
+
+        today_volume = today.get('volume', 0)
+        if today_volume == 0:
+            return []
+
+        slope, r_squared = self._calculate_trend_metrics(df, self.params['trend_lookback_days'])
+        if not (slope > 0 and r_squared >= self.params['trend_r_squared_threshold']):
+            return []
+
+        lookback_days = min(lookback_days, len(df) - 1, 4)
+
+        for day_offset in range(1, lookback_days):
+            signal_day_idx = day_offset
+            prev_idx = signal_day_idx + 1
 
             if prev_idx >= len(df):
                 break
 
-            today = df.iloc[today_idx]
+            signal_day = df.iloc[signal_day_idx]
             prev_close = df.iloc[prev_idx]['close']
 
             if prev_close == 0 or pd.isna(prev_close):
                 continue
 
-            surge_pct = (today['high'] - prev_close) / prev_close
-            
-            # 计算上影线长度：根据K线类型确定
-            if today['close'] > today['open']:
-                # 阳线：上影线 = 最高价 - 收盘价（确保非负）
-                upper_shadow = max(0, today['high'] - today['close'])
+            surge_pct = (signal_day['high'] - prev_close) / prev_close
+
+            if surge_pct < self.params['surge_threshold']:
+                continue
+
+            if signal_day['close'] <= signal_day['open']:
+                continue
+
+            if signal_day['close'] > signal_day['open']:
+                upper_shadow = max(0, signal_day['high'] - signal_day['close'])
             else:
-                # 阴线：上影线 = 最高价 - 开盘价（确保非负）
-                upper_shadow = max(0, today['high'] - today['open'])
-            
-            # 计算K线实体长度
-            body_length = abs(today['close'] - today['open'])
-            
-            # 计算上影线比例：(最高价 - 收盘价) / 最高价
-            # 避免除零错误
-            if today['high'] > 0:
-                upper_shadow_ratio = upper_shadow / today['high']
+                upper_shadow = max(0, signal_day['high'] - signal_day['open'])
+
+            body_length = abs(signal_day['close'] - signal_day['open'])
+            if signal_day['high'] > 0:
+                upper_shadow_ratio = upper_shadow / signal_day['high']
             else:
                 upper_shadow_ratio = 0
-            
-            upper_shadow_50_price = (today['close'] + today['high']) / 2
 
-            ma5 = today.get('ma5', 0)
-            ma10 = today.get('ma10', 0)
-            ma20 = today.get('ma20', 0)
-            volume_ma5 = today.get('volume_ma5', 0)
-            volume_ratio = today['volume'] / volume_ma5 if volume_ma5 > 0 else 0
-
-            if not (self.params['surge_threshold'] <= surge_pct):
+            if upper_shadow_ratio < self.params['upper_shadow_ratio']:
                 continue
 
-            if not (upper_shadow_ratio >= self.params['upper_shadow_ratio']):
-                continue
-
-            volume_ratio_max = self.params.get('volume_ratio_max')
-            if volume_ratio_max is None:
-                if volume_ratio < self.params['volume_ratio_min']:
+            signal_day_vol = signal_day.get('volume', 0)
+            signal_day_vol_ma5 = signal_day.get('volume_ma5', 0)
+            if signal_day_vol_ma5 > 0:
+                signal_day_vol_ratio = signal_day_vol / signal_day_vol_ma5
+                if signal_day_vol_ratio < self.params['volume_ratio_min']:
                     continue
-            elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
+
+            signal_day_ma5 = signal_day.get('ma5', 0)
+            signal_day_ma10 = signal_day.get('ma10', 0)
+            signal_day_ma20 = signal_day.get('ma20', 0)
+
+            if not (signal_day_ma5 > signal_day_ma10 > signal_day_ma20 > 0):
                 continue
 
-            # 收阳线限制已去除（十字星+长上影也是有效仙人指路形态）
-            if not (today['close'] > ma5):
+            upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+
+            early_anti_body = False
+            for check_idx in range(1, signal_day_idx):
+                check_day = df.iloc[check_idx]
+                if check_day['close'] >= upper_shadow_50_price:
+                    early_anti_body = True
+                    break
+
+            if early_anti_body:
                 continue
 
-            ma_bullish = (ma5 > ma10 > ma20) and (ma10 > ma20 > 0)
-            if not ma_bullish:
-                continue
+            if today_close >= upper_shadow_50_price:
+                latest_date = str(df.iloc[0]['date']).split()[0]
+                signal_day_date = str(signal_day['date']).split()[0]
 
-            slope, r_squared = self._calculate_trend_metrics(df, self.params['trend_lookback_days'])
-            if not (slope > 0 and r_squared >= self.params['trend_r_squared_threshold']):
-                continue
-
-            key_day_open = today['open']
-            key_day_date = str(today['date']).split()[0]
-
-            confirmation_result = self._check_confirmation(df, today_idx, key_day_open, upper_shadow_50_price)
-
-            if not confirmation_result['confirmed']:
-                continue
-
-            latest_date = str(df.iloc[0]['date']).split()[0]
-
-            return [{
-                'date': latest_date,
-                'close': round(df.iloc[0]['close'], 2),
-                'volume_ratio': round(volume_ratio, 2),
-                'reasons': ['仙人指路形态'],
-                'key_date': key_day_date,
-                'key_date_type': '仙人指路信号日',
-                'pattern_date': today['date'],
-                'pattern_details': {
-                    'surge_pct': round(surge_pct, 4),
-                    'upper_shadow_ratio': round(upper_shadow_ratio, 4),
-                    'upper_shadow_50_price': round(upper_shadow_50_price, 2),
-                    'key_day_open': round(key_day_open, 2),
-                    'key_day_close': round(today['close'], 2),
-                    'key_day_high': round(today['high'], 2),
-                    'volume_ratio': round(volume_ratio, 2),
-                    'ma5': round(ma5, 2),
-                    'ma10': round(ma10, 2),
-                    'ma20': round(ma20, 2),
-                    'trend_slope': round(slope, 4),
-                    'trend_r_squared': round(r_squared, 4),
-                },
-                'confirmation_details': {
-                    'confirmed': confirmation_result['confirmed'],
-                    'confirmed_date': confirmation_result.get('confirmed_date'),
-                    'days_to_confirm': confirmation_result.get('days_to_confirm', 0),
-                    'anti_body_price': confirmation_result.get('anti_body_price'),
-                    'close_above_ma5': confirmation_result.get('close_above_ma5', True),
-                    'post_confirmation_stable': confirmation_result.get('post_confirmation_stable', True),
-                }
-            }]
+                return [{
+                    'date': latest_date,
+                    'close': round(today_close, 2),
+                    'volume_ratio': round(today.get('volume', 0) / max(1, today.get('volume_ma5', 1)), 2),
+                    'reasons': ['仙人指路形态'],
+                    'key_date': signal_day_date,
+                    'key_date_type': '仙人指路信号日',
+                    'pattern_date': signal_day['date'],
+                    'pattern_details': {
+                        'surge_pct': round(surge_pct, 4),
+                        'upper_shadow_ratio': round(upper_shadow_ratio, 4),
+                        'upper_shadow_50_price': round(upper_shadow_50_price, 2),
+                        'key_day_open': round(signal_day['open'], 2),
+                        'key_day_close': round(signal_day['close'], 2),
+                        'key_day_high': round(signal_day['high'], 2),
+                        'volume_ratio': 0,
+                        'ma5': round(signal_day_ma5, 2),
+                        'ma10': round(signal_day_ma10, 2),
+                        'ma20': round(signal_day_ma20, 2),
+                        'trend_slope': round(slope, 4),
+                        'trend_r_squared': round(r_squared, 4),
+                    },
+                    'confirmation_details': {
+                        'confirmed': True,
+                        'confirmed_date': latest_date,
+                        'days_to_confirm': day_offset,
+                        'anti_body_price': today_close,
+                        'close_above_ma5': today_close > today_ma5,
+                        'post_confirmation_stable': True,
+                    }
+                }]
 
         return []
 
     def _check_confirmation(self, df, signal_day_idx, support_price, anti_body_target) -> dict:
         """
-        检查T+1~T+3日确认条件，以及确认后是否继续维持在MA5之上
+        检查信号日当天是否满足反包条件（当天必须是反包日）
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param signal_day_idx: 信号日索引
@@ -288,8 +305,6 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         :param anti_body_target: 上影线50%位置
         :return: 确认结果字典
         """
-        window = self.params['anti_body_window']
-        post_confirmation_window = 5
         result = {
             'confirmed': False,
             'confirmed_date': None,
@@ -299,185 +314,166 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             'post_confirmation_stable': True,
         }
 
-        confirmed_day_idx = None
-
-        # 数据是倒序的（最新在index=0），所以信号日后的日子应该在更小的索引位置
-        # 例如：signal_day_idx = 3（过去某天），信号日后第一天是 index=2，第二天是 index=1
-        for day_idx in range(window):
-            check_idx = signal_day_idx - (day_idx + 1)
-            if check_idx < 0:
-                # 如果已经到了最新数据（index=0），说明没有更多后续数据可检查
-                # 在实时场景中，最新一天出现信号时，还没有后续确认数据
-                # 在回测场景中，如果信号出现在最新一天，也无法进行确认
-                break
-
-            day_data = df.iloc[check_idx]
-            day_close = day_data['close']
-            day_ma5 = day_data.get('ma5', 0)
-            day_volume = day_data.get('volume', 0)
-            day_open = day_data.get('open', 0)
-            day_high = day_data.get('high', 0)
-
-            if day_close < day_ma5:
-                result['close_above_ma5'] = False
-                return result
-
-            if day_close >= anti_body_target:
-                    result['confirmed'] = True
-                    result['confirmed_date'] = str(day_data['date']).split()[0]
-                    result['days_to_confirm'] = day_idx + 1
-                    result['anti_body_price'] = day_close
-                    confirmed_day_idx = check_idx
-                    break
-
-        if not result['confirmed']:
+        # 当天必须是反包日：检查信号日（index=signal_day_idx）是否收盘反包上影线50%
+        if signal_day_idx < 0 or signal_day_idx >= len(df):
             return result
 
-        # 检查确认后是否稳定
-        for post_idx in range(1, post_confirmation_window + 1):
-            check_idx = confirmed_day_idx - post_idx
-            if check_idx < 0:
-                break
+        signal_day_data = df.iloc[signal_day_idx]
+        signal_day_close = signal_day_data['close']
+        signal_day_ma5 = signal_day_data.get('ma5', 0)
 
-            day_data = df.iloc[check_idx]
-            day_close = day_data['close']
-            day_ma5 = day_data.get('ma5', 0)
+        # 检查收盘价是否在MA5之上
+        if signal_day_close < signal_day_ma5:
+            result['close_above_ma5'] = False
+            return result
 
-            if day_close < day_ma5:
-                result['post_confirmation_stable'] = False
-                result['confirmed'] = False
-                return result
+        # 检查是否收盘反包上影线50%
+        if signal_day_close >= anti_body_target:
+            result['confirmed'] = True
+            result['confirmed_date'] = str(signal_day_data['date']).split()[0]
+            result['days_to_confirm'] = 0  # 当天即确认
+            result['anti_body_price'] = signal_day_close
 
         return result
 
     def _check_immortal_guidance(self, df) -> list:
         """
-        检查仙人指路形态（仅检测最新一天，保持向后兼容）
+        检查仙人指路形态：
+        - T日（今天）= 反包日
+        - 信号日：今天之前的3个交易日内（T-1、T-2、T-3）
 
         :param df: 含指标的DataFrame（倒序，最新在index=0）
         :return: 选股结果列表
         """
+        # 需要至少4天数据：T-3信号日 + 今天反包
+        if len(df) < 4:
+            return []
+
         today = df.iloc[0]
-        prev_close = df.iloc[1]['close'] if len(df) > 1 else None
+        today_close = today['close']
+        today_ma5 = today.get('ma5', 0)
 
-        if prev_close is None or prev_close == 0:
+        # 今天必须是反包日：收盘在MA5之上
+        if today_close < today_ma5:
             return []
 
-        surge_pct = (today['high'] - prev_close) / prev_close
-
-        upper_shadow = today['high'] - today['close']
-        upper_shadow_ratio = upper_shadow / today['high'] if today['high'] > 0 else 0
-
-        upper_shadow_50_price = (today['close'] + today['high']) / 2
-
-        ma5 = today.get('ma5', 0)
-        ma10 = today.get('ma10', 0)
-        ma20 = today.get('ma20', 0)
-
-        volume_ma5 = today.get('volume_ma5', 0)
-        volume_ratio = today['volume'] / volume_ma5 if volume_ma5 > 0 else 0
-
-        if not (self.params['surge_threshold'] <= surge_pct):
-            return []
-
-        if not (upper_shadow_ratio >= self.params['upper_shadow_ratio']):
-            return []
-
-        volume_ratio_max = self.params.get('volume_ratio_max')
-        if volume_ratio_max is None:
-            if volume_ratio < self.params['volume_ratio_min']:
-                return []
-        elif not (self.params['volume_ratio_min'] <= volume_ratio <= volume_ratio_max):
-            return []
-
-        # 收阳线限制已去除（十字星+长上影也是有效仙人指路形态）
-        if not (today['close'] > ma5):
-            return []
-
-        ma_bullish = (ma5 > ma10 > ma20) and (ma10 > ma20 > 0)
-        if not ma_bullish:
-            return []
-
+        # 计算趋势（使用更长的回溯天数以覆盖信号日）
         slope, r_squared = self._calculate_trend_metrics(df, self.params['trend_lookback_days'])
         if not (slope > 0 and r_squared >= self.params['trend_r_squared_threshold']):
             return []
 
-        key_day_open = today['open']
-        key_day_date = str(today['date']).split()[0]
+        # 检查前3个交易日是否有信号日（T-1、T-2、T-3）
+        for lookback in range(1, 4):
+            signal_day_idx = lookback
+            if signal_day_idx >= len(df):
+                break
 
-        confirmation_result = self._check_confirmation(df, 0, key_day_open, upper_shadow_50_price)
+            signal_day = df.iloc[signal_day_idx]
+            prev_close_for_signal = df.iloc[signal_day_idx + 1]['close']
 
-        if not confirmation_result['confirmed']:
-            return []
+            # 计算信号日的基本条件
+            surge_pct = (signal_day['high'] - prev_close_for_signal) / prev_close_for_signal
 
-        return [{
-            'stock_code': '',
-            'stock_name': '',
-            'signal_date': key_day_date,
-            'key_day': key_day_date,
-            'key_day_open': key_day_open,
-            'support_level': key_day_open,
-            'surge_pct': surge_pct,
-            'upper_shadow_pct': upper_shadow_ratio,
-            'upper_shadow_50_price': upper_shadow_50_price,
-            'volume_ratio': volume_ratio,
-            'ma5': ma5,
-            'ma10': ma10,
-            'ma20': ma20,
-            'trend_slope': slope,
-            'trend_r_squared': r_squared,
-            'confirmed': confirmation_result['confirmed'],
-            'confirmed_date': confirmation_result.get('confirmed_date'),
-            'days_to_confirm': confirmation_result.get('days_to_confirm', 0),
-            'anti_body_price': confirmation_result.get('anti_body_price'),
-            'close_above_ma5': confirmation_result.get('close_above_ma5', True),
-            'strategy_weight': self.params['strategy_weight'],
-        }]
+            # 计算上影线比例
+            if signal_day['close'] > signal_day['open']:
+                upper_shadow = signal_day['high'] - signal_day['close']
+            else:
+                upper_shadow = signal_day['high'] - signal_day['open']
+            body_length = abs(signal_day['close'] - signal_day['open'])
+            total_length = upper_shadow + body_length
+            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+
+            # 上影线50%位置
+            upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+
+            signal_day_ma5 = signal_day.get('ma5', 0)
+            signal_day_ma10 = signal_day.get('ma10', 0)
+            signal_day_ma20 = signal_day.get('ma20', 0)
+
+            # 检查信号日条件
+            if surge_pct < self.params['surge_threshold']:
+                continue
+            if upper_shadow_ratio < self.params['upper_shadow_ratio']:
+                continue
+            if not (signal_day_ma5 > signal_day_ma10 > signal_day_ma20 > 0):
+                continue
+
+            # 检查今天是否反包信号日的上影线
+            if today_close >= upper_shadow_50_price:
+                return [{
+                    'stock_code': '',
+                    'stock_name': '',
+                    'signal_date': str(signal_day['date']).split()[0],
+                    'key_day': str(signal_day['date']).split()[0],
+                    'key_day_open': signal_day['open'],
+                    'support_level': signal_day['open'],
+                    'surge_pct': surge_pct,
+                    'upper_shadow_pct': upper_shadow_ratio,
+                    'upper_shadow_50_price': upper_shadow_50_price,
+                    'volume_ratio': 0,
+                    'ma5': signal_day_ma5,
+                    'ma10': signal_day_ma10,
+                    'ma20': signal_day_ma20,
+                    'trend_slope': slope,
+                    'trend_r_squared': r_squared,
+                    'confirmed': True,
+                    'confirmed_date': str(today['date']).split()[0],
+                    'days_to_confirm': lookback,
+                    'anti_body_price': today_close,
+                    'close_above_ma5': True,
+                    'strategy_weight': self.params['strategy_weight'],
+                }]
+
+        return []
 
     def quick_filter(self, df) -> bool:
         """
-        快速过滤 - 检查是否有长上影线形态
+        快速过滤 - 检查最近3天是否有仙人指路信号
+
+        检查T-1, T-2, T-3中是否有满足条件的信号日：
+        - 冲高>=6%
+        - 上影线>=3%
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: True表示通过快速过滤，False表示未通过
         """
-        if df is None or df.empty or len(df) < 2:
+        if df is None or df.empty or len(df) < 4:
             return False
 
-        today = df.iloc[0]
-        prev_close = df.iloc[1]['close']
+        for day_offset in range(1, 4):
+            signal_day_idx = day_offset
+            prev_idx = signal_day_idx + 1
 
-        if prev_close == 0:
-            return False
+            if prev_idx >= len(df):
+                break
 
-        surge_pct = (today['high'] - prev_close) / prev_close
-        if surge_pct < self.params['surge_threshold']:
-            return False
+            sd = df.iloc[signal_day_idx]
+            prev_close = df.iloc[prev_idx]['close']
 
-        # 计算上影线长度：根据K线类型确定
-        if today['close'] > today['open']:
-            # 阳线：上影线 = 最高价 - 收盘价
-            upper_shadow = today['high'] - today['close']
-        else:
-            # 阴线：上影线 = 最高价 - 开盘价
-            upper_shadow = today['high'] - today['open']
-        
-        # 计算K线实体长度
-        body_length = abs(today['close'] - today['open'])
-        
-        # 计算上影线比例：上影线长度 / (上影线长度 + 实体长度)
-        # 避免除零错误
-        total_length = upper_shadow + body_length
-        upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
-        
-        if upper_shadow_ratio < self.params['upper_shadow_ratio']:
-            return False
+            if prev_close == 0:
+                continue
 
-        return True
+            surge_pct = (sd['high'] - prev_close) / prev_close
+            if surge_pct < self.params['surge_threshold']:
+                continue
+
+            if sd['high'] > 0:
+                upper_shadow = sd['high'] - sd['close']
+                upper_shadow_ratio = upper_shadow / sd['high']
+            else:
+                upper_shadow_ratio = 0
+
+            if upper_shadow_ratio >= self.params['upper_shadow_ratio']:
+                return True
+
+        return False
 
     def _quick_filter_with_lookback(self, df) -> bool:
         """
         快速过滤（支持回溯）- 检查最近N天是否有潜在的仙人指路形态
+
+        注意：新逻辑下，今天（index=0）是反包日，信号日在T-1, T-2, T-3
+        所以从index=1开始检查
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :return: True表示通过快速过滤，False表示未通过
@@ -486,46 +482,43 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             return False
 
         lookback_days = self.params.get('lookback_days', 6)
-        lookback_days = min(lookback_days, len(df) - 1)
+        lookback_days = min(lookback_days, len(df) - 1, 4)
 
-        if lookback_days < 1:
+        if lookback_days < 2:
             return False
 
-        for day_offset in range(lookback_days):
-            today_idx = day_offset
-            prev_idx = day_offset + 1
+        for day_offset in range(1, lookback_days):
+            signal_day_idx = day_offset
+            prev_idx = signal_day_idx + 1
 
             if prev_idx >= len(df):
                 break
 
-            today = df.iloc[today_idx]
+            signal_day = df.iloc[signal_day_idx]
             prev_close = df.iloc[prev_idx]['close']
 
             if prev_close == 0 or pd.isna(prev_close):
                 continue
 
-            surge_pct = (today['high'] - prev_close) / prev_close
+            surge_pct = (signal_day['high'] - prev_close) / prev_close
             if surge_pct < self.params['surge_threshold']:
                 continue
 
-            # 计算上影线长度：根据K线类型确定
-            if today['close'] > today['open']:
-                # 阳线：上影线 = 最高价 - 收盘价（确保非负）
-                upper_shadow = max(0, today['high'] - today['close'])
+            if signal_day['close'] <= signal_day['open']:
+                continue
+
+            if signal_day['close'] > signal_day['open']:
+                upper_shadow = max(0, signal_day['high'] - signal_day['close'])
             else:
-                # 阴线：上影线 = 最高价 - 开盘价（确保非负）
-                upper_shadow = max(0, today['high'] - today['open'])
-            
-            # 计算K线实体长度
-            body_length = abs(today['close'] - today['open'])
-            
-            # 计算上影线比例：(最高价 - 收盘价) / 最高价
-            # 避免除零错误
-            if today['high'] > 0:
-                upper_shadow_ratio = upper_shadow / today['high']
+                upper_shadow = max(0, signal_day['high'] - signal_day['open'])
+
+            body_length = abs(signal_day['close'] - signal_day['open'])
+
+            if signal_day['high'] > 0:
+                upper_shadow_ratio = upper_shadow / signal_day['high']
             else:
                 upper_shadow_ratio = 0
-            
+
             if upper_shadow_ratio < self.params['upper_shadow_ratio']:
                 continue
 

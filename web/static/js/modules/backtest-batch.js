@@ -354,18 +354,19 @@ class BacktestUIManager {
     const performance = result.performance || result;
     const totalReturn = parseFloat(performance.total_return) || 0;
     const winRate = parseFloat(performance.win_rate) || 0;
+    const profitLossRatio = parseFloat(performance.profit_loss_ratio) || 0;
     const maxDrawdown = parseFloat(performance.max_drawdown) || 0;
     const sharpeRatio = parseFloat(performance.sharpe_ratio) || 0;
-    
+
     // 确保trades是一个数组
     const trades = Array.isArray(result.trades) ? result.trades : [];
-    
+
     return `
       <div style="padding: 16px;">
         <h4 style="margin-bottom: 16px; color: #374151;">${result.strategy_name || task.strategy_name} 回测结果</h4>
-        
+
         <!-- 统计数据 -->
-        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px;">
+        <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 24px;">
           <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
             <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">总收益率</div>
             <div style="font-size: 24px; font-weight: bold; color: ${totalReturn >= 0 ? '#22c55e' : '#ef4444'};">
@@ -376,6 +377,12 @@ class BacktestUIManager {
             <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">胜率</div>
             <div style="font-size: 24px; font-weight: bold; color: #3b82f6;">
               ${winRate.toFixed(2)}%
+            </div>
+          </div>
+          <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">盈亏比</div>
+            <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">
+              ${profitLossRatio.toFixed(2)}
             </div>
           </div>
           <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">

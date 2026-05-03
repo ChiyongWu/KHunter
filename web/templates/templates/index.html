@@ -742,8 +742,17 @@
                                     <input type="number" id="params-take-profit" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" min="0.01" max="1" step="0.01" value="0.15" aria-label="止盈比例">
                                 </div>
                                 <div>
-                                    <label for="params-max-hold-days" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">最大持有天数</label>
-                                    <input type="number" id="params-max-hold-days" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" min="1" max="30" step="1" value="10" aria-label="最大持有天数">
+                                    <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">交易约束</label>
+                                    <div style="display:flex; flex-direction:column; gap:6px;">
+                                        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+                                            <input type="checkbox" id="params-enable-friday-buy-ban" checked style="width:14px; height:14px; cursor:pointer;" aria-label="周五禁买">
+                                            <span>周五禁买</span>
+                                        </label>
+                                        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+                                            <input type="checkbox" id="params-enable-dynamic-stop-loss" checked style="width:14px; height:14px; cursor:pointer;" aria-label="3天内动态止损">
+                                            <span>持股3天内止损2/3</span>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
                             <button type="button" id="save-backtest-params-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px;" aria-label="保存回测配置">保存配置</button>
