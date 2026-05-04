@@ -151,7 +151,7 @@ class BaseStrategy(ABC):
                     if hasattr(self, '_get_previous_date_with_kline_data'):
                         selection_date = self._get_previous_date_with_kline_data(selection_date)
 
-        return self.select_stocks(df, stock_name, selection_date=selection_date)
+        return self.select_stocks(df, stock_name)
     
     def analyze_stock(self, stock_code, stock_name, df):
         """
