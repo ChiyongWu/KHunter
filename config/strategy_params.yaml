@@ -330,13 +330,16 @@ strategies:
       anti_body_ratio: 0.5
       anti_body_window: 3
       lookback_days: 3
-      ma_periods: [5, 10, 20]
+      ma_periods:
+        - 5
+        - 10
+        - 20
       strategy_weight: 70
-      surge_threshold: 0.06
+      surge_threshold: 0.08
       trend_lookback_days: 20
       trend_r_squared_threshold: 0.5
-      upper_shadow_ratio: 0.03
-      volume_ratio_max: null
+      upper_shadow_ratio: 0.04
+      volume_ratio_max: 'null'
       volume_ratio_min: 1.5
     support_method: key_open
   LimitUpPullbackStrategy:
@@ -409,6 +412,14 @@ strategies:
         max: 0.1
         min: 0.0
         type: float
+      support_ratio:
+        default: 0.95
+        description: 支撑比例（不破涨停收盘价的此比例）
+        display_name: 支撑比例
+        group: 回调参数
+        max: 1.0
+        min: 0.9
+        type: float
       volume_ratio_threshold:
         default: 2.2
         description: 成交量比例阈值
@@ -424,14 +435,6 @@ strategies:
         group: 成交量参数
         max: 0.8
         min: 0.3
-        type: float
-      support_ratio:
-        default: 0.95
-        description: 支撑比例（不破涨停收盘价的此比例）
-        display_name: 支撑比例
-        group: 回调参数
-        max: 1.0
-        min: 0.9
         type: float
     param_groups:
     - description: 控制涨停识别的参数
@@ -453,9 +456,9 @@ strategies:
       pullback_days_min: 1
       pullback_range_max: 0.15
       pullback_range_min: 0.0
+      support_ratio: 0.95
       volume_ratio_threshold: 2.2
       volume_shrinkage_ratio: 0.5
-      support_ratio: 0.95
     support_method: key_close_5
   LimitUpSidewaysStrategy:
     color: '#8b5cf6'
@@ -463,77 +466,13 @@ strategies:
     display_name: 涨停横盘策略
     icon: 📊
     param_details:
-      limit_up_lookback_days:
-        default: 10
-        description: 涨停回溯天数
-        display_name: 涨停回溯天数
-        group: 涨停参数
-        max: 20
-        min: 5
-        type: int
-      limit_up_threshold:
-        default: 0.095
-        description: 涨停阈值
-        display_name: 涨停阈值(%)
-        group: 涨停参数
-        max: 0.12
-        min: 0.08
-        type: float
-      volume_ratio_threshold:
-        default: 1.8
-        description: 成交量比例阈值（相对前5日均量）
-        display_name: 成交量比例
-        group: 涨停参数
-        max: 3.0
-        min: 1.0
-        type: float
-      sideways_days_min:
-        default: 1
-        description: 横盘最小天数
-        display_name: 横盘最小天数
-        group: 横盘参数
-        max: 5
-        min: 1
-        type: int
-      sideways_days_max:
-        default: 10
-        description: 横盘最大天数（放宽到10天）
-        display_name: 横盘最大天数
-        group: 横盘参数
-        max: 15
-        min: 3
-        type: int
-      sideways_high_limit:
-        default: 0.08
-        description: 横盘上限幅度（放宽到8%）
-        display_name: 横盘上限幅度(%)
-        group: 横盘参数
-        max: 0.15
-        min: 0.02
-        type: float
-      sideways_low_limit:
-        default: -0.05
-        description: 横盘下限幅度（放宽到-5%）
-        display_name: 横盘下限幅度(%)
-        group: 横盘参数
-        max: 0.0
-        min: -0.15
-        type: float
-      volume_shrinkage_ratio:
-        default: 0.7
-        description: 成交量缩量比例（横盘期间至少有一日成交量≤涨停日×此比例）
-        display_name: 成交量缩量比例
-        group: 横盘参数
-        max: 0.8
-        min: 0.3
-        type: float
-      kdj_n:
-        default: 9
-        description: KDJ的N参数
-        display_name: KDJ-N
+      kdj_gold_cross_threshold:
+        default: 20
+        description: KDJ金叉阈值（K值需低于此值）
+        display_name: KDJ金叉阈值
         group: KDJ参数
-        max: 20
-        min: 5
+        max: 50
+        min: 10
         type: int
       kdj_m1:
         default: 3
@@ -551,12 +490,36 @@ strategies:
         max: 5
         min: 1
         type: int
-      kdj_gold_cross_threshold:
-        default: 20
-        description: KDJ金叉阈值（K值需低于此值）
-        display_name: KDJ金叉阈值
+      kdj_n:
+        default: 9
+        description: KDJ的N参数
+        display_name: KDJ-N
         group: KDJ参数
-        max: 50
+        max: 20
+        min: 5
+        type: int
+      limit_up_lookback_days:
+        default: 10
+        description: 涨停回溯天数
+        display_name: 涨停回溯天数
+        group: 涨停参数
+        max: 20
+        min: 5
+        type: int
+      limit_up_threshold:
+        default: 0.095
+        description: 涨停阈值
+        display_name: 涨停阈值(%)
+        group: 涨停参数
+        max: 0.12
+        min: 0.08
+        type: float
+      macd_long:
+        default: 26
+        description: MACD长期EMA周期
+        display_name: MACD长期周期
+        group: MACD参数
+        max: 40
         min: 10
         type: int
       macd_short:
@@ -567,14 +530,6 @@ strategies:
         max: 20
         min: 5
         type: int
-      macd_long:
-        default: 26
-        description: MACD长期EMA周期
-        display_name: MACD长期周期
-        group: MACD参数
-        max: 40
-        min: 10
-        type: int
       macd_signal:
         default: 9
         description: MACD信号线EMA周期
@@ -582,6 +537,44 @@ strategies:
         group: MACD参数
         max: 20
         min: 5
+        type: int
+      sideways_days_max:
+        default: 10
+        description: 横盘最大天数（放宽到10天）
+        display_name: 横盘最大天数
+        group: 横盘参数
+        max: 15
+        min: 3
+        type: int
+      sideways_days_min:
+        default: 1
+        description: 横盘最小天数
+        display_name: 横盘最小天数
+        group: 横盘参数
+        max: 5
+        min: 1
+        type: int
+      sideways_high_limit:
+        default: 0.08
+        description: 横盘上限幅度（放宽到8%）
+        display_name: 横盘上限幅度(%)
+        group: 横盘参数
+        max: 0.15
+        min: 0.02
+        type: float
+      sideways_low_limit:
+        default: -0.05
+        description: 横盘下限幅度（放宽到-5%）
+        display_name: 横盘下限幅度(%)
+        group: 横盘参数
+        max: 0.0
+        min: -0.15
+        type: float
+      strategy_weight:
+        default: 60
+        description: 技术面评分权重
+        display_name: 策略权重
+        group: 评分参数
         type: int
       volume_increase_ratio:
         default: 1.3
@@ -591,12 +584,22 @@ strategies:
         max: 2.0
         min: 1.1
         type: float
-      strategy_weight:
-        default: 60
-        description: 技术面评分权重
-        display_name: 策略权重
-        group: 评分参数
-        type: int
+      volume_ratio_threshold:
+        default: 1.8
+        description: 成交量比例阈值（相对前5日均量）
+        display_name: 成交量比例
+        group: 涨停参数
+        max: 3.0
+        min: 1.0
+        type: float
+      volume_shrinkage_ratio:
+        default: 0.7
+        description: 成交量缩量比例（横盘期间至少有一日成交量≤涨停日×此比例）
+        display_name: 成交量缩量比例
+        group: 横盘参数
+        max: 0.8
+        min: 0.3
+        type: float
     param_groups:
     - description: 控制涨停识别的参数
       name: 涨停参数
@@ -611,23 +614,23 @@ strategies:
     - description: 控制评分参数
       name: 评分参数
     params:
-      limit_up_lookback_days: 10
-      limit_up_threshold: 0.095
-      volume_ratio_threshold: 1.8
-      sideways_days_min: 1
-      sideways_days_max: 8
-      sideways_high_limit: 0.05
-      sideways_low_limit: -0.02
-      volume_shrinkage_ratio: 0.6
-      kdj_n: 9
+      kdj_gold_cross_threshold: 20
       kdj_m1: 3
       kdj_m2: 3
-      kdj_gold_cross_threshold: 20
-      macd_short: 12
+      kdj_n: 9
+      limit_up_lookback_days: 10
+      limit_up_threshold: 0.095
       macd_long: 26
+      macd_short: 12
       macd_signal: 9
-      volume_increase_ratio: 1.3
+      sideways_days_max: 8
+      sideways_days_min: 1
+      sideways_high_limit: 0.05
+      sideways_low_limit: -0.02
       strategy_weight: 60
+      volume_increase_ratio: 1.3
+      volume_ratio_threshold: 1.8
+      volume_shrinkage_ratio: 0.6
     support_method: key_close_5
   MA20MA60Strategy:
     color: '#10b981'
