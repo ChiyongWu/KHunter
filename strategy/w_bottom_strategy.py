@@ -308,10 +308,10 @@ class WBottomStrategy(BaseStrategy):
 
     def _check_volume_break(self, df):
         """
-        检查放量确认条件：5日内出现涨幅超过5%的交易日，且成交量是前5日均量的1.5倍以上
+        检查放量确认条件：5日内出现涨幅超过8%的交易日，且成交量是前5日均量的1.5倍以上
         
         涨幅 = (当日收盘价 - 前一日收盘价) / 前一日收盘价
-        注意：不需要是阳线，只需要涨幅 > 5%（可以是假阴线）
+        注意：不需要是阳线，只需要涨幅 > 8%（可以是假阴线）
         
         :param df: 含指标的DataFrame（倒序）
         :return: 如果通过，返回满足条件的日期索引；否则返回 None
@@ -319,10 +319,7 @@ class WBottomStrategy(BaseStrategy):
         if df is None or len(df) < 5:
             return None
         
-        # 获取最近5天的数据
         recent_df = df.head(5)
-        
-        # 检查是否有涨幅 > 5% 的交易日，且成交量 >= 前5日均量 × 1.5
         expand_ratio = self.params['volume_expand_ratio']
         
         for idx in range(len(recent_df)):
@@ -331,11 +328,9 @@ class WBottomStrategy(BaseStrategy):
                 volume = recent_df['volume'].iloc[idx]
                 volume_ma = recent_df['volume_ma'].iloc[idx]
                 
-                # 检查数据有效性
                 if pd.isna(close) or close <= 0:
                     continue
                 
-                # 获取前一日收盘价（倒序数据中前一日是 idx+1）
                 if idx + 1 >= len(recent_df):
                     continue
                 
@@ -343,18 +338,13 @@ class WBottomStrategy(BaseStrategy):
                 if pd.isna(prev_close) or prev_close <= 0:
                     continue
                 
-                # 计算涨幅：(当日收盘价 - 前一日收盘价) / 前一日收盘价
                 pct_change = (close - prev_close) / prev_close
                 
-                # 检查涨幅 > 5% 且成交量 >= 前5日均量 × 1.5
-                # 注意：不需要是阳线，只需要涨幅 > 5%
-                if pct_change > 0.05 and volume >= volume_ma * expand_ratio:
-                    # 返回满足条件的日期索引
+                if pct_change > 0.08 and volume >= volume_ma * expand_ratio:
                     return idx
             except Exception:
                 continue
         
-        # 无满足条件的日期
         return None
 
     def _check_trend_reversal(self, df):
@@ -469,7 +459,7 @@ class WBottomStrategy(BaseStrategy):
         
         # 条件1：放量确认
         expand_ratio = self.params['volume_expand_ratio']
-        criteria.append(f"1. 放量确认：5日内出现涨幅超过5%的交易日，且成交量是前5日均量的{expand_ratio}倍以上")
+        criteria.append(f"1. 放量确认：5日内出现涨幅超过8%的交易日，且成交量是前5日均量的{expand_ratio}倍以上")
         
         # 条件2：W形态过滤
         pattern_days = self.params['pattern_days']
@@ -479,7 +469,7 @@ class WBottomStrategy(BaseStrategy):
         criteria.append(f"2. W形态过滤：最近{pattern_days}个交易日内形成双底结构，两个低点价格差异不超过{bottom_diff_threshold:.0f}%，间隔至少{min_gap}个交易日，确认颈线位置")
         
         # 条件3：颈线突破确认
-        criteria.append(f"3. 颈线突破确认：价格突破颈线（突破1%）")
+        criteria.append(f"3. 颈线突破确认：放量日收盘价突破颈线（突破1%），且前一日收盘价低于颈线")
         
         # 条件4：趋势确认
         short_ma_period = self.params['short_ma_period']
@@ -594,8 +584,7 @@ class WBottomStrategy(BaseStrategy):
             if df_with_indicators.empty:
                 return []
 
-            # 条件1：放量确认 - 5日内出现大阳线超过5%，且成交量是前5日均量的1.5倍以上
-            # 返回满足条件的日期索引
+            # 条件1：放量确认 - 5日内出现大阳线超过8%，且成交量是前5日均量的1.5倍以上
             volume_break_idx = self._check_volume_break(df_with_indicators)
             if volume_break_idx is None:
                 return []
@@ -614,15 +603,22 @@ class WBottomStrategy(BaseStrategy):
             # 颈线 = 两个低点之间的最高点
             neckline = h_price
 
-            # 条件3：颈线突破确认 - 检查放量确认日是否也突破了颈线
-            # 只考虑同一日的情况：放量确认日的收盘价 >= 颈线 × 1.01
+            # 条件3：颈线突破确认
+            # 验证：放量确认日收盘价 >= 颈线 × 1.01
+            # 且前一日收盘价 < 颈线（蓄势突破）
             break_price = neckline * 1.01
             try:
                 close_price = df_with_indicators['close'].iloc[volume_break_idx]
                 if close_price < break_price:
-                    # 放量确认日没有突破颈线
                     return []
-                # 使用放量确认日作为突破日
+                
+                # 检查前一日收盘价是否低于颈线
+                if volume_break_idx + 1 >= len(df_with_indicators):
+                    return []
+                prev_close_price = df_with_indicators['close'].iloc[volume_break_idx + 1]
+                if prev_close_price >= neckline:
+                    return []
+                
                 break_idx = volume_break_idx
             except Exception:
                 return []

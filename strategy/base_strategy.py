@@ -66,25 +66,47 @@ class BaseStrategy(ABC):
         
         return True
     
+    def _is_suspended(self, df, selection_date):
+        """
+        检查股票是否停牌
+
+        逻辑：如果选股日期当天的数据不存在（最新数据日期 < 选股日期），则认为是停牌
+
+        :param df: 股票数据DataFrame（倒序，最新在前）
+        :param selection_date: 选股日期（YYYY-MM-DD格式）
+        :return: True表示停牌，False表示正常
+        """
+        if df is None or df.empty or not selection_date:
+            return True
+
+        try:
+            latest_date = str(df.iloc[0]['date']).split()[0]
+            if latest_date < selection_date:
+                return True
+        except Exception:
+            return True
+
+        return False
+
     def _validate_stock_name(self, stock_name: str) -> bool:
         """
         验证股票名称：过滤ST/退市股票
-        
+
         :param stock_name: 股票名称
         :return: True表示股票名称有效，False表示应该被过滤
         """
         if not stock_name:
             return True
-        
+
         # 过滤退市/异常股票
         invalid_keywords = ['退', '未知', '退市', '已退']
         if any(kw in stock_name for kw in invalid_keywords):
             return False
-        
+
         # 过滤 ST/*ST 股票
         if stock_name.startswith('ST') or stock_name.startswith('*ST'):
             return False
-        
+
         return True
     
     @abstractmethod
@@ -112,16 +134,17 @@ class BaseStrategy(ABC):
         :return: 选股条件描述列表
         """
         return []
-    
+
     def execute_selection(self, df, stock_code='', stock_name='', selection_date=None):
         """
         标准化的选股执行过程
 
         执行流程：
             1. 数据验证（包括检查已退市股票）
-            2. 快速过滤（优先使用带lookback的版本）
-            3. 计算指标
-            4-N. 选股条件检查
+            2. 停牌股检查（当天没有K线数据的股票被过滤）
+            3. 快速过滤（优先使用带lookback的版本）
+            4. 计算指标
+            5-N. 选股条件检查
 
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param stock_code: 股票代码
@@ -130,6 +153,10 @@ class BaseStrategy(ABC):
         :return: 选股信号列表
         """
         if not self._validate_data(df):
+            return []
+
+        # 停牌股检查：如果selection_date当天没有K线数据，则跳过
+        if selection_date and self._is_suspended(df, selection_date):
             return []
 
         if hasattr(self, '_quick_filter_with_lookback'):

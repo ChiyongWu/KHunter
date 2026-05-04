@@ -22,6 +22,7 @@ from trading.stock_score_api import calculate_stock_score
 from trading.backtest_scorer import BacktestScoreCalculator
 
 from trading.timing_strategies import TimingStrategyFactory
+from trading.buy_filter import BuyPreFilter
 from utils.strategy_name_mapper import get_english_name
 from trading.strategy_kelly_loader import KellyCalculator
 from utils.system_utils import sleep_preventer
@@ -137,8 +138,6 @@ class BacktestEngine:
         # ========== 新增：移动止损、亏损冷却期、连续亏损限制相关状态 ==========
         # 移动止损：持仓期间最高收益率
         self.position_highest_profit = {}  # {stock_code: highest_profit}
-        # 移动止损：持仓期间最高价
-        self.position_highest_price = {}  # {stock_code: highest_price}
         
         # 亏损冷却池：单笔亏损超阈值后加入冷却
         self.loss_cool_down_pool = {}  # {stock_code: cool_down_end_date}
@@ -240,10 +239,7 @@ class BacktestEngine:
             # 5. 预加载所有股票数据到内存（根据策略参数动态计算历史数据天数）
             self._preload_stock_data(start_date, end_date, strategy_name)
             
-            # 6. 执行初始股票池预加载（在正式回测前，预加载前N个交易日的可选股票）
-            self._execute_stock_pool_preload(strategy_name, start_date, config)
-            
-            # 7. 初始化回测环境
+            # 6. 初始化回测环境
             initial_capital = config.get('initial_capital', 300000)
             current_capital = initial_capital
             positions = []  # 持仓列表
@@ -506,6 +502,13 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
+                    # 买入前K线过滤检查
+                    filter_result = BuyPreFilter.check_filters(df_to_date, stock_code)
+                    if not filter_result['passed']:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: K线过滤未通过 - {filter_result['reason']}")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
                     # 获取买入价格（以开盘价为准）
                     buy_price = self._get_stock_price(stock_code, current_date, 'open')
                     logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格: {buy_price}")
@@ -586,9 +589,6 @@ class BacktestEngine:
                         # 更新加仓次数和加仓价格
                         existing_pos['add_count'] = result.add_count if result and hasattr(result, 'add_count') else existing_pos.get('add_count', 0) + 1
                         existing_pos['last_add_price'] = buy_price
-                        # 更新最高价（如果加仓价格更高）
-                        if buy_price > self.position_highest_price.get(stock_code, buy_price):
-                            self.position_highest_price[stock_code] = buy_price
                         logger.info(f"【加仓#{existing_pos['add_count']}】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
                                    f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
@@ -612,8 +612,6 @@ class BacktestEngine:
                             'kelly_ratio': kelly_result.get('kelly_ratio') if 'kelly_result' in locals() else None,
                             'kelly_strategy_name': kelly_result.get('strategy_name') if 'kelly_result' in locals() else None
                         })
-                        # 记录初始最高价
-                        self.position_highest_price[stock_code] = buy_price
                         buy_cost = buy_record['buy_commission'] + buy_record['buy_transfer_fee']
                         logger.info(f"【新买入】{current_date} {stock_code} {stock['stock_name']}: 价格={buy_price}, 数量={quantity}, 金额={buy_amount}, 佣金={buy_record['buy_commission']:.2f}, 过户费={buy_record['buy_transfer_fee']:.2f}, 首次建仓={base_position_amount}")
                     
@@ -1913,13 +1911,26 @@ class BacktestEngine:
             estimated_net_proceed = gross_sell_amount - sell_commission_estimate - sell_transfer_fee_estimate - sell_stamp_tax_estimate
             return_rate = (estimated_net_proceed - actual_cost) / actual_cost * 100
             
-            # 获取买入价和当前最高价
+            # 获取买入价和当前最高价（从买入日期到前一交易日的最高价）
             buy_price = position['buy_price']
-            current_highest_price = self.position_highest_price.get(stock_code, buy_price)
-            # 更新最高价
-            if high_price > current_highest_price:
-                current_highest_price = high_price
-                self.position_highest_price[stock_code] = current_highest_price
+            buy_date = position['buy_date']
+            
+            # 计算从买入日期到前一交易日的最高价
+            # 移动止损的最高价应该是买入日期至前一日的最高价，不包括当日最高价
+            current_highest_price = buy_price
+            if stock_code in self.stock_data_cache:
+                df = self.stock_data_cache[stock_code]
+                buy_date_str = buy_date.strftime('%Y-%m-%d')
+                # 获取前一交易日
+                prev_trading_day = self._get_previous_trading_day(current_date)
+                if prev_trading_day:
+                    prev_day_str = prev_trading_day.strftime('%Y-%m-%d')
+                    # 筛选买入日期到前一交易日的数据
+                    mask = (df['date'] >= buy_date_str) & (df['date'] <= prev_day_str)
+                    filtered_df = df[mask]
+                    if not filtered_df.empty:
+                        current_highest_price = filtered_df['high'].max()
+            
             # 计算最高价收益率
             highest_price_return = (current_highest_price - buy_price) / buy_price * 100
             

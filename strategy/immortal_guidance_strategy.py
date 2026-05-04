@@ -5,7 +5,7 @@
 通过识别"冲高回落+长上影+放量+趋势向上"形态筛选股票。
 
 核心流程：
-1. T日上影线日识别（冲高6%+长上影3%+放量1.5-3倍+收阳线+站5日线）
+1. T日上影线日识别（冲高8%+长上影4%+放量+站5日线，不再要求收阳线）
 2. T日趋势过滤（均线多头MA5>MA10>MA20+上升趋势+R²≥0.5）
 3. T+1~T+3日确认（回调不破5日线+反包确认）
 
@@ -30,7 +30,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
     继承 BaseStrategy，实现 calculate_indicators() 和 select_stocks() 方法。
     通过三个核心步骤实现选股：
-    1. T日上影线日识别（冲高+长上影+放量+收阳线+站线）
+    1. T日上影线日识别（冲高+长上影+放量+站线，不要求收阳线）
     2. T日趋势过滤（均线多头+上升趋势+趋势强度）
     3. T+1~T+3日确认（回调支撑+反包确认+后续持续性检查）
 
@@ -46,8 +46,8 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         :param params: 用户自定义参数字典，会覆盖默认参数
         """
         default_params = {
-            'surge_threshold': 0.06,
-            'upper_shadow_ratio': 0.03,
+            'surge_threshold': 0.08,
+            'upper_shadow_ratio': 0.04,
             'volume_ratio_min': 1.5,
             'volume_ratio_max': None,
             'ma_periods': [5, 10, 20],
@@ -131,12 +131,13 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         except Exception:
             return 0.0, 0.0
 
-    def select_stocks(self, df, stock_name='') -> list:
+    def select_stocks(self, df, stock_name='', selection_date=None) -> list:
         """
         执行仙人指路策略选股
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param stock_name: 股票名称
+        :param selection_date: 选股日期（YYYY-MM-DD格式），用于回溯检查和停牌过滤
         :return: 选股结果列表（只包含确认成功的信号）
         """
         if not self._validate_data(df):
@@ -145,10 +146,15 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not self._validate_stock_name(stock_name):
             return []
 
-        if not self._quick_filter_with_lookback(df):
+        # 停牌检查：用统一的选股日期（默认2026-04-30）判断是否停牌
+        # 如果股票最新数据日期早于选股日期，说明股票已停牌或无数据
+        if selection_date is None:
+            selection_date = '2026-04-30'
+        latest_date_str = str(df.iloc[0]['date']).split()[0]
+        if latest_date_str < selection_date:
             return []
 
-        if not self._check_data_freshness(df):
+        if not self._quick_filter_with_lookback(df):
             return []
 
         result = self.calculate_indicators(df)
@@ -201,7 +207,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
         lookback_days = min(lookback_days, len(df) - 1, 4)
 
-        for day_offset in range(1, lookback_days):
+        for day_offset in range(1, lookback_days + 1):
             signal_day_idx = day_offset
             prev_idx = signal_day_idx + 1
 
@@ -217,9 +223,6 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             surge_pct = (signal_day['high'] - prev_close) / prev_close
 
             if surge_pct < self.params['surge_threshold']:
-                continue
-
-            if signal_day['close'] <= signal_day['open']:
                 continue
 
             if signal_day['close'] > signal_day['open']:
@@ -250,7 +253,10 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             if not (signal_day_ma5 > signal_day_ma10 > signal_day_ma20 > 0):
                 continue
 
-            upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+            if signal_day['close'] > signal_day['open']:
+                upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+            else:
+                upper_shadow_50_price = (signal_day['open'] + signal_day['high']) / 2
 
             early_anti_body = False
             for check_idx in range(1, signal_day_idx):
@@ -385,11 +391,15 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             else:
                 upper_shadow = signal_day['high'] - signal_day['open']
             body_length = abs(signal_day['close'] - signal_day['open'])
-            total_length = upper_shadow + body_length
-            upper_shadow_ratio = upper_shadow / total_length if total_length > 0 else 0
+            upper_shadow_ratio = upper_shadow / signal_day['high'] if signal_day['high'] > 0 else 0
 
-            # 上影线50%位置
-            upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+            # 上影线50%位置（根据阴阳线不同，使用对应的基准点）
+            # 阳线：上影线50% = (收盘价 + 最高价) / 2
+            # 阴线：上影线50% = (开盘价 + 最高价) / 2
+            if signal_day['close'] > signal_day['open']:
+                upper_shadow_50_price = (signal_day['close'] + signal_day['high']) / 2
+            else:
+                upper_shadow_50_price = (signal_day['open'] + signal_day['high']) / 2
 
             signal_day_ma5 = signal_day.get('ma5', 0)
             signal_day_ma10 = signal_day.get('ma10', 0)
@@ -400,7 +410,26 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                 continue
             if upper_shadow_ratio < self.params['upper_shadow_ratio']:
                 continue
+            
+            # 检查成交量条件
+            signal_day_vol = signal_day.get('volume', 0)
+            signal_day_vol_ma5 = signal_day.get('volume_ma5', 0)
+            if signal_day_vol_ma5 > 0:
+                signal_day_vol_ratio = signal_day_vol / signal_day_vol_ma5
+                if signal_day_vol_ratio < self.params['volume_ratio_min']:
+                    continue
+            
             if not (signal_day_ma5 > signal_day_ma10 > signal_day_ma20 > 0):
+                continue
+
+            # 检查是否提前反包（信号日之后、今天之前的日子不能提前反包）
+            early_anti_body = False
+            for check_idx in range(1, signal_day_idx):
+                check_day = df.iloc[check_idx]
+                if check_day['close'] >= upper_shadow_50_price:
+                    early_anti_body = True
+                    break
+            if early_anti_body:
                 continue
 
             # 检查今天是否反包信号日的上影线
@@ -463,7 +492,10 @@ class ImmortalGuidanceStrategy(BaseStrategy):
                 continue
 
             if sd['high'] > 0:
-                upper_shadow = sd['high'] - sd['close']
+                if sd['close'] > sd['open']:
+                    upper_shadow = sd['high'] - sd['close']
+                else:
+                    upper_shadow = sd['high'] - sd['open']
                 upper_shadow_ratio = upper_shadow / sd['high']
             else:
                 upper_shadow_ratio = 0
@@ -473,12 +505,13 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
         return False
 
-    def _check_data_freshness(self, df, max_days_old=5) -> bool:
+    def _check_data_freshness(self, df, max_days_old=5, reference_date=None) -> bool:
         """
         检查数据时效性，确保数据不过旧
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param max_days_old: 最大允许的天数间隔
+        :param reference_date: 参考日期（YYYY-MM-DD格式），如果为None则使用当前日期
         :return: True表示数据新鲜（可以选股），False表示数据过旧（应该排除）
         """
         if df is None or df.empty:
@@ -496,8 +529,12 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             else:
                 latest_date = latest_date
 
-            today = datetime.now().date()
-            days_diff = (today - latest_date).days
+            if reference_date is None:
+                reference_date = datetime.now().date()
+            elif isinstance(reference_date, str):
+                reference_date = datetime.strptime(reference_date.split()[0], '%Y-%m-%d').date()
+
+            days_diff = (reference_date - latest_date).days
 
             if days_diff > max_days_old:
                 return False
@@ -592,9 +629,6 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
             surge_pct = (signal_day['high'] - prev_close) / prev_close
             if surge_pct < self.params['surge_threshold']:
-                continue
-
-            if signal_day['close'] <= signal_day['open']:
                 continue
 
             if signal_day['close'] > signal_day['open']:

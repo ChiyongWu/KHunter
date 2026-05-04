@@ -275,11 +275,22 @@ class BacktestUIManager {
    * @param {Object} result - 回测结果
    */
   addResultTab(task, result) {
-    // 检查是否已经存在相同的页签
+    // 检查是否已经存在相同的页签（根据任务ID或策略名称+日期范围）
     const existingTabs = this.elements.resultTabsContainer.querySelectorAll('.result-tab');
+    
+    // 首先检查是否有相同任务ID的结果内容
+    const existingContent = document.getElementById(`result-${task.id}`);
+    if (existingContent) {
+      console.warn(`已经存在任务ID ${task.id} 的结果页签，跳过添加`);
+      return;
+    }
+    
+    // 然后检查是否有相同策略名称的页签（处理日期为空的情况）
+    const strategyName = result.strategy_name || task.strategy_name;
     for (const tab of existingTabs) {
-      if (tab.textContent.includes(`${task.strategy_name} ${task.start_date}~${task.end_date}`)) {
-        console.warn('已经存在相同的结果页签，跳过添加');
+      if (tab.textContent.includes(strategyName) && !tab.textContent.includes('~')) {
+        // 如果已有同名页签且没有日期范围，说明是重复的
+        console.warn(`已经存在相同策略 ${strategyName} 的结果页签，跳过添加`);
         return;
       }
     }
@@ -302,8 +313,15 @@ class BacktestUIManager {
       gap: 8px;
       white-space: nowrap;
     `;
+    
+    // 构建页签标题，处理日期为空的情况
+    let tabText = strategyName;
+    if (task.start_date && task.end_date) {
+      tabText += ` ${task.start_date}~${task.end_date}`;
+    }
+    
     tabTitle.innerHTML = `
-      <span>${result.strategy_name || task.strategy_name} ${task.start_date}~${task.end_date}</span>
+      <span>${tabText}</span>
       <button class="close-tab" style="background:none; border:none; cursor:pointer; font-size:14px; padding:0; color:#6b7280;" onclick="event.stopPropagation();">✕</button>
     `;
 

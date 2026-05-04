@@ -452,45 +452,29 @@ class StrategyRunner:
     # ==================== 初始股票池预加载 ====================
 
     def _execute_stock_pool_preload(self, strategy_name: str, config: Dict):
-        """执行初始股票池预加载（首次运行时）
+        """Execute initial stock pool preload (first run)
 
-        复用 PreloadManager 机制，与回测引擎保持一致。
+        Reuse PreloadManager mechanism, keep consistent with backtest engine.
+        Note: Only preload data, do not execute stock selection strategy
 
         Args:
-            strategy_name: 选股策略名称
-            config: 配置参数
+            strategy_name: Stock selection strategy name
+            config: Configuration parameters
         """
         preload_enabled = config.get('preload_enabled', True)
-        preload_days = config.get('preload_days', 5)
-        exclude_recent_days = config.get('preload_exclude_recent_days', 0)
-
+        
+        # User requirement: Do not preload stock selection, but data preload is needed
         if not preload_enabled:
-            logger.info("预加载功能已禁用")
+            logger.info("Preload function is disabled")
             return
-
+        
+        # Only preload data, do not execute stock selection
+        logger.info(f"
+-------------------- Preload Stock Data --------------------")
         working_date = self.get_working_date()
-
-        logger.info(f"\n-------------------- 开始执行初始股票池预加载 --------------------")
-        logger.info(f"策略: {strategy_name}, 工作日期: {working_date}")
-        logger.info(f"预加载配置: preload_days={preload_days}, exclude_recent_days={exclude_recent_days}")
-
-        try:
-            self.preload_manager.set_config(
-                enabled=preload_enabled,
-                preload_days=preload_days,
-                exclude_recent_days=exclude_recent_days
-            )
-
-            preloaded_stocks = self.preload_manager.execute_preload(strategy_name, working_date)
-
-            score_threshold = config.get('score_threshold', 60)
-            logger.info(f"预加载评分阈值: {score_threshold}")
-
-            total_preload = len(preloaded_stocks)
-            filtered_by_veto = 0
-            filtered_by_score = 0
-
-            for stock in preloaded_stocks:
+        self._preload_stock_data(working_date, strategy_name)
+        logger.info("Stock data preload completed, no preload stock selection")
+        return
                 if stock.get('veto_flag', False):
                     logger.debug(f"预加载股票 {stock['stock_code']} 被否决标志过滤")
                     filtered_by_veto += 1
@@ -1222,10 +1206,12 @@ class StrategyRunner:
                 
                 # 检查止损止盈
                 current_price = df.iloc[-1]['close']
+                open_price = df.iloc[-1]['open']
                 buy_price = position['buy_price']
+                buy_date = position.get('buy_date', '')
                 profit_rate = (current_price - buy_price) / buy_price
                 
-                # ========== 新增：移动止损逻辑 ==========
+                # ========== 移动止损逻辑（与回测引擎保持一致） ==========
                 # 获取移动止损配置
                 enable_trailing_stop = self.config.get('enable_trailing_stop', True)
                 trailing_base_stop = self.config.get('trailing_base_stop', -6)
@@ -1239,19 +1225,34 @@ class StrategyRunner:
                 # 计算当前止损线
                 current_stop = self.stop_loss_threshold
                 if enable_trailing_stop:
-                    # 获取持仓期间最高收益率
-                    highest_profit = self.position_highest_profit.get(stock_code, profit_rate * 100)
-                    # 更新最高收益率
-                    if profit_rate * 100 > highest_profit:
-                        highest_profit = profit_rate * 100
-                        self.position_highest_profit[stock_code] = highest_profit
+                    # 计算从买入日期到前一交易日的最高价
+                    # 移动止损的最高价应该是买入日期至前一日的最高价，不包括当日最高价
+                    current_highest_price = buy_price
+                    
+                    if buy_date and not df.empty:
+                        buy_date_str = buy_date if isinstance(buy_date, str) else buy_date.strftime('%Y-%m-%d')
+                        # 获取前一交易日
+                        prev_trading_day = get_previous_trading_day(trade_date)
+                        if prev_trading_day:
+                            prev_day_str = prev_trading_day.strftime('%Y-%m-%d')
+                            # 筛选买入日期到前一交易日的数据
+                            mask = (df['date'] >= buy_date_str) & (df['date'] <= prev_day_str)
+                            filtered_df = df[mask]
+                            if not filtered_df.empty:
+                                current_highest_price = filtered_df['high'].max()
+                    
+                    # 计算最高价收益率
+                    highest_price_return = (current_highest_price - buy_price) / buy_price * 100
                     
                     # 根据最高收益率计算移动止损线
+                    current_stop_level = self.stop_loss_threshold * 100
                     for level in trailing_profit_levels:
-                        if highest_profit >= level['profit_threshold']:
-                            current_stop = level['stop_level'] / 100  # 转换为小数
+                        if highest_price_return >= level['profit_threshold']:
+                            current_stop_level = level['stop_level']
                     
-                    logger.info(f"  移动止损: 最高收益={highest_profit:.2f}%, 当前止损线={current_stop*100:.2f}%")
+                    current_stop = current_stop_level / 100
+                    
+                    logger.info(f"  移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损线={current_stop*100:.2f}%")
                 # ========== 移动止损逻辑结束 ==========
                 
                 # 记录择时信号详情

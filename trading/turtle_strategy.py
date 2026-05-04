@@ -133,8 +133,10 @@ class TurtleStrategy(TimingStrategy):
             return False
         
         # 2. 上影线过滤：上影线不超过4%
-        # 上影线 = (最高价 - 收盘价) / 收盘价 * 100%
-        upper_shadow_ratio = (signal_bar['high'] - signal_bar['close']) / signal_bar['close']
+        # 上影线 = high - max(open, close)，相对于实体上端计算
+        # 这样对阳线和阴线都适用
+        upper_shadow = signal_bar['high'] - max(signal_bar['open'], signal_bar['close'])
+        upper_shadow_ratio = upper_shadow / max(signal_bar['open'], signal_bar['close'])
         if upper_shadow_ratio > 0.04:
             return False
         

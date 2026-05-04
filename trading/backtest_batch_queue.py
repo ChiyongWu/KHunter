@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 from pathlib import Path
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +101,21 @@ class BacktestBatchQueue:
             return cls._executors[batch_id]
 
     def _deep_serialize(self, obj):
-        """深度序列化对象，处理嵌套的 date/datetime 类型"""
+        """深度序列化对象，处理嵌套的 date/datetime 和 numpy 类型"""
         if isinstance(obj, dict):
             return {k: self._deep_serialize(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._deep_serialize(item) for item in obj]
         elif isinstance(obj, (datetime, date)):
             return obj.isoformat()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
         else:
             return obj
 
@@ -255,6 +264,7 @@ class BacktestBatchQueue:
             回测结果
         """
         from trading.backtest_engine import BacktestEngine
+        from trading.backtest_dao import BacktestDAO
         from utils.strategy_config_manager import StrategyConfigManager
 
         strategy_name = task.get('strategy_name')
@@ -295,6 +305,90 @@ class BacktestBatchQueue:
 
         engine = BacktestEngine(db_path="data/stock_selection.db")
         result = engine.run_backtest(strategy_name, config)
+
+        # 保存结果到数据库
+        try:
+            backtest_dao = BacktestDAO(db_path="data/stock_selection.db")
+
+            # 计算final_capital
+            final_capital = config.get('initial_capital', 300000)
+            if 'capital_history' in result and result['capital_history']:
+                final_capital = result['capital_history'][-1]
+
+            # 构建保存到数据库的结果格式
+            save_result = {
+                'strategy_name': strategy_name,
+                'support_level_method': support_level_method,
+                'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
+                'start_date': start_date,
+                'end_date': end_date,
+                'total_trades': result.get('performance', {}).get('total_trades', 0),
+                'win_trades': result.get('performance', {}).get('win_trades', 0),
+                'loss_trades': result.get('performance', {}).get('loss_trades', 0),
+                'win_rate': result.get('performance', {}).get('win_rate', 0),
+                'avg_return': result.get('performance', {}).get('avg_return', 0),
+                'total_return': result.get('performance', {}).get('total_return', 0),
+                'max_return': result.get('performance', {}).get('max_return', 0),
+                'min_return': result.get('performance', {}).get('min_return', 0),
+                'profit_factor': result.get('performance', {}).get('profit_factor', 0),
+                'profit_loss_ratio': result.get('performance', {}).get('profit_loss_ratio', 0),
+                'max_drawdown': result.get('performance', {}).get('max_drawdown', 0),
+                'sharpe_ratio': result.get('performance', {}).get('sharpe_ratio', 0),
+                'initial_capital': config.get('initial_capital', 300000),
+                'final_capital': final_capital
+            }
+
+            # 检查是否已存在相同参数的回测结果
+            existing_result = backtest_dao.get_result_by_strategy_and_dates(
+                strategy_name, start_date, end_date
+            )
+
+            if existing_result:
+                result_id = existing_result['id']
+                backtest_dao.update_result(result_id, save_result)
+                backtest_dao.delete_trades(result_id)
+                backtest_dao.delete_equity_curve(result_id)
+                logger.info(f"批量回测更新已存在的回测结果，result_id: {result_id}")
+            else:
+                result_id = backtest_dao.save_result(save_result)
+                logger.info(f"批量回测保存新回测结果，result_id: {result_id}")
+
+            # 保存交易记录
+            if 'trades' in result and result['trades']:
+                trades = result['trades']
+                for trade in trades:
+                    trade['result_id'] = result_id
+                    trade.setdefault('stock_code', '')
+                    trade.setdefault('stock_name', '')
+                    if not trade.get('selection_date'):
+                        trade['selection_date'] = trade.get('buy_date', start_date)
+                    trade.setdefault('buy_date', '')
+                    trade.setdefault('buy_price', 0)
+                    trade.setdefault('sell_date', '')
+                    trade.setdefault('sell_price', 0)
+                    trade.setdefault('buy_amount', 0)
+                    trade.setdefault('sell_amount', 0)
+                    trade.setdefault('profit', trade.get('profit_loss', 0))
+                    trade.setdefault('profit_rate', trade.get('return_rate', 0))
+                    trade.setdefault('trade_type', 'normal')
+                backtest_dao.save_trades_batch(trades)
+                logger.info(f"批量回测保存交易记录 {len(trades)} 条")
+
+            # 保存收益曲线
+            if 'capital_history' in result and 'dates' in result:
+                equity_curve = [
+                    {'date': date, 'capital': capital}
+                    for date, capital in zip(result['dates'], result['capital_history'])
+                ]
+                backtest_dao.save_equity_curve(result_id, equity_curve)
+                logger.info(f"批量回测保存收益曲线 {len(equity_curve)} 条")
+
+            result['db_result_id'] = result_id
+
+        except Exception as e:
+            logger.error(f"批量回测保存数据库失败: {str(e)}")
+            import traceback
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
 
         return result
 
