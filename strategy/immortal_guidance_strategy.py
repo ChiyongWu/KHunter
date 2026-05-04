@@ -131,13 +131,12 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         except Exception:
             return 0.0, 0.0
 
-    def select_stocks(self, df, stock_name='', selection_date=None) -> list:
+    def select_stocks(self, df, stock_name='') -> list:
         """
         执行仙人指路策略选股
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param stock_name: 股票名称
-        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用当前日期进行时效性检查
         :return: 选股结果列表（只包含确认成功的信号）
         """
         if not self._validate_data(df):
@@ -149,7 +148,7 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not self._quick_filter_with_lookback(df):
             return []
 
-        if not self._check_data_freshness(df, selection_date=selection_date):
+        if not self._check_data_freshness(df):
             return []
 
         result = self.calculate_indicators(df)
@@ -474,25 +473,19 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
         return False
 
-    def _check_data_freshness(self, df, max_days_old=5, selection_date=None) -> bool:
+    def _check_data_freshness(self, df, max_days_old=5) -> bool:
         """
-        检查数据时效性，确保股票在选股日有数据
-
-        如果指定了selection_date，则检查数据的最新日期是否等于selection_date。
-        如果selection_date没有K线数据，自动调整为前一个有数据的日期。
-        如果未指定selection_date，则检查数据最新日期距离今天是否在max_days_old天内。
+        检查数据时效性，确保数据不过旧
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
-        :param max_days_old: 最大允许的天数间隔（仅在未指定selection_date时使用）
-        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用当前日期判断
+        :param max_days_old: 最大允许的天数间隔
         :return: True表示数据新鲜（可以选股），False表示数据过旧（应该排除）
         """
         if df is None or df.empty:
             return False
 
         try:
-            from datetime import datetime, timedelta
-            from utils.db_manager import DBManager
+            from datetime import datetime
 
             latest_date = df.iloc[0]['date']
 
@@ -503,45 +496,13 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             else:
                 latest_date = latest_date
 
-            if selection_date is not None:
-                if isinstance(selection_date, str):
-                    target_date_str = selection_date.split()[0]
+            today = datetime.now().date()
+            days_diff = (today - latest_date).days
 
-                    has_kline_data = self._has_kline_data(target_date_str)
-                    if not has_kline_data:
-                        adjusted_date_str = self._get_previous_date_with_kline_data(target_date_str)
-                        adjusted_date = datetime.strptime(adjusted_date_str, '%Y-%m-%d').date()
+            if days_diff > max_days_old:
+                return False
 
-                        if latest_date == adjusted_date:
-                            return True
-
-                        days_diff = abs((latest_date - adjusted_date).days)
-                        if days_diff <= max_days_old:
-                            return True
-
-                        return False
-                    else:
-                        target_date = datetime.strptime(target_date_str, '%Y-%m-%d').date()
-                        if latest_date != target_date:
-                            return False
-                        return True
-                elif hasattr(selection_date, 'date'):
-                    target_date = selection_date.date()
-                else:
-                    target_date = selection_date
-
-                if latest_date != target_date:
-                    return False
-
-                return True
-            else:
-                today = datetime.now().date()
-                days_diff = (today - latest_date).days
-
-                if days_diff > max_days_old:
-                    return False
-
-                return True
+            return True
 
         except Exception:
             return False
