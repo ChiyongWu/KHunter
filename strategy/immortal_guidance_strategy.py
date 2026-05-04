@@ -146,12 +146,13 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not self._validate_stock_name(stock_name):
             return []
 
-        # 停牌检查：用统一的选股日期（默认2026-04-30）判断是否停牌
-        # 如果股票最新数据日期早于选股日期，说明股票已停牌或无数据
-        if selection_date is None:
-            selection_date = '2026-04-30'
+        # 停牌检查：根据用户选择的选股日期判断是否停牌
+        # 如果用户指定了选股日期，股票最新数据日期必须 >= 选股日期
+        # 如果用户未指定选股日期，使用数据库统一最新交易日
         latest_date_str = str(df.iloc[0]['date']).split()[0]
-        if latest_date_str < selection_date:
+        if selection_date is None:
+            selection_date = self._get_latest_trading_date()
+        elif latest_date_str < selection_date:
             return []
 
         if not self._quick_filter_with_lookback(df):
@@ -594,6 +595,17 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             return date_str
         except Exception:
             return date_str
+
+    def _get_latest_trading_date(self) -> str:
+        """
+        获取数据库统一最新交易日
+
+        Returns:
+            str: 最新交易日（YYYY-MM-DD格式）
+        """
+        from utils.db_manager import DBManager
+        db = DBManager()
+        return db.get_latest_trading_date()
 
     def _quick_filter_with_lookback(self, df) -> bool:
         """

@@ -837,6 +837,29 @@ class DBManager:
             logger.debug(f"获取股票数量失败: {str(e)}")
             return 0
 
+    def get_latest_trading_date(self) -> str:
+        """
+        获取数据库中所有股票的最晚交易日期（统一交易日）
+
+        Returns:
+            str: 最晚交易日期（YYYY-MM-DD格式），如果失败返回None
+        """
+        try:
+            sql = "SELECT MAX(date) as max_date FROM stock_kline"
+            result = self.query_one(sql)
+            max_date = result['max_date'] if result and result.get('max_date') else None
+            if max_date:
+                if ' ' in str(max_date):
+                    max_date = str(max_date).split()[0]
+                # 转换为 YYYY-MM-DD 格式
+                if len(str(max_date)) == 8:  # 20260430 格式
+                    max_date = f"{str(max_date)[:4]}-{str(max_date)[4:6]}-{str(max_date)[6:8]}"
+            logger.debug(f"获取最晚交易日期成功: {max_date}")
+            return max_date
+        except Exception as e:
+            logger.debug(f"获取最晚交易日期失败: {str(e)}")
+            return None
+
     def get_stock_name(self, stock_code: str) -> str:
         """
         从 stock_basic 表获取股票名称
