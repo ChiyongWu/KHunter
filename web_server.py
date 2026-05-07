@@ -105,6 +105,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from stock_analyzer import StockAnalyzer
+from utils.strategy_name_mapper import STRATEGY_NAME_MAP, get_chinese_name
 
 app = Flask(__name__, 
             template_folder='web/templates',
@@ -819,7 +820,7 @@ def run_selection():
         strategies_to_run = None
         logic = 'or'
         end_date = None
-        
+
         # 解析请求参数
         if request.method == 'POST':
             try:
@@ -830,7 +831,14 @@ def run_selection():
                 b1_match = data.get('b1_match', False)  # 是否启用B1完美图形匹配
                 min_similarity = data.get('min_similarity', 60.0)  # 最小相似度阈值
                 lookback_days = data.get('lookback_days', 25)  # 回看天数
-                func_logger.info(f"请求参数 - 策略: {strategies_to_run}, 逻辑: {logic}, 结束日期: {end_date}, B1匹配: {b1_match}")
+
+                # 如果end_date为空，使用当前工作日期
+                if not end_date:
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    end_date = today
+                    func_logger.warning(f"⚠️ end_date为空，使用当前日期: {end_date}")
+
+                func_logger.warning(f"⚠️ 请求参数 - 策略: {strategies_to_run}, 逻辑: {logic}, 结束日期: {end_date}, B1匹配: {b1_match}")
             except Exception as e:
                 func_logger.error(f"解析请求参数失败: {str(e)}")
                 return jsonify({'success': False, 'error': f'请求参数解析失败: {str(e)}'})
@@ -856,7 +864,7 @@ def run_selection():
         
         # 构建股票数据字典
         try:
-            func_logger.info("构建股票数据字典...")
+            func_logger.warning(f"⚠️ 开始加载股票数据, end_date={end_date}")
             stock_data = {}
             skip_count = 0
             load_start_time = datetime.now()
@@ -1420,6 +1428,27 @@ def get_strategy_detail(name):
         return jsonify({'success': True, 'data': detail})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/strategies/names', methods=['GET'])
+def get_strategy_names():
+    """
+    获取策略名称映射（英文类名 -> 中文名称）
+    复用 utils.strategy_name_mapper 模块
+    
+    :return: 策略名称映射字典
+    """
+    try:
+        return jsonify({
+            "success": True,
+            "data": STRATEGY_NAME_MAP
+        })
+    except Exception as e:
+        logger.error(f"获取策略名称映射失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        })
 
 
 @app.route('/api/strategies')
@@ -3086,14 +3115,28 @@ def _generate_trade_dates(start_date: str, end_date: str) -> list:
 
 # ==================== 策略运行相关路由 ====================
 
-# 初始化策略运行器
-try:
-    from trading.strategy_runner import StrategyRunner
-    strategy_runner = StrategyRunner()
-    logger.info("策略运行器初始化成功")
-except Exception as e:
-    logger.error(f"策略运行器初始化失败: {str(e)}")
-    strategy_runner = None
+# 策略运行器延迟初始化（按需加载）
+strategy_runner = None
+
+# 策略运行锁（防止并发执行）
+import threading
+_strategy_run_lock = threading.Lock()
+
+def get_strategy_runner():
+    """获取策略运行器实例（延迟初始化）"""
+    global strategy_runner
+    if strategy_runner is None:
+        try:
+            from trading.strategy_runner import StrategyRunner
+            logger.info("开始初始化策略运行器...")
+            strategy_runner = StrategyRunner()
+            logger.info("策略运行器初始化成功")
+        except Exception as e:
+            logger.error(f"策略运行器初始化失败: {str(e)}")
+            import traceback
+            logger.error(f"初始化错误堆栈: {traceback.format_exc()}")
+            strategy_runner = None
+    return strategy_runner
 
 
 
@@ -3103,32 +3146,92 @@ except Exception as e:
 def run_strategy():
     """
     运行策略
-    
+
     参数：
         strategies: 选股策略列表（兼容 strategy_names）
         timing_strategy: 择时策略名称
         config: 配置参数（包含 max_stocks 最大持仓数等）
-    
+        end_date: 选股日期（YYYY-MM-DD格式），如果不提供则使用当前工作日期
+
     返回：
         {"status": "success", "message": "策略运行完成", "data": {...}}
     """
     try:
-        if not strategy_runner:
-            return jsonify({"status": "failed", "message": "策略运行器未初始化"})
-        
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"status": "failed", "message": "策略运行器初始化失败"})
+
         # 获取请求参数
         data = request.json or {}
         # 兼容两种参数名称：strategies 和 strategy_names
         strategy_names = data.get('strategies', data.get('strategy_names', []))
         timing_strategy = data.get('timing_strategy', 'support')
         config = data.get('config', {})
-        
+        end_date = data.get('end_date')
+
+        # 如果提供了end_date，在config中设置selection_date
+        if end_date:
+            config['selection_date'] = end_date
+
         # 运行策略
-        result = strategy_runner.run_strategy(strategy_names, timing_strategy, config)
-        
+        result = runner.run_strategy(strategy_names, timing_strategy, config)
+
         return jsonify(result)
     except Exception as e:
         logger.error(f"运行策略失败: {str(e)}")
+        return jsonify({"status": "failed", "message": str(e)})
+
+
+@app.route('/api/strategy/run-batch', methods=['POST'])
+def run_strategy_batch():
+    """
+    批量运行策略（所有策略执行完成后统一保存文件）
+    
+    参数：
+        tasks: 任务列表，每个任务包含：
+            - selection_strategy: 选股策略名称
+            - timing_strategy: 择时策略名称
+    
+    返回：
+        {"status": "success", "message": "批量策略运行完成", "results": [...]}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"status": "failed", "message": "策略运行器初始化失败"})
+        
+        data = request.json or {}
+        tasks = data.get('tasks', [])
+        
+        if not tasks:
+            return jsonify({"status": "failed", "message": "没有任务需要执行"})
+        
+        logger.info(f"批量执行 {len(tasks)} 个策略任务")
+        
+        # 获取配置参数
+        config = data.get('config', {})
+        if not config:
+            backtest_config = runner._get_backtest_config()
+            if backtest_config:
+                config = backtest_config
+        
+        # 执行批量任务
+        results = runner.run_strategies_batch(tasks, config)
+        
+        if results.get('status') == 'success':
+            runner.save_task_record({
+                'strategies': [task.get('selection_strategy', '') for task in tasks],
+                'initial_capital': config.get('initial_capital', 300000),
+                'mode': 'realtime'
+            })
+        
+        return jsonify(results)
+    except Exception as e:
+        logger.error(f"批量运行策略失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({"status": "failed", "message": str(e)})
 
 
@@ -3141,21 +3244,63 @@ def get_strategy_status():
         {"success": true, "data": {"date": "2026-04-24", "status": "completed", "strategy": "海龟策略"}}
     """
     try:
-        # 策略运行器未初始化时返回空数据默认值
-        if not strategy_runner:
-            return jsonify({"success": True, "data": {"date": "", "status": "not_initialized", "strategy": ""}})
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": True, "data": {"date": "", "status": "not_initialized", "strategy": "",
+                                                     "running": False, "selected_stocks": 0, "today_trades": 0, "last_run": "从未"}})
         
         # 获取当前工作日期
-        working_date = strategy_runner.get_working_date()
+        working_date = runner.get_working_date()
+        
+        # 初始化当日数据（自动从最近有数据的交易日继承）
+        runner.initialize_daily_data(working_date)
         
         # 检查是否已处理
-        processed = strategy_runner.check_if_processed(working_date)
+        processed = runner.check_if_processed(working_date)
+        
+        # 检查是否正在运行（通过检查锁状态）
+        running = False
+        if _strategy_run_lock.locked():
+            running = True
+        
+        # 获取今日选股数量（从股票池文件获取）
+        selected_stocks = 0
+        pool_file = runner.running_dir / "buy_candidate_pool.json"
+        if pool_file.exists():
+            try:
+                with open(pool_file, 'r', encoding='utf-8') as f:
+                    pool_data = json.load(f)
+                    selected_stocks = len(pool_data.get('pool', []))
+            except Exception as e:
+                logger.warning(f"读取股票池文件失败: {str(e)}")
+        
+        # 获取今日交易笔数（从交易记录文件获取）
+        today_trades = 0
+        trades_file = runner.running_dir / f"trades_{working_date}.json"
+        if trades_file.exists():
+            try:
+                with open(trades_file, 'r', encoding='utf-8') as f:
+                    trades_data = json.load(f)
+                    today_trades = len(trades_data)
+            except Exception as e:
+                logger.warning(f"读取交易记录文件失败: {str(e)}")
+        
+        # 获取最后运行时间（从任务历史获取）
+        last_run = "从未"
+        task_history = runner.get_task_history(limit=1)
+        if task_history:
+            last_run = task_history[0].get('timestamp', '从未')
         
         # 构建状态数据
         status_data = {
             "date": working_date,
             "status": "completed" if processed else "pending",
-            "strategy": ""  # 这里可以从配置中获取当前使用的策略
+            "strategy": "",
+            "running": running,
+            "selected_stocks": selected_stocks,
+            "today_trades": today_trades,
+            "last_run": last_run
         }
         
         return jsonify({"success": True, "data": status_data})
@@ -3173,27 +3318,202 @@ def get_portfolio():
         {"success": true, "data": {"positions": {...}, "initial_cash": 300000}}
     """
     try:
-        # 策略运行器未初始化时返回空持仓默认值
-        if not strategy_runner:
-            return jsonify({"success": True, "data": {"positions": {}, "initial_cash": 300000}})
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({
+                "success": True, 
+                "data": {
+                    "positions": [],
+                    "positions_count": 0,
+                    "available_cash": 300000,
+                    "total_assets": 300000,
+                    "total_profit_percent": 0
+                }
+            })
         
         # 获取当前工作日期
-        working_date = strategy_runner.get_working_date()
+        working_date = runner.get_working_date()
         
-        # 加载持仓信息
-        portfolio_file = strategy_runner.running_dir / f"portfolio_{working_date}.json"
-        portfolio = strategy_runner._load_portfolio(str(portfolio_file))
+        # 初始化当日数据（自动从最近有数据的交易日继承）
+        runner.initialize_daily_data(working_date)
         
-        # 返回持仓信息和初始资金
+        # 加载持仓信息（先读取文件中的数据，包含资金）
+        portfolio_file = runner.running_dir / f"portfolio_{working_date}.json"
+        # 先读取文件数据，获取资金和持仓
+        file_data = {}
+        if portfolio_file.exists():
+            try:
+                with open(portfolio_file, 'r', encoding='utf-8') as f:
+                    file_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"读取持仓文件失败: {str(e)}")
+        
+        # 再调用 _load_portfolio 恢复策略运行器中的资金和持仓
+        portfolio_result = runner._load_portfolio(str(portfolio_file))
+        positions = portfolio_result.get('positions', {})
+        
+        # 更新内存中的持仓，确保执行信号时可以找到
+        runner.portfolio = positions
+        
+        # 计算统计信息
+        positions_count = len(positions) if positions else 0
+        
+        # 先从文件中获取资金，如果没有就用默认
+        available_cash = file_data.get('cash', 300000)
+        initial_capital = file_data.get('initial_capital', 300000)
+        total_assets = initial_capital
+        total_profit_percent = 0
+        
+        # 如果有持仓，计算实际的资产和盈亏
+        if positions and isinstance(positions, dict):
+            total_value = 0
+            for stock_code, pos in positions.items():
+                if isinstance(pos, dict):
+                    total_value += pos.get('quantity', 0) * pos.get('current_price', 0)
+            
+            total_assets = available_cash + total_value
+            total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
+        
+        # 转换为列表格式
+        positions_list = []
+        if positions and isinstance(positions, dict):
+            for stock_code, pos in positions.items():
+                if isinstance(pos, dict):
+                    # 获取成本价（优先buy_price，兼容cost_price）
+                    cost_price = pos.get('buy_price', pos.get('cost_price', 0))
+                    current_price = pos.get('current_price', 0)
+                    quantity = pos.get('quantity', 0)
+                    # 计算盈亏
+                    profit_loss = (current_price - cost_price) * quantity
+                    profit_loss_percent = ((current_price - cost_price) / cost_price * 100 if cost_price > 0 else 0)
+                    
+                    positions_list.append({
+                        'id': pos.get('id', stock_code),
+                        'stock_code': stock_code,
+                        'stock_name': pos.get('stock_name', ''),
+                        'quantity': quantity,
+                        'cost_price': cost_price,
+                        'current_price': current_price,
+                        'profit_loss': pos.get('profit_loss', profit_loss),
+                        'profit_loss_percent': pos.get('profit_loss_percent', profit_loss_percent),
+                        'hold_days': pos.get('hold_days', pos.get('holding_days', 0))
+                    })
+        
+        # 返回持仓信息和统计数据
         return jsonify({
             "success": True, 
             "data": {
-                "positions": portfolio,
-                "initial_cash": 300000  # 初始资金30万
+                "positions": positions_list,
+                "positions_count": positions_count,
+                "available_cash": available_cash,
+                "total_assets": total_assets,
+                "total_profit_percent": total_profit_percent,
+                "initial_cash": 300000,
+                "date": working_date
             }
         })
     except Exception as e:
         logger.error(f"获取持仓信息失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/task/history')
+def get_task_history():
+    """
+    获取任务历史记录
+    
+    参数：
+        limit: 返回记录数量（默认10条）
+    
+    返回：
+        {"success": true, "data": {"history": [...]}}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": True, "data": {"history": []}})
+        
+        limit = request.args.get('limit', 10, type=int)
+        history = runner.get_task_history(limit)
+        
+        return jsonify({"success": True, "data": {"history": history}})
+    except Exception as e:
+        logger.error(f"获取任务历史失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/task/last')
+def get_last_task():
+    """
+    获取上次运行的任务配置
+    
+    返回：
+        {"success": true, "data": {"strategies": [...], "initial_capital": 300000}}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            # 没有策略运行器，返回空任务列表
+            return jsonify({
+                "success": True, 
+                "data": {
+                    "strategies": [],
+                    "initial_capital": 300000,
+                    "mode": 'realtime'
+                }
+            })
+        
+        last_task = runner.get_last_task()
+        
+        # 如果没有上次任务，返回空列表
+        if not last_task:
+            return jsonify({
+                "success": True, 
+                "data": {
+                    "strategies": [],
+                    "initial_capital": 300000,
+                    "mode": 'realtime'
+                }
+            })
+        
+        return jsonify({"success": True, "data": last_task})
+    except Exception as e:
+        logger.error(f"获取上次任务失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/task/save', methods=['POST'])
+def save_task():
+    """
+    保存任务运行记录
+    
+    参数：
+        strategies: 策略列表
+        initial_capital: 初始资金
+        mode: 运行模式
+    
+    返回：
+        {"success": true, "message": "任务记录已保存"}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
+        
+        data = request.json or {}
+        
+        result = runner.save_task_record(data)
+        
+        if result.get('success'):
+            return jsonify({"success": True, "message": "任务记录已保存"})
+        else:
+            return jsonify({"success": False, "error": result.get('error', '保存失败')})
+    except Exception as e:
+        logger.error(f"保存任务记录失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
 
 
@@ -3206,21 +3526,196 @@ def get_signals():
         {"success": true, "data": {"signals": [...]}}
     """
     try:
-        # 策略运行器未初始化时返回空信号默认值
-        if not strategy_runner:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
             return jsonify({"success": True, "data": {"signals": []}})
         
         # 获取当前工作日期
-        working_date = strategy_runner.get_working_date()
+        working_date = runner.get_working_date()
+        
+        # 初始化当日数据（自动从最近有数据的交易日继承）
+        runner.initialize_daily_data(working_date)
         
         # 加载信号历史
-        signals_file = strategy_runner.running_dir / f"signals_{working_date}.json"
-        signals = strategy_runner._load_signals(str(signals_file))
+        signals_file = runner.running_dir / f"signals_{working_date}.json"
+        signals = runner._load_signals(str(signals_file))
         
-        return jsonify({"success": True, "data": {"signals": signals}})
+        # 更新内存中的信号，确保执行时可以找到
+        runner.signals = signals
+        
+        # 转换策略名称为中文
+        for signal in signals:
+            if 'strategy_name' in signal:
+                signal['strategy_name'] = get_chinese_name(signal['strategy_name'])
+        
+        return jsonify({"success": True, "data": {"signals": signals, "date": working_date}})
     except Exception as e:
         logger.error(f"获取信号列表失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/stock-pool')
+def get_stock_pool():
+    """
+    获取股票池数据
+    
+    返回：
+        {"success": true, "data": {"pool": [...]}}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": True, "data": {"pool": []}})
+        
+        from utils.trade_date_utils import get_trading_days
+        
+        # 获取当前工作日期
+        working_date = runner.get_working_date()
+        
+        # 初始化当日数据（自动从最近有数据的交易日继承）
+        runner.initialize_daily_data(working_date)
+        
+        # 加载股票池数据
+        pool_file = runner.running_dir / f"buy_candidate_pool.json"
+        if pool_file.exists():
+            with open(pool_file, 'r', encoding='utf-8') as f:
+                pool_data = json.load(f)
+                pool = pool_data.get('pool', [])
+        else:
+            pool = []
+        
+        # 转换格式
+        pool_list = []
+        for item in pool:
+            stock = item.get('stock', {})
+            added_date = item.get('added_date', working_date)
+            # 按交易日计算入池天数
+            trading_days = get_trading_days(added_date, working_date)
+            days_in_pool = len(trading_days)
+            
+            pool_list.append({
+                'stock_code': stock.get('stock_code', ''),
+                'stock_name': stock.get('stock_name', ''),
+                'score': stock.get('score', 0),
+                'status': 'candidate',
+                'days_in_pool': days_in_pool,
+                'current_price': stock.get('signal', {}).get('close', 0),
+                'support_level': item.get('support_level', 0),
+                'strategy_name': get_chinese_name(item.get('strategy_name', ''))
+            })
+        
+        return jsonify({"success": True, "data": {"pool": pool_list, "date": working_date}})
+    except Exception as e:
+        logger.error(f"获取股票池失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/signals/<signal_id>/execute', methods=['POST'])
+def execute_signal(signal_id):
+    """
+    执行指定的信号
+    
+    参数：
+        signal_id: 信号ID
+    
+    返回：
+        {"success": true, "message": "信号执行成功"}
+    """
+    import traceback
+    try:
+        # 添加详细日志追踪请求
+        logger.info(f"【路由层】接收到执行信号请求: {signal_id}")
+        
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            logger.error(f"【路由层】策略运行器未初始化")
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
+        
+        logger.info(f"【路由层】开始执行信号: {signal_id}")
+        
+        # 调用策略运行器执行信号
+        result = runner.execute_signal(signal_id)
+        
+        if result.get('success'):
+            logger.info(f"【路由层】信号执行成功: {signal_id}")
+            return jsonify({"success": True, "message": "信号执行成功"})
+        else:
+            logger.warning(f"【路由层】信号执行失败: {signal_id}, 错误: {result.get('error')}")
+            return jsonify({"success": False, "message": result.get('error', '执行失败')})
+    except Exception as e:
+        logger.error(f"【路由层】执行信号异常: {signal_id}, 错误: {str(e)}")
+        logger.error(f"【路由层】异常堆栈: {traceback.format_exc()}")
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/signals/<signal_id>/ignore', methods=['POST'])
+def ignore_signal(signal_id):
+    """
+    忽略指定的信号
+    
+    参数：
+        signal_id: 信号ID
+    
+    返回：
+        {"success": true, "message": "信号已忽略"}
+    """
+    try:
+        # 延迟初始化策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
+        
+        logger.info(f"忽略信号: {signal_id}")
+        
+        # 调用策略运行器忽略信号
+        result = runner.ignore_signal(signal_id)
+        
+        if result.get('success'):
+            return jsonify({"success": True, "message": "信号已忽略"})
+        else:
+            return jsonify({"success": False, "message": result.get('error', '忽略失败')})
+    except Exception as e:
+        logger.error(f"忽略信号失败: {str(e)}")
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/signals/execute_pending', methods=['POST'])
+def execute_pending_signals():
+    """
+    执行所有待处理的信号（T+1日盘中调用）
+    
+    参数：
+        trade_date: 交易日期（可选，默认使用当前工作日期）
+    
+    返回：
+        {"success": true, "message": "信号执行完成", "data": {...}}
+    """
+    try:
+        runner = get_strategy_runner()
+        if not runner:
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
+        
+        data = request.json or {}
+        trade_date = data.get('trade_date')
+        
+        logger.info(f"执行所有待处理信号: {trade_date or '当前工作日期'}")
+        
+        result = runner.execute_pending_signals(trade_date)
+        
+        if result.get('success'):
+            return jsonify({
+                "success": True,
+                "message": result.get('message', '信号执行完成'),
+                "data": result.get('data', {})
+            })
+        else:
+            return jsonify({"success": False, "message": result.get('error', '执行失败')})
+    except Exception as e:
+        logger.error(f"执行待处理信号失败: {str(e)}")
+        return jsonify({"success": False, "message": str(e)})
 
 
 @app.route('/api/trades/execute', methods=['POST'])
@@ -3236,7 +3731,7 @@ def execute_trade():
     """
     try:
         if not strategy_runner:
-            return jsonify({"success": False, "error": "策略运行器未初始化"})
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
         
         # 获取请求参数
         data = request.json or {}
@@ -3268,7 +3763,7 @@ def ignore_trade():
     """
     try:
         if not strategy_runner:
-            return jsonify({"success": False, "error": "策略运行器未初始化"})
+            return jsonify({"success": False, "message": "策略运行器未初始化"})
         
         # 获取请求参数
         data = request.json or {}
