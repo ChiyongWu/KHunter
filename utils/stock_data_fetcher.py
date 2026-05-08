@@ -796,11 +796,12 @@ class StockDataFetcher:
                     end_date = datetime.now().strftime('%Y%m%d')
                     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
                     
-                    # 获取日K线数据
-                    df = pro.daily(
+                    # 获取日K线数据（使用前复权）
+                    df = pro.pro_bar(
                         ts_code=ts_code,
                         start_date=start_date,
-                        end_date=end_date
+                        end_date=end_date,
+                        adj='qfq'
                     )
                     
                     if df is not None and len(df) > 0:
@@ -810,7 +811,7 @@ class StockDataFetcher:
                         # 与数据库字段名和腾讯财经返回格式保持一致
                         df = df.rename(columns={'vol': 'volume'})
                         df = df.sort_values('date', ascending=False)
-                        logger.debug(f"Tushare 获取 {len(df)} 条更新数据")
+                        logger.debug(f"Tushare 前复权 获取 {len(df)} 条更新数据")
                         return df
             except Exception as e:
                 logger.debug(f"Tushare 获取失败: {e}")
