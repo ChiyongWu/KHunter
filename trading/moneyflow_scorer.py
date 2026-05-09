@@ -135,8 +135,8 @@ class MoneyflowScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
-        # 记录初始化日志
-        logger.info("资金面评分器初始化完成")
+        # 记录初始化日志（改为debug级别，避免频繁输出）
+        logger.debug("资金面评分器初始化完成")
 
     def _load_tushare_token(self) -> str:
         """
@@ -321,13 +321,146 @@ class MoneyflowScorer:
                 # 写入缓存
                 self._cache.set(cache_key, df)
                 return df
-            # Tushare 返回空数据
-            logger.warning(f"Tushare 返回空数据: {stock_code}")
+            # Tushare 返回空数据，尝试降级到 moneyflow 接口获取历史数据
+            logger.warning(f"Tushare moneyflow_ths 返回空数据: {stock_code}，尝试 moneyflow 接口")
+            return self._fetch_moneyflow_historical(stock_code, start_date, end_date)
+        except Exception as e:
+            # 获取实时数据失败，尝试降级到 moneyflow 接口
+            logger.error(f"Tushare moneyflow_ths 获取失败: {stock_code}, {e}，尝试 moneyflow 接口")
+            return self._fetch_moneyflow_historical(stock_code, start_date, end_date)
+
+    def _fetch_moneyflow_historical(
+        self, stock_code: str, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        从 Tushare moneyflow 接口获取个股历史资金流向数据
+
+        moneyflow 接口与 moneyflow_ths 的区别：
+        - moneyflow_ths：同花顺数据，字段 net_amount 是主力净流入，仅近期数据
+        - moneyflow：沪深A数据，字段 net_mf_amount 是全市场净流入，支持历史数据
+
+        本方法作为 moneyflow_ths 的降级方案，用于获取历史数据。
+
+        参数:
+            stock_code: 股票代码（6位数字）
+            start_date: 开始日期（YYYYMMDD 格式）
+            end_date: 结束日期（YYYYMMDD 格式）
+        返回:
+            DataFrame: 资金流向数据，失败返回 None
+        """
+        # 构建缓存键
+        cache_key = f"moneyflow_hist_{stock_code}_{start_date}_{end_date}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug(f"命中历史资金流向缓存: {cache_key}")
+            return cached
+
+        # 转换为 Tushare 格式代码
+        ts_code = self._convert_ts_code(stock_code)
+
+        try:
+            pro = self._get_pro()
+            # 调用 Tushare moneyflow 接口获取历史数据
+            df = self._call_tushare_with_retry(
+                pro.moneyflow,
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            # 检查返回数据是否有效
+            if df is not None and not df.empty:
+                logger.debug(
+                    f"moneyflow 接口获取资金流向数据成功: {stock_code}, {len(df)} 条记录"
+                )
+                # 按日期降序排序（最新日期在前）
+                if "trade_date" in df.columns:
+                    df = df.sort_values("trade_date", ascending=False)
+                # 写入缓存
+                self._cache.set(cache_key, df)
+                return df
+            # moneyflow 也返回空数据
+            logger.warning(f"Tushare moneyflow 返回空数据: {stock_code}")
             return None
         except Exception as e:
-            # 获取实时数据失败，返回 None（不降级到本地数据）
-            logger.error(f"Tushare 资金流向获取失败: {stock_code}, {e}")
+            logger.error(f"Tushare moneyflow 获取失败: {stock_code}, {e}")
             return None
+
+    def _extract_from_moneyflow(self, df: pd.DataFrame) -> Dict[str, float]:
+        """
+        从 Tushare moneyflow 格式数据中提取指标
+
+        moneyflow 接口的字段：
+        - net_mf_amount: 净流入额（万元）= 大单 + 中单 + 小单 + 特大单
+        - buy_lg_amount, sell_lg_amount: 大单买入卖出金额（万元）
+        - buy_sm_amount, sell_sm_amount: 小单买入卖出金额（万元）
+        - buy_elg_amount, sell_elg_amount: 特大单买入卖出金额（万元）
+
+        参数:
+            df: moneyflow 格式的 DataFrame
+        返回:
+            Dict: 评分指标字典
+        """
+        metrics = {
+            "net_flow_5d": 0.0,
+            "daily_ratios": [],
+            "large_net": 0.0,
+            "small_net": 0.0,
+        }
+
+        if df is None or df.empty:
+            return metrics
+
+        # 主力净流入 = 大单 + 特大单（moneyflow 接口不直接提供，用这个近似）
+        if "buy_elg_amount" in df.columns and "sell_elg_amount" in df.columns:
+            elg_buy = pd.to_numeric(df["buy_elg_amount"], errors='coerce').fillna(0)
+            elg_sell = pd.to_numeric(df["sell_elg_amount"], errors='coerce').fillna(0)
+            elg_net = (elg_buy - elg_sell).sum()
+        else:
+            elg_net = 0.0
+
+        if "buy_lg_amount" in df.columns and "sell_lg_amount" in df.columns:
+            lg_buy = pd.to_numeric(df["buy_lg_amount"], errors='coerce').fillna(0)
+            lg_sell = pd.to_numeric(df["sell_lg_amount"], errors='coerce').fillna(0)
+            lg_net = (lg_buy - lg_sell).sum()
+        else:
+            lg_net = 0.0
+
+        # 主力净流入 = 大单 + 特大单
+        metrics["net_flow_5d"] = float(lg_net + elg_net)
+
+        # 每日大单净流入占比 = (大单 + 特大单) / 成交额
+        # moneyflow 接口没有直接的占比字段，需要计算
+        if len(df) > 0:
+            daily_ratios = []
+            for _, row in df.iterrows():
+                lg_net = 0.0
+                elg_net = 0.0
+                if "buy_lg_amount" in row.index and "sell_lg_amount" in row.index:
+                    lg_net = float(row["buy_lg_amount"] or 0) - float(row["sell_lg_amount"] or 0)
+                if "buy_elg_amount" in row.index and "sell_elg_amount" in row.index:
+                    elg_net = float(row["buy_elg_amount"] or 0) - float(row["sell_elg_amount"] or 0)
+                main_net = lg_net + elg_net
+                # 获取成交额计算占比（如果有的话）
+                if "amount" in row.index and row["amount"] > 0:
+                    ratio = (main_net / float(row["amount"])) * 100
+                    daily_ratios.append(ratio)
+                else:
+                    daily_ratios.append(0.0)
+            metrics["daily_ratios"] = daily_ratios
+
+        # 大单净流入累计（不含特大单，与 moneyflow_ths 保持一致）
+        if "buy_lg_amount" in df.columns and "sell_lg_amount" in df.columns:
+            large_buy = pd.to_numeric(df["buy_lg_amount"], errors='coerce').fillna(0).sum()
+            large_sell = pd.to_numeric(df["sell_lg_amount"], errors='coerce').fillna(0).sum()
+            metrics["large_net"] = float(large_buy - large_sell)
+
+        # 小单净流入累计
+        if "buy_sm_amount" in df.columns and "sell_sm_amount" in df.columns:
+            small_buy = pd.to_numeric(df["buy_sm_amount"], errors='coerce').fillna(0).sum()
+            small_sell = pd.to_numeric(df["sell_sm_amount"], errors='coerce').fillna(0).sum()
+            metrics["small_net"] = float(small_buy - small_sell)
+
+        return metrics
 
     def _fetch_north_fund_data(self, stock_code: str) -> Optional[pd.DataFrame]:
         """
@@ -385,6 +518,7 @@ class MoneyflowScorer:
           净额 > 5000万元：80分
           净额 > 100万元：60分
           净额 > 0：40分
+          净额 == 0（数据缺失）：30分（中性）
           净额 < 0：-20分
           一票否决：净额 < -10000万元 → -100分
 
@@ -408,7 +542,10 @@ class MoneyflowScorer:
         # 净额 > 0：40分
         if net_flow_5d > 0:
             return 40
-        # 净额 <= 0：-20分
+        # 净额 == 0（数据缺失或持平）：30分（中性）
+        if net_flow_5d == 0:
+            return 30
+        # 净额 < 0：-20分
         return -20
 
     def _score_large_ratio(self, daily_ratios: List[float]) -> float:
@@ -561,8 +698,15 @@ class MoneyflowScorer:
         if df is None or df.empty:
             return metrics
 
-        # 从 Tushare moneyflow_ths 格式提取指标
-        return self._extract_from_tushare(df)
+        # 根据数据格式自动选择提取方法
+        # moneyflow_ths 接口返回 net_amount 字段
+        # moneyflow 接口返回 net_mf_amount 字段，没有 net_amount
+        if "net_amount" in df.columns:
+            # moneyflow_ths 格式数据
+            return self._extract_from_tushare(df)
+        else:
+            # moneyflow 格式数据（历史数据降级方案）
+            return self._extract_from_moneyflow(df)
 
     def _extract_from_tushare(self, df: pd.DataFrame) -> Dict[str, float]:
         """
@@ -580,11 +724,17 @@ class MoneyflowScorer:
             "small_net": 0.0,
         }
 
-        # 累计5日主力净买入金额（万元）
-        if "net_amount" in df.columns:
-            metrics["net_flow_5d"] = float(df["net_amount"].sum())
+        # 5日主力净额直接使用Tushare已计算好的net_d5_amount字段
+        # net_d5_amount是Tushare统一计算的5日主力净额，避免自己求和导致范围不一致
+        if "net_d5_amount" in df.columns:
+            net_d5_col = pd.to_numeric(df["net_d5_amount"], errors='coerce')
+            metrics["net_flow_5d"] = float(net_d5_col.iloc[0])
+        elif "net_amount" in df.columns:
+            net_amount_col = pd.to_numeric(df["net_amount"], errors='coerce').fillna(0)
+            metrics["net_flow_5d"] = float(net_amount_col.sum())
         elif "net_buy_amount" in df.columns:
-            metrics["net_flow_5d"] = float(df["net_buy_amount"].sum())
+            net_buy_col = pd.to_numeric(df["net_buy_amount"], errors='coerce').fillna(0)
+            metrics["net_flow_5d"] = float(net_buy_col.sum())
 
         # 每日大单净流入占比
         if "buy_lg_amount_rate" in df.columns:
@@ -595,22 +745,24 @@ class MoneyflowScorer:
         # 大单净流入累计
         if "buy_lg_amount" in df.columns and "sell_lg_amount" in df.columns:
             # 计算大单净流入 = 买入 - 卖出
-            large_buy = df["buy_lg_amount"].fillna(0).sum()
-            large_sell = df["sell_lg_amount"].fillna(0).sum()
+            large_buy = pd.to_numeric(df["buy_lg_amount"], errors='coerce').fillna(0).sum()
+            large_sell = pd.to_numeric(df["sell_lg_amount"], errors='coerce').fillna(0).sum()
             metrics["large_net"] = float(large_buy - large_sell)
         elif "buy_lg_amount" in df.columns:
             # 如果只有买入字段，假设为净流入金额
-            metrics["large_net"] = float(df["buy_lg_amount"].fillna(0).sum())
+            large_buy_col = pd.to_numeric(df["buy_lg_amount"], errors='coerce').fillna(0)
+            metrics["large_net"] = float(large_buy_col.sum())
 
         # 小单净流入累计
         if "buy_sm_amount" in df.columns and "sell_sm_amount" in df.columns:
             # 计算小单净流入 = 买入 - 卖出
-            small_buy = df["buy_sm_amount"].fillna(0).sum()
-            small_sell = df["sell_sm_amount"].fillna(0).sum()
+            small_buy = pd.to_numeric(df["buy_sm_amount"], errors='coerce').fillna(0).sum()
+            small_sell = pd.to_numeric(df["sell_sm_amount"], errors='coerce').fillna(0).sum()
             metrics["small_net"] = float(small_buy - small_sell)
         elif "buy_sm_amount" in df.columns:
             # 如果只有买入字段，假设为净流入金额
-            metrics["small_net"] = float(df["buy_sm_amount"].fillna(0).sum())
+            small_buy_col = pd.to_numeric(df["buy_sm_amount"], errors='coerce').fillna(0)
+            metrics["small_net"] = float(small_buy_col.sum())
 
         return metrics
 
