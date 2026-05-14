@@ -93,7 +93,11 @@ NEGATIVE_SCORES = {
 
 # Tushare API 重试配置
 MAX_RETRIES = 3        # 最大重试次数
-RETRY_INTERVAL = 1     # 重试间隔（秒）
+RETRY_INTERVALS = [5, 15, 30]  # 指数退避重试间隔（秒）
+
+# API调用限流配置
+API_CALL_INTERVAL = 0.5  # API调用最小间隔（秒），避免请求过快
+_last_api_call_time = 0  # 上次API调用时间
 
 # 内存缓存 TTL（秒）
 CACHE_TTL = 300  # 5分钟
@@ -270,7 +274,7 @@ class EventScorer:
 
     def _call_tushare_with_retry(self, func, **kwargs):
         """
-        带重试机制的 Tushare API 调用
+        带重试机制的 Tushare API 调用（指数退避策略 + 限流）
 
         参数:
             func: Tushare API 调用函数
@@ -278,9 +282,18 @@ class EventScorer:
         返回:
             DataFrame: API 返回的数据，失败返回 None
         """
+        global _last_api_call_time
+
+        # 限流：确保两次API调用之间有最小间隔
+        elapsed = time.time() - _last_api_call_time
+        if elapsed < API_CALL_INTERVAL:
+            time.sleep(API_CALL_INTERVAL - elapsed)
+
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
+                # 记录API调用时间
+                _last_api_call_time = time.time()
                 # 调用 Tushare API
                 result = func(**kwargs)
                 return result
@@ -290,9 +303,11 @@ class EventScorer:
                 logger.warning(
                     f"Tushare API 调用失败（第 {attempt + 1} 次）: {e}"
                 )
-                # 非最后一次重试时等待
+                # 非最后一次重试时等待（指数退避）
                 if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_INTERVAL)
+                    wait_time = RETRY_INTERVALS[attempt] if attempt < len(RETRY_INTERVALS) else RETRY_INTERVALS[-1]
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
         # 所有重试都失败
         logger.error(f"Tushare API 调用失败（已重试 {MAX_RETRIES} 次）: {last_error}")
         return None
