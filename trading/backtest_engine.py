@@ -654,6 +654,7 @@ class BacktestEngine:
                 total_assets = current_capital
                 position_details = []
                 prev_trading_day = self._get_previous_trading_day(current_date)
+                prev_day_str = prev_trading_day.strftime('%Y-%m-%d') if prev_trading_day else current_date
                 for position in positions:
                     # 获取前一交易日收盘价
                     current_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
@@ -661,12 +662,17 @@ class BacktestEngine:
                         current_price = position['buy_price']
                     position_value = current_price * position['quantity']
                     total_assets += position_value
+                    # 计算持有天数
+                    buy_date_str = position['buy_date'].strftime('%Y-%m-%d')
+                    trading_days = self._get_trading_dates(buy_date_str, prev_day_str)
+                    hold_days = len(trading_days) - 1 if len(trading_days) > 0 else 0
                     position_details.append({
                         'code': position['stock_code'],
                         'name': position['stock_name'],
                         'price': current_price,
                         'quantity': position['quantity'],
-                        'value': position_value
+                        'value': position_value,
+                        'hold_days': hold_days
                     })
                 
                 # 记录每日资产详情
@@ -675,7 +681,7 @@ class BacktestEngine:
                 if position_details:
                     logger.info(f"持股清单 ({len(position_details)} 只):")
                     for p in position_details:
-                        logger.info(f"  - {p['code']} {p['name']}: 价格={p['price']:.2f}, 数量={p['quantity']}, 市值={p['value']:.2f}")
+                        logger.info(f"  - {p['code']} {p['name']}: 价格={p['price']:.2f}, 数量={p['quantity']}, 市值={p['value']:.2f}, 持{p['hold_days']}日")
                 else:
                     logger.info(f"持股清单: 空仓")
                 logger.info(f"持股市值: {total_assets - current_capital:.2f}")
