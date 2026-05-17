@@ -4,7 +4,7 @@
 """
 
 import sqlite3
-import datetime
+from datetime import datetime, date, timedelta
 import logging
 import threading
 import numpy as np
@@ -145,6 +145,9 @@ class BacktestEngine:
         # 连续亏损计数：记录每只股票的连续亏损次数
         self.consecutive_loss_count = {}  # {stock_code: consecutive_loss_count}
         
+        # 资金流向冷却池：资金流向异常时加入冷却
+        self.fund_flow_cool_down_pool = {}  # {stock_code: cool_down_end_date}
+        
     def run_backtest(self, strategy_name: str, config: Dict) -> Dict:
         """运行回测
         
@@ -248,7 +251,7 @@ class BacktestEngine:
             dates = []      # 回测日期列表
             
             # 回测配置：同一只股票最大买入次数
-            max_buy_count_per_stock = config.get('max_buy_count_per_stock', 4)
+            max_buy_count_per_stock = config.get('max_buy_count_per_stock', 6)
             # 股票累计买入次数计数器 {stock_code: buy_count}
             stock_buy_count = {}
             
@@ -294,7 +297,16 @@ class BacktestEngine:
                     # 记录当前持仓详情
                     logger.info("当前持仓详情:")
                     for i, pos in enumerate(positions):
-                        logger.info(f"  {i+1}. {pos['stock_code']} {pos['stock_name']}: 持仓数量={pos['quantity']}, 成本价={pos['buy_price']:.2f}, 持仓金额={pos['buy_amount']:.2f}")
+                        # 获取昨日收盘价
+                        prev_close = self._get_stock_price(pos['stock_code'], current_date, 'prev_close')
+                        # 处理价格显示（避免格式化错误）
+                        prev_close_str = f"{prev_close:.2f}" if prev_close else 'N/A'
+                        # 计算持仓市值（昨日收盘价 × 持仓数量）
+                        position_value = prev_close * pos['quantity'] if prev_close else 0.0
+                        # 计算持仓收益（市值 - 成本）和收益率
+                        position_profit = position_value - pos['buy_amount']
+                        profit_rate = (position_profit / pos['buy_amount']) * 100 if pos['buy_amount'] > 0 else 0.0
+                        logger.info(f"  {i+1}. {pos['stock_code']} {pos['stock_name']}: 持仓数量={pos['quantity']}, 成本价={pos['buy_price']:.2f}, 昨日收盘价={prev_close_str}, 持仓市值={position_value:.2f}, 持仓收益={position_profit:.2f}({profit_rate:.2f}%)")
                     
                     positions, sell_records = self._process_sell(positions, current_date, config)
                     logger.info(f"卖出操作完成，卖出 {len(sell_records)} 笔交易，剩余持仓数: {len(positions)}")
@@ -443,7 +455,7 @@ class BacktestEngine:
                         continue
                     
                     # 如果是回测最后一天（今天）且没有当日数据，尝试获取实时数据
-                    today = datetime.datetime.now().date()
+                    today = datetime.now().date()
                     last_data_date = df_to_date['date'].max()
                     if current_date == today and last_data_date < date_str:
                         logger.info(f"股票 {stock_code} 最后数据日期为 {last_data_date}，尝试获取实时数据...")
@@ -529,9 +541,11 @@ class BacktestEngine:
                         strategy_name = candidate.get('strategy_name', 'N/A')
 
                         # 计算总资产（可用资金 + 持仓市值）
+                        # 注意：使用前一交易日收盘价，避免未来函数
                         total_assets = current_capital
+                        prev_trading_day = self._get_previous_trading_day(current_date)
                         for position in positions:
-                            position_price = self._get_stock_price(position['stock_code'], current_date, 'close')
+                            position_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
                             if position_price is None or position_price <= 0:
                                 position_price = position['buy_price']
                             total_assets += position['quantity'] * position_price
@@ -541,7 +555,11 @@ class BacktestEngine:
                             available_cash=current_capital,
                             strategy_name=strategy_name
                         )
-                        position_amount = kelly_result['amount']
+                        kelly_amount = kelly_result['amount']
+                        # 实际买入金额取凯利公式金额和可用资金的较小值，向下取整到100的倍数
+                        position_amount = min(kelly_amount, current_capital)
+                        reserve_fee = position_amount % 100  # 预留费用（不足100的部分）
+                        position_amount = position_amount // 100 * 100  # 向下取整到100的倍数
                         quantity = KellyCalculator.calculate_buy_quantity(
                             position_amount=position_amount,
                             price=buy_price
@@ -551,7 +569,7 @@ class BacktestEngine:
                                    f"策略={strategy_name}, 胜率={kelly_result['win_rate']:.2f}, 盈亏比={kelly_result['profit_loss_ratio']:.2f}, "
                                    f"凯利比例={kelly_result['kelly_ratio']:.4f}, 总资产={total_assets:.2f}, "
                                    f"可用资金={current_capital:.2f}, 持仓市值={total_assets - current_capital:.2f}, "
-                                   f"计算金额={position_amount:.2f}")
+                                   f"凯利金额={kelly_amount:.2f}, 预留费用={reserve_fee:.2f}, 实际买入={position_amount:.2f}")
                     
                     if quantity <= 0:
                         logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 计算买入数量为0")
@@ -589,6 +607,8 @@ class BacktestEngine:
                         # 更新加仓次数和加仓价格
                         existing_pos['add_count'] = result.add_count if result and hasattr(result, 'add_count') else existing_pos.get('add_count', 0) + 1
                         existing_pos['last_add_price'] = buy_price
+                        # 重置持仓日期（加仓代表趋势较好，重新计算持有时间）
+                        existing_pos['buy_date'] = current_date
                         logger.info(f"【加仓#{existing_pos['add_count']}】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
                                    f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
@@ -630,11 +650,15 @@ class BacktestEngine:
                 logger.info(f"处理后可买股票池数量: {len(self.buy_candidate_pool)}")
                 
                 # 计算当日总资产（可用资金 + 持仓市值）
+                # 使用前一交易日收盘价进行结算，保持与交易决策的一致性
                 total_assets = current_capital
                 position_details = []
+                prev_trading_day = self._get_previous_trading_day(current_date)
                 for position in positions:
-                    # 获取当日收盘价
-                    current_price = self._get_stock_price(position['stock_code'], current_date, 'close')
+                    # 获取前一交易日收盘价
+                    current_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
+                    if current_price is None or current_price <= 0:
+                        current_price = position['buy_price']
                     position_value = current_price * position['quantity']
                     total_assets += position_value
                     position_details.append({
@@ -844,7 +868,7 @@ class BacktestEngine:
             
             # 扩大加载范围：往前多加载60天，覆盖_get_previous_trading_day的需求
             from datetime import timedelta
-            extended_start = (datetime.datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=60)).strftime('%Y%m%d')
+            extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=60)).strftime('%Y%m%d')
             end_date_str = end_date.replace('-', '')
             logger.info(f"加载交易日历范围: {extended_start} 至 {end_date_str}")
             
@@ -889,7 +913,7 @@ class BacktestEngine:
             self.trading_calendar_cache.clear()
             self._sorted_trading_dates = []
     
-    def _is_trading_day(self, date: datetime.date) -> bool:
+    def _is_trading_day(self, date: date) -> bool:
         """判断是否为交易日
         
         Args:
@@ -912,7 +936,7 @@ class BacktestEngine:
         logger.debug(f"使用简单判断日期 {date_str} 是否为交易日: {is_open}")
         return is_open
     
-    def _get_trading_dates(self, start_date: str, end_date: str) -> List[datetime.date]:
+    def _get_trading_dates(self, start_date: str, end_date: str) -> List[date]:
         """获取回测期间的交易日列表
         
         直接从已加载的交易日历缓存中筛选，确保只处理真实交易日。
@@ -925,14 +949,14 @@ class BacktestEngine:
             交易日期列表
         """
         # 转换为日期对象
-        start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
-        end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
         
         # 如果有排序好的交易日列表，直接筛选
         if hasattr(self, '_sorted_trading_dates') and self._sorted_trading_dates:
             dates = []
             for d_str in self._sorted_trading_dates:
-                d = datetime.datetime.strptime(d_str, '%Y-%m-%d').date()
+                d = datetime.strptime(d_str, '%Y-%m-%d').date()
                 if start_dt <= d <= end_dt:
                     dates.append(d)
         else:
@@ -942,16 +966,16 @@ class BacktestEngine:
             while current <= end_dt:
                 if self._is_trading_day(current):
                     dates.append(current)
-                current += datetime.timedelta(days=1)
+                current += timedelta(days=1)
         
         # 打印回测交易日列表
         logger.info(f"回测交易日: {start_date} 至 {end_date}，共 {len(dates)} 个交易日")
         for d in dates:
-            logger.info(f"  交易日: {d.strftime('%Y-%m-%d')}")
+            logger.debug(f"  交易日: {d.strftime('%Y-%m-%d')}")
         
         return dates
     
-    def _get_previous_trading_day(self, date: datetime.date) -> datetime.date:
+    def _get_previous_trading_day(self, date: date) -> date:
         """获取前一个交易日
         
         优先从排序好的交易日列表中二分查找，效率更高且准确。
@@ -972,20 +996,20 @@ class BacktestEngine:
             # 前一个交易日是idx-1位置的日期
             if idx > 0:
                 prev_date_str = self._sorted_trading_dates[idx - 1]
-                return datetime.datetime.strptime(prev_date_str, '%Y-%m-%d').date()
+                return datetime.strptime(prev_date_str, '%Y-%m-%d').date()
         
         # fallback：逐日向前查找
-        previous = date - datetime.timedelta(days=1)
+        previous = date - timedelta(days=1)
         max_attempts = 10
         attempts = 0
         while attempts < max_attempts:
             if self._is_trading_day(previous):
                 return previous
-            previous -= datetime.timedelta(days=1)
+            previous -= timedelta(days=1)
             attempts += 1
         
-        logger.warning(f"未找到前一个交易日，返回: {date - datetime.timedelta(days=1)}")
-        return date - datetime.timedelta(days=1)
+        logger.warning(f"未找到前一个交易日，返回: {date - timedelta(days=1)}")
+        return date - timedelta(days=1)
     
     def _get_stock_name(self, code: str) -> str:
         """获取股票名称（优先从缓存获取）
@@ -1225,6 +1249,12 @@ class BacktestEngine:
         with open(config_path, 'r', encoding='utf-8') as f:
             yaml_config = yaml.safe_load(f) or {}
         
+        # 保存资金流向规则配置（类级别缓存）
+        self._fund_flow_rules = yaml_config.get('fund_flow_rules', {})
+        logger.info(f"加载资金流向移除规则: enabled={self._fund_flow_rules.get('is_enabled', False)}, "
+                   f"threshold={self._fund_flow_rules.get('net_flow_threshold', -10000)}万元, "
+                   f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 5)}")
+        
         strategies = yaml_config.get('removal_strategies', {})
         for name, cfg in strategies.items():
             if cfg.get('is_enabled', True):
@@ -1290,6 +1320,9 @@ class BacktestEngine:
         移除条件（满足任一即移除）：
         1. 破支撑位：前一日收盘价 < 支撑位 × 0.98（始终生效）
         2. 不满足上升趋势条件（加入股票池 min_hold_days 天后生效）
+        3. 资金流向条件（同时满足以下两个条件时移除）：
+            - 5日主力资金累计净流入 < -10000万元
+            - 大单净流出 且 小单净流入（出货信号）
         
         趋势验证条件：
         - 收盘价 >= MA10
@@ -1310,6 +1343,11 @@ class BacktestEngine:
         prev_date = self._get_previous_trading_day(current_date)
         prev_date_str = prev_date.strftime('%Y-%m-%d')
         
+        # 获取资金流向规则配置
+        fund_flow_enabled = getattr(self, '_fund_flow_rules', {}).get('is_enabled', True)
+        fund_flow_threshold = getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000)
+        fund_flow_min_hold_days = getattr(self, '_fund_flow_rules', {}).get('min_hold_days', 5)
+        
         for candidate in self.buy_candidate_pool:
             # 提取股票信息
             stock_code = candidate['stock']['stock_code']
@@ -1323,9 +1361,9 @@ class BacktestEngine:
             # 计算持有天数
             added_date = candidate.get('added_date')
             if isinstance(added_date, str):
-                added_date = datetime.datetime.strptime(added_date, '%Y-%m-%d').date()
-            elif not isinstance(added_date, datetime.date):
-                added_date = datetime.date.today()
+                added_date = datetime.strptime(added_date, '%Y-%m-%d').date()
+            elif not isinstance(added_date, date):
+                added_date = date.today()
             
             hold_days = (prev_date - added_date).days
             
@@ -1382,6 +1420,15 @@ class BacktestEngine:
                     if r_squared < 0.3:
                         removal_reasons.append(f"R²{r_squared:.4f}<0.3")
             
+            # 条件3: 资金流向移除（同时满足两个条件时移除）
+            # - 5日主力资金累计净流入 < 阈值（默认-10000万元）
+            # - 大单净流出 且 小单净流入（出货信号）
+            if fund_flow_enabled and hold_days >= fund_flow_min_hold_days:
+                fund_flow_result = self._check_fund_flow_condition(stock_code, current_date)
+                if fund_flow_result['should_remove']:
+                    should_remove = True
+                    removal_reasons.append(fund_flow_result['reason'])
+            
             # 决定是否移除
             if should_remove:
                 removed_candidates.append(candidate)
@@ -1398,6 +1445,115 @@ class BacktestEngine:
             self.buy_candidate_pool = remaining_candidates
         
         return removed_candidates
+    
+    def _check_fund_flow_condition(self, stock_code: str, current_date: str) -> Dict:
+        """检查资金流向移除条件
+        
+        规则：
+        - 如果5日主力净额 < -10000万元 或者 大单净流出小单净流入：
+          - 如果股票不在冷却池 → 加入冷却池3天，不移除
+          - 如果股票已经在冷却池 → 直接移除
+        
+        Args:
+            stock_code: 股票代码
+            current_date: 当前日期（可以是字符串或date对象）
+            
+        Returns:
+            包含 should_remove 和 reason 的字典
+        """
+        from trading.moneyflow_scorer import MoneyflowScorer
+        
+        try:
+            # 先清理已过期的冷却池条目（出狱逻辑）
+            if stock_code in self.fund_flow_cool_down_pool:
+                cool_down_end = self.fund_flow_cool_down_pool.get(stock_code, '')
+                if cool_down_end:
+                    try:
+                        # 解析冷却结束日期
+                        if hasattr(cool_down_end, 'strftime'):
+                            cool_down_end_obj = cool_down_end
+                        else:
+                            cool_down_end_obj = datetime.strptime(cool_down_end, '%Y-%m-%d').date()
+                        
+                        # 解析当前日期
+                        if hasattr(current_date, 'strftime'):
+                            current_date_obj_check = current_date
+                        else:
+                            current_date_obj_check = datetime.strptime(current_date, '%Y-%m-%d').date()
+                        
+                        # 冷却期已过，股票"出狱"
+                        if current_date_obj_check > cool_down_end_obj:
+                            del self.fund_flow_cool_down_pool[stock_code]
+                            logger.info(f"股票 {stock_code}: 资金流向冷却期结束，股票出狱")
+                    except Exception as e:
+                        logger.debug(f"解析冷却结束日期失败: {cool_down_end}, {e}")
+            
+            # 统一转换日期格式为字符串
+            if hasattr(current_date, 'strftime'):
+                # 如果是date对象，转换为字符串
+                date_str = current_date.strftime('%Y%m%d')
+            else:
+                # 如果是字符串，移除横杠
+                date_str = str(current_date).replace('-', '')
+            
+            # 使用资金评分器获取资金流向数据
+            scorer = MoneyflowScorer()
+            df = scorer._fetch_moneyflow_data(stock_code, date_str)
+            
+            if df is None or df.empty:
+                return {'should_remove': False, 'reason': ''}
+            
+            # 提取资金流向指标（已确保类型正确）
+            metrics = scorer._extract_flow_metrics(df)
+            net_flow_5d = metrics['net_flow_5d']
+            large_net = metrics['large_net']
+            small_net = metrics['small_net']
+            
+            # 获取配置的阈值（确保转换为整数）
+            threshold = int(getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000))
+            
+            # 判断条件：满足任一条件触发处理
+            condition1 = net_flow_5d < threshold  # 5日主力净额 < 阈值
+            condition2 = (large_net < 0) and (small_net > 0)  # 大单出+小单进（出货信号）
+            
+            if condition1 or condition2:
+                # 构建原因描述
+                if condition1 and condition2:
+                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元且大单净流出小单净流入"
+                elif condition1:
+                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元"
+                else:
+                    reason_detail = "大单净流出且小单净流入（出货信号）"
+                
+                # 统一获取current_date_obj
+                if hasattr(current_date, 'strftime'):
+                    current_date_obj = current_date
+                else:
+                    current_date_obj = datetime.strptime(current_date, '%Y-%m-%d').date()
+                
+                # 检查是否在资金流向冷却池中
+                is_in_cool_down = stock_code in self.fund_flow_cool_down_pool
+                
+                if is_in_cool_down:
+                    # 在冷却池中再次触发条件，直接移除
+                    cool_down_end = self.fund_flow_cool_down_pool.get(stock_code, '')
+                    reason = f"{stock_code}资金流向异常[{reason_detail}]，且已在冷却池(至{cool_down_end})，直接移除"
+                    del self.fund_flow_cool_down_pool[stock_code]
+                    logger.warning(reason)
+                    return {'should_remove': True, 'reason': reason}
+                else:
+                    # 不在冷却池，加入冷却池3天
+                    cool_down_end = self._get_future_trading_day(current_date_obj, 3)
+                    self.fund_flow_cool_down_pool[stock_code] = cool_down_end
+                    reason = f"{stock_code}资金流向异常[{reason_detail}]，加入冷却池至{cool_down_end}"
+                    logger.warning(reason)
+                    return {'should_remove': False, 'reason': reason}
+            
+            return {'should_remove': False, 'reason': ''}
+            
+        except Exception as e:
+            logger.warning(f"检查资金流向条件失败: {stock_code}, {str(e)}")
+            return {'should_remove': False, 'reason': ''}
     
     def _preload_stock_data(self, start_date: str, end_date: str, strategy_name: str = None) -> int:
         """预加载所有股票数据到内存（性能优化）
@@ -1515,7 +1671,7 @@ class BacktestEngine:
         logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, 总计 {total}")
         return loaded
     
-    def _execute_selection(self, strategy_name: str, date: datetime.date) -> List[Dict]:
+    def _execute_selection(self, strategy_name: str, date: date) -> List[Dict]:
         """执行选股（从缓存读取，使用日期切片）
         
         Args:
@@ -1601,7 +1757,7 @@ class BacktestEngine:
             logger.error(traceback.format_exc())
             return []
     
-    def _score_stocks(self, stocks: List[Dict], strategy_name: str, date: datetime.date) -> List[Dict]:
+    def _score_stocks(self, stocks: List[Dict], strategy_name: str, date: date) -> List[Dict]:
         """对股票进行评分（回测模式）
 
         使用 BacktestScoreCalculator 进行高效评分：
@@ -1637,7 +1793,7 @@ class BacktestEngine:
 
         return scored_stocks
 
-    def _select_and_score_stocks(self, strategy_name: str, date: datetime.date, config: Dict) -> List[Dict]:
+    def _select_and_score_stocks(self, strategy_name: str, date: date, config: Dict) -> List[Dict]:
         """执行选股、评分、筛选，得到候选股票池
         
         封装选股流程，返回通过评分的候选股票列表。
@@ -1683,7 +1839,7 @@ class BacktestEngine:
         
         return candidate_stocks
     
-    def _get_stock_price(self, stock_code: str, date: datetime.date, price_type: str) -> float:
+    def _get_stock_price(self, stock_code: str, date: date, price_type: str) -> float:
         """获取股票价格
         
         Args:
@@ -1749,7 +1905,7 @@ class BacktestEngine:
             
             # 3. 备选：使用StockDataFetcher获取实时价格（仅用于收盘价，获取开盘价时不应使用实时价）
             # 注意：实时价格是当前价，不等于开盘价，开盘价只能从数据库获取
-            if date == datetime.datetime.now().date() and price_type != 'open':
+            if date == datetime.now().date() and price_type != 'open':
                 price = self.stock_data_fetcher.get_stock_price(stock_code)
                 if price:
                     return price
@@ -1788,8 +1944,8 @@ class BacktestEngine:
             logger.warning(f"获取股票 {stock_code} 价格失败: {str(e)}")
             return 10.0
     
-    def _execute_buy(self, stock_code: str, stock_name: str, selection_date: datetime.date, 
-                     buy_date: datetime.date, buy_price: float, buy_amount: float, 
+    def _execute_buy(self, stock_code: str, stock_name: str, selection_date: date, 
+                     buy_date: date, buy_price: float, buy_amount: float, 
                      quantity: int) -> Dict:
         """执行买入操作
         
@@ -1835,7 +1991,7 @@ class BacktestEngine:
             'sell_stamp_tax': 0
         }
     
-    def _process_sell(self, positions: List[Dict], current_date: datetime.date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
+    def _process_sell(self, positions: List[Dict], current_date: date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
         """处理卖出操作
         
         职责划分：
@@ -1858,20 +2014,20 @@ class BacktestEngine:
         stop_loss = config.get('stop_loss', -7)  # 止损7%
         hold_period = config.get('hold_period', 10)
         
-        # 获取移动止损配置
+        # 获取移动止损配置（简化版）
         enable_trailing_stop = config.get('enable_trailing_stop', True)
-        trailing_base_stop = config.get('trailing_base_stop', -6)
-        trailing_profit_levels = config.get('trailing_profit_levels', [
-            {'profit_threshold': 5, 'stop_level': 0},
-            {'profit_threshold': 10, 'stop_level': 3},
-            {'profit_threshold': 15, 'stop_level': 5},
-            {'profit_threshold': 20, 'stop_level': 8}
-        ])
+        base_stop_level = -6  # 基础止损固定为-6%
+        trailing_trigger_threshold = 5  # 触发移动止损的最低收益率（最高收益≥5%才启用移动止损）
         
         # 获取亏损冷却期配置
         enable_loss_cool_down = config.get('enable_loss_cool_down', True)
         cool_down_threshold = config.get('cool_down_threshold', -8)
         cool_down_days = config.get('cool_down_days', 20)
+        
+        # 获取持仓过期配置（提高资金利用率）
+        enable_position_expire = config.get('enable_position_expire', True)
+        position_expire_hold_days = config.get('position_expire_hold_days', 10)
+        position_expire_return_threshold = config.get('position_expire_return_threshold', 5)
         
         # 获取连续亏损限制配置
         enable_consecutive_loss_limit = config.get('enable_consecutive_loss_limit', True)
@@ -1939,7 +2095,7 @@ class BacktestEngine:
                 sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 由策略决定卖出"
             else:
                 sell_rule = f"止盈={take_profit}%, 止损={stop_loss}%, 持有期={hold_period}天"
-            logger.info(f"检查持仓 - {stock_code} {stock_name}: 买入日期={buy_date_str}, "
+            logger.debug(f"检查持仓 - {stock_code} {stock_name}: 买入日期={buy_date_str}, "
                        f"持有天数={hold_days}, 收益率(含成本)={return_rate:.2f}%, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, {sell_rule}")
             
             # 初始化卖出决策
@@ -1952,38 +2108,34 @@ class BacktestEngine:
                 # 1. 先检查止盈止损（优先级最高）
                 if return_rate >= take_profit:
                     sell_type = 'take_profit'
-                    logger.info(f"  触发止盈: 收益率 {return_rate:.2f}% >= {take_profit}%")
+                    logger.info(f"  {stock_code} {stock_name} - 触发止盈: 收益率 {return_rate:.2f}% >= {take_profit}%")
                 else:
-                    # 计算当前止损线（支持移动止损）
-                    current_stop = stop_loss
-                    stop_price = buy_price * (1 + stop_loss / 100)
+                    # 计算当前止损线（支持移动止损，简化版）
+                    current_stop = base_stop_level  # 默认使用基础止损-6%
+                    stop_price = buy_price * (1 + base_stop_level / 100)
+                    
                     if enable_trailing_stop:
-                        # 获取持仓期间最高收益率（保留原逻辑兼容）
-                        highest_profit = self.position_highest_profit.get(stock_code, return_rate)
-                        # 更新最高收益率
-                        if return_rate > highest_profit:
-                            highest_profit = return_rate
-                            self.position_highest_profit[stock_code] = highest_profit
+                        # 简化的移动止损逻辑：
+                        # - 最高收益 < 5%：使用固定止损 -6%
+                        # - 最高收益 >= 5%：移动止损 = 最高收益率 - 8%
+                        if highest_price_return >= trailing_trigger_threshold:
+                            current_stop = highest_price_return - 8
+                            stop_price = buy_price * (1 + current_stop / 100)
                         
-                        # 基于最高价计算移动止损价
-                        current_stop_level = stop_loss
-                        for level in trailing_profit_levels:
-                            if highest_price_return >= level['profit_threshold']:
-                                current_stop_level = level['stop_level']
-                        
-                        # 计算止损价：买入价 × (1 + 止损百分比)
-                        stop_price = buy_price * (1 + current_stop_level / 100)
-                        # 计算止损收益率（用于日志）
-                        current_stop = current_stop_level
-                        
-                        logger.info(f"  移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
+                        logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损线={current_stop:.2f}%, 止损价={stop_price:.2f}")
                     
                     # 检查是否触发止损（包括移动止损）
                     if open_price <= stop_price:
                         sell_type = 'trailing_stop' if current_stop > stop_loss else 'stop_loss'
-                        logger.info(f"  触发{'移动' if current_stop > stop_loss else ''}止损: 当前价 {open_price:.2f} <= 止损价 {stop_price:.2f}")
+                        logger.info(f"  {stock_code} {stock_name} - 触发{'移动' if current_stop > stop_loss else ''}止损: 当前价 {open_price:.2f} <= 止损价 {stop_price:.2f}")
                 
-                # 2. 如果未触发止盈止损，调用择时策略获取信号
+                # 2. 持仓过期检查（持有超过指定天数且收益率低于阈值）
+                if not sell_type and enable_position_expire:
+                    if hold_days > position_expire_hold_days and return_rate <= position_expire_return_threshold:
+                        sell_type = 'position_expire'
+                        logger.info(f"  {stock_code} {stock_name} - 持仓过期: 持有{hold_days}天, 收益率{return_rate:.2f}%<={position_expire_return_threshold}%")
+                
+                # 3. 如果未触发止盈止损和持仓过期，调用择时策略获取信号
                 if not sell_type and self.timing_strategy:
                     df = self.stock_filtered_cache.get(stock_code)
                     if df is not None:
@@ -2013,17 +2165,10 @@ class BacktestEngine:
                                     sell_quantity = position['quantity']
                                     logger.info(f"  策略信号: 清仓 - {result.message}")
                 
-                # 3. 持有到期检查（仅无择时策略时生效）
                 if not sell_type and not reduce_quantity:
-                    if hold_days >= hold_period:
-                        if not self.timing_strategy:
-                            sell_type = 'hold_expired'
-                            logger.info(f"  持有到期: {hold_days}天 >= {hold_period}天")
-                
-                if not sell_type and not reduce_quantity:
-                    logger.info(f"  无卖出信号，继续持有")
+                    logger.info(f"  {stock_code} {stock_name} - 无卖出信号，继续持有")
             else:
-                logger.info(f"  T+1限制，今日不能卖出")
+                logger.info(f"  {stock_code} {stock_name} - T+1限制，今日不能卖出")
             
             # 执行卖出操作
             if sell_type:
@@ -2094,7 +2239,7 @@ class BacktestEngine:
         
         return remaining_positions, sell_records
     
-    def _check_cool_down(self, stock_code: str, current_date: datetime.date) -> bool:
+    def _check_cool_down(self, stock_code: str, current_date: date) -> bool:
         """检查股票是否在冷却期内
         
         Args:
@@ -2111,7 +2256,7 @@ class BacktestEngine:
         if isinstance(cool_down_end, str):
             # 如果是字符串格式的日期，转换为date对象
             try:
-                cool_down_end = datetime.datetime.strptime(cool_down_end, '%Y-%m-%d').date()
+                cool_down_end = datetime.strptime(cool_down_end, '%Y-%m-%d').date()
             except ValueError:
                 # 解析失败，移除该条目
                 del self.loss_cool_down_pool[stock_code]
@@ -2124,7 +2269,7 @@ class BacktestEngine:
             del self.loss_cool_down_pool[stock_code]
             return False
     
-    def _get_future_trading_day(self, start_date: datetime.date, days: int) -> datetime.date:
+    def _get_future_trading_day(self, start_date: date, days: int) -> date:
         """获取指定交易日之后的第N个交易日
         
         Args:
@@ -2136,7 +2281,7 @@ class BacktestEngine:
         """
         # 获取排序后的交易日列表
         if not self._sorted_trading_dates:
-            return start_date + datetime.timedelta(days=days * 2)  # 粗略估计
+            return start_date + timedelta(days=days * 2)  # 粗略估计
         
         start_str = start_date.strftime('%Y-%m-%d')
         if start_str in self._sorted_trading_dates:
@@ -2148,17 +2293,17 @@ class BacktestEngine:
                     start_idx = i
                     break
             else:
-                return start_date + datetime.timedelta(days=days * 2)
+                return start_date + timedelta(days=days * 2)
         
         # 获取第N个交易日
         target_idx = start_idx + days
         if target_idx < len(self._sorted_trading_dates):
-            return datetime.datetime.strptime(self._sorted_trading_dates[target_idx], '%Y-%m-%d').date()
+            return datetime.strptime(self._sorted_trading_dates[target_idx], '%Y-%m-%d').date()
         else:
             # 超出范围，使用粗略估计
-            return start_date + datetime.timedelta(days=days * 2)
+            return start_date + timedelta(days=days * 2)
     
-    def _create_sell_record(self, position: Dict, sell_date: datetime.date, sell_price: float,
+    def _create_sell_record(self, position: Dict, sell_date: date, sell_price: float,
                             quantity: int, sell_amount: float, return_rate: float, hold_days: int, 
                             sell_type: str) -> Dict:
         """创建卖出记录
@@ -2227,7 +2372,7 @@ class BacktestEngine:
         }
     
     def _calculate_performance(self, trades: List[Dict], initial_capital: float, 
-                              final_capital: float, dates: List[datetime.date], 
+                              final_capital: float, dates: List[date], 
                               capital_history: List[float]) -> Dict:
         """计算绩效指标
         
@@ -2258,10 +2403,15 @@ class BacktestEngine:
                 'avg_return': 0.0,
                 'total_return': total_return,
                 'profit_factor': 0.0,
-                'max_return': 0,
-                'min_return': 0,
+                'max_return': 0.0,
+                'min_return': 0.0,
                 'max_drawdown': 0.0,
-                'sharpe_ratio': 0.0
+                'sharpe_ratio': 0.0,
+                'volatility': 0.0,
+                'sortino_ratio': 0.0,
+                'avg_hold_days': 0.0,
+                'winning_trades': 0,
+                'losing_trades': 0
             }
         
         # 计算基本指标
@@ -2299,7 +2449,7 @@ class BacktestEngine:
         drawdown = (capital_array - running_max) / running_max * 100
         max_drawdown = abs(np.min(drawdown))
         
-        # 计算夏普比率（假设无风险利率为2%）
+        # 计算夏普比率和波动率（假设无风险利率为2%）
         daily_returns = []
         for i in range(1, len(capital_history)):
             daily_return = (capital_history[i] - capital_history[i-1]) / capital_history[i-1]  # 使用小数形式
@@ -2309,6 +2459,15 @@ class BacktestEngine:
         risk_free_rate = 0.02 / 252  # 日无风险利率（小数形式，年化2%）
         excess_returns = [r - risk_free_rate for r in daily_returns]
         sharpe_ratio = np.mean(excess_returns) / volatility * np.sqrt(252) if volatility > 0 else 0
+        
+        # 计算索提诺比率（只考虑下行风险）
+        downside_returns = [r for r in daily_returns if r < 0]
+        downside_volatility = np.std(downside_returns, ddof=1) if len(downside_returns) > 1 else 0
+        sortino_ratio = np.mean(excess_returns) / downside_volatility * np.sqrt(252) if downside_volatility > 0 else 0.0
+        
+        # 计算平均持有天数
+        hold_days_list = [t['hold_days'] for t in completed_trades if 'hold_days' in t]
+        avg_hold_days = np.mean(hold_days_list) if hold_days_list else 0.0
         
         return {
             'total_trades': total_trades,
@@ -2321,6 +2480,11 @@ class BacktestEngine:
             'min_return': min_return,
             'profit_factor': profit_factor,
             'profit_loss_ratio': round(profit_loss_ratio, 2),
-            'max_drawdown': max_drawdown,
-            'sharpe_ratio': sharpe_ratio
+            'max_drawdown': float(max_drawdown),
+            'sharpe_ratio': float(sharpe_ratio),
+            'volatility': float(volatility * 100),  # 转换为百分比
+            'sortino_ratio': float(sortino_ratio),
+            'avg_hold_days': float(avg_hold_days),
+            'winning_trades': win_trades,
+            'losing_trades': loss_trades
         }
