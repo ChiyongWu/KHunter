@@ -195,12 +195,11 @@ class StrategyRunner:
         self.running_dir = Path(__file__).resolve().parent.parent / "data/running"
         self.running_dir.mkdir(exist_ok=True)
         
-        self.take_profit_threshold = self.config.get('take_profit_threshold', 0.15)
+        self.take_profit_threshold = self.config.get('take_profit_threshold', 0.21)
         self.stop_loss_threshold = self.config.get('stop_loss_threshold', -0.05)
         
         # 初始化标志，避免重复初始化
         self._initialized_dates = set()
-        
         # 加载回测评分器
         from trading.backtest_scorer import BacktestScoreCalculator
         self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
@@ -214,10 +213,6 @@ class StrategyRunner:
         # 初始化预加载管理器（复用过回测引擎的预加载机制）
         from trading.preload_manager import PreloadManager
         self.preload_manager = PreloadManager(self)
-        
-        # ========== 新增：移动止损、亏损冷却期、连续亏损限制相关状态 ==========
-        # 移动止损：持仓期间最高收益率
-        self.position_highest_profit = {}  # {stock_code: highest_profit}
         
         # 连续亏损计数：记录每只股票的连续亏损次数（冷却状态已合并到股票池中）
         self.consecutive_loss_count = {}  # {stock_code: consecutive_loss_count}
@@ -236,6 +231,12 @@ class StrategyRunner:
             
             with open(config_path, 'r', encoding='utf-8') as f:
                 yaml_config = yaml.safe_load(f) or {}
+            
+            # 保存资金流向规则配置
+            self._fund_flow_rules = yaml_config.get('fund_flow_rules', {})
+            logger.info(f"加载资金流向移除规则: enabled={self._fund_flow_rules.get('is_enabled', False)}, "
+                       f"threshold={self._fund_flow_rules.get('net_flow_threshold', -10000)}万元, "
+                       f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 1)}")
             
             config_map = {}
             strategies = yaml_config.get('removal_strategies', {})
@@ -257,6 +258,8 @@ class StrategyRunner:
             return config_map
         except Exception as e:
             logger.warning(f"加载股票池移除配置失败: {str(e)}")
+            # 默认资金流向规则配置
+            self._fund_flow_rules = {'is_enabled': True, 'net_flow_threshold': -10000, 'min_hold_days': 1}
             return {}
     
     def _load_support_methods_config(self) -> Dict:
@@ -437,6 +440,13 @@ class StrategyRunner:
             last_date = data.get('last_date', '')
             
             logger.info(f"从文件加载股票池: {len(pool)} 只股票，上次运行日期: {last_date}")
+            
+            # 确保每个候选股票都有冷却状态标记（兼容旧版本文件）
+            for item in pool:
+                if 'is_cooling' not in item:
+                    item['is_cooling'] = False
+                if 'cool_down_end' not in item:
+                    item['cool_down_end'] = None
             
             # 用户需求：直接继承 buy_candidate_pool.json，不重建
             # 无论日期是否匹配，只要文件存在就直接加载
@@ -733,13 +743,22 @@ class StrategyRunner:
         logger.info(f"开始对 {len(selected_stocks)} 只股票进行评分")
         scored_stocks = self._score_stocks(selected_stocks, strategy_name, current_date)
         
+        # 记录每只股票的综合评分（与回测引擎一致）
+        logger.info("\n股票评分详情:")
+        for stock in scored_stocks:
+            logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 综合评分={stock['score']}，否决标志={stock.get('veto_flag', False)}")
+        
         # 筛选：去除否决票且评分达标
         candidate_stocks = [
             stock for stock in scored_stocks 
             if not stock.get('veto_flag', False) and stock['score'] >= score_threshold
         ]
         
-        logger.info(f"筛选后待买入股票数: {len(candidate_stocks)}")
+        logger.info(f"\n筛选后待买入股票数: {len(candidate_stocks)}")
+        if candidate_stocks:
+            logger.info("待买入股票列表:")
+            for stock in candidate_stocks:
+                logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 评分={stock['score']}")
         return candidate_stocks
     
     # ==================== 股票池移除检查 ====================
@@ -804,6 +823,9 @@ class StrategyRunner:
             - 收盘价 >= MA10
             - 20日线性回归斜率 > 0
             - 20日R²拟合度 >= 0.3
+        3. 资金流向条件（同时满足以下两个条件时移除）：
+            - 5日主力资金累计净流入 < -10000万元
+            - 大单净流出 且 小单净流入（出货信号）
         
         Args:
             current_date: 当前交易日期
@@ -820,10 +842,38 @@ class StrategyRunner:
         prev_date = get_previous_trading_day(current_date)
         prev_date_str = prev_date.strftime('%Y-%m-%d') if isinstance(prev_date, datetime.datetime) else prev_date
         
+        # 获取资金流向规则配置
+        fund_flow_enabled = getattr(self, '_fund_flow_rules', {}).get('is_enabled', True)
+        fund_flow_threshold = getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000)
+        fund_flow_min_hold_days = getattr(self, '_fund_flow_rules', {}).get('min_hold_days', 1)
+        
         for candidate in self.buy_candidate_pool:
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
             strategy_name = candidate.get('strategy_name', '')
+            
+            # ========== 更新股票池现价（使用当日收盘价） ==========
+            try:
+                df_price = self.stock_filtered_cache.get(stock_code)
+                if df_price is not None and not df_price.empty:
+                    # 获取当日收盘价
+                    price_row = df_price[df_price['date'] == current_date]
+                    if not price_row.empty:
+                        latest_price = float(price_row['close'].values[0])
+                    else:
+                        # 如果没有当日数据，取最新收盘价
+                        latest_price = float(df_price['close'].values[0])
+                    
+                    # 更新股票信号中的价格
+                    if 'signal' in candidate['stock']:
+                        candidate['stock']['signal']['close'] = latest_price
+                    elif 'close' in candidate['stock']:
+                        candidate['stock']['close'] = latest_price
+                    
+                    logger.debug(f"【股票池】{stock_code} 现价更新为: {latest_price:.2f}")
+            except Exception as e:
+                logger.debug(f"【股票池】更新 {stock_code} 现价失败: {str(e)}")
+            # ========== 股票池现价更新结束 ==========
             
             # 获取移除配置
             removal_config = self._get_strategy_removal_config(strategy_name)
@@ -831,16 +881,18 @@ class StrategyRunner:
             
             # 计算持有天数
             added_date = candidate.get('added_date', '')
+            # 计算持有天数：从加入日期到今天（不含加入当天）
+            # 例如：5月13日加入，5月14日检查，hold_days = 1
             if added_date:
                 if isinstance(added_date, datetime.datetime):
                     added_date = added_date.strftime('%Y-%m-%d')
                 try:
                     added_dt = datetime.datetime.strptime(added_date, '%Y-%m-%d')
-                    if isinstance(prev_date, datetime.datetime):
-                        hold_days = (prev_date - added_dt).days
+                    if isinstance(current_date, datetime.datetime):
+                        hold_days = (current_date - added_dt).days
                     else:
-                        prev_dt = datetime.datetime.strptime(prev_date_str, '%Y-%m-%d')
-                        hold_days = (prev_dt - added_dt).days
+                        current_dt = datetime.datetime.strptime(current_date, '%Y-%m-%d')
+                        hold_days = (current_dt - added_dt).days
                 except:
                     hold_days = 0
             else:
@@ -852,28 +904,21 @@ class StrategyRunner:
                 remaining.append(candidate)
                 continue
             
-            # 判断是否为当日新加入的股票
-            is_today_added = (added_date == current_date) if added_date else False
+            # 破支撑位检查：使用当天收盘价（或最新可用收盘价）
+            # 注意：缓存数据是倒序排列的（最新日期在前面）
+            df_for_support = df[df['date'] <= current_date].copy()
+            if len(df_for_support) < 20:
+                remaining.append(candidate)
+                continue
+            price_for_check = df_for_support.iloc[0]['close']  # 最新数据在 iloc[0]
             
-            if is_today_added:
-                # 当日新加入的股票：使用当日收盘价进行支撑位判断
-                # 注意：缓存数据是倒序排列的（最新日期在前面）
-                df_to_date = df[df['date'] <= current_date].copy()
-                if len(df_to_date) < 20:
-                    remaining.append(candidate)
-                    continue
-                price_for_check = df_to_date.iloc[0]['close']  # 最新数据在 iloc[0]
-            else:
-                # 非当日加入的股票：使用前一日收盘价
-                df_to_date = df[df['date'] <= prev_date_str].copy()
-                if len(df_to_date) < 20:
-                    remaining.append(candidate)
-                    continue
-                price_for_check = df_to_date.iloc[0]['close']  # 最新数据在 iloc[0]
+            # 趋势检查：需要至少20天历史数据
+            trend_df = df_for_support.copy()
+            if len(trend_df) < 20:
+                remaining.append(candidate)
+                continue
             
-            # 用于趋势判断的数据（需要至少20天）
-            trend_df = df[df['date'] <= current_date].copy()
-            
+            # 确保数据按日期正序排列
             if trend_df['date'].iloc[0] > trend_df['date'].iloc[-1]:
                 trend_df = trend_df.iloc[::-1].reset_index(drop=True)
             
@@ -908,6 +953,20 @@ class StrategyRunner:
                     if r_squared < 0.3:
                         removal_reasons.append(f"R²{r_squared:.4f}<0.3")
             
+            # 条件3: 资金流向移除（同时满足两个条件时移除）
+            # - 5日主力资金累计净流入 < 阈值（默认-10000万元）
+            # - 大单净流出 且 小单净流入（出货信号）
+            fund_flow_reason = ''
+            if fund_flow_enabled:
+                if hold_days >= fund_flow_min_hold_days:
+                    fund_flow_result = self._check_fund_flow_condition(stock_code, stock_name, current_date)
+                    fund_flow_reason = fund_flow_result.get('reason', '')
+                    if fund_flow_result['should_remove']:
+                        should_remove = True
+                        removal_reasons.append(fund_flow_result['reason'])
+                else:
+                    fund_flow_reason = f'持有{hold_days}天<{fund_flow_min_hold_days}天，跳过检查'
+            
             if should_remove:
                 removed.append(candidate)
                 logger.info(f"【移除】{current_date} {stock_code} {stock_name}: "
@@ -915,6 +974,22 @@ class StrategyRunner:
                            f"原因: {'; '.join(removal_reasons)}")
             else:
                 remaining.append(candidate)
+                # 记录保留原因（用于调试）
+                keep_reasons = []
+                if support_level > 0:
+                    if price_for_check >= support_level * 0.98:
+                        keep_reasons.append(f'支撑位OK')
+                    else:
+                        keep_reasons.append(f'破支撑位但未移除')
+                if hold_days < min_hold_days:
+                    keep_reasons.append(f'持有{hold_days}<{min_hold_days}天，跳过趋势检查')
+                elif len(trend_df) >= 20:
+                    keep_reasons.append(f'趋势OK')
+                else:
+                    keep_reasons.append(f'数据不足{len(trend_df)}天<20，跳过趋势检查')
+                if not fund_flow_reason:
+                    keep_reasons.append(f'资金流向OK')
+                logger.info(f"【保留】{stock_code} {stock_name}: 持{hold_days}日, {', '.join(keep_reasons)}")
         
         if removed:
             logger.info(f"股票池移除: {len(removed)} 只, 剩余: {len(remaining)} 只")
@@ -922,54 +997,150 @@ class StrategyRunner:
         
         return removed
     
+    def _check_fund_flow_condition(self, stock_code: str, stock_name: str, current_date: str) -> Dict:
+        """检查资金流向移除条件
+        
+        规则：
+        - 如果5日主力净额 < -10000万元 或者 大单净流出小单净流入：
+          - 如果股票不在冷却期 → 加入冷却期3天，不移除
+          - 如果股票已经在冷却期(is_cooling=true) → 直接移除出股票池
+        
+        Args:
+            stock_code: 股票代码
+            stock_name: 股票名称
+            current_date: 当前日期
+            
+        Returns:
+            包含 should_remove 和 reason 的字典
+        """
+        from trading.moneyflow_scorer import MoneyflowScorer
+        
+        try:
+            # 统一转换日期格式为字符串
+            if hasattr(current_date, 'strftime'):
+                # 如果是date对象，转换为字符串
+                date_str = current_date.strftime('%Y%m%d')
+            else:
+                # 如果是字符串，移除横杠
+                date_str = str(current_date).replace('-', '')
+            
+            # 使用资金评分器获取资金流向数据
+            scorer = MoneyflowScorer()
+            df = scorer._fetch_moneyflow_data(stock_code, date_str)
+            
+            if df is None or df.empty:
+                return {'should_remove': False, 'reason': ''}
+            
+            # 提取资金流向指标（已确保类型正确）
+            metrics = scorer._extract_flow_metrics(df)
+            net_flow_5d = metrics['net_flow_5d']
+            large_net = metrics['large_net']
+            small_net = metrics['small_net']
+            
+            # 获取配置的阈值（确保转换为整数）
+            threshold = int(getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000))
+            
+            # 判断条件：满足任一条件触发处理
+            condition1 = net_flow_5d < threshold  # 5日主力净额 < 阈值
+            condition2 = (large_net < 0) and (small_net > 0)  # 大单出+小单进（出货信号）
+            
+            if condition1 or condition2:
+                # 构建原因描述
+                if condition1 and condition2:
+                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元且大单净流出小单净流入"
+                elif condition1:
+                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元"
+                else:
+                    reason_detail = "大单净流出且小单净流入（出货信号）"
+                
+                # 检查是否已在冷却期（通过股票池的is_cooling字段）
+                is_in_cool_down = self._check_cool_down(stock_code, current_date)
+                
+                if is_in_cool_down:
+                    # 已在冷却期，再次触发条件，直接移除
+                    reason = f"{stock_code} {stock_name}: 资金流向异常[{reason_detail}]，且已在冷却期，直接移除"
+                    logger.warning(reason)
+                    self._update_stock_cool_down_status(stock_code, False, None)
+                    return {'should_remove': True, 'reason': reason}
+                else:
+                    # 不在冷却期，加入冷却期3天
+                    cool_down_end = self._get_future_trading_day(current_date, 3)
+                    self._update_stock_cool_down_status(stock_code, True, cool_down_end)
+                    reason = f"{stock_code} {stock_name}: 资金流向异常[{reason_detail}]，加入冷却期至{cool_down_end}"
+                    logger.warning(reason)
+                    return {'should_remove': False, 'reason': reason}
+            
+            return {'should_remove': False, 'reason': ''}
+            
+        except Exception as e:
+            logger.warning(f"检查资金流向条件失败: {stock_code} {stock_name}, {str(e)}")
+            return {'should_remove': False, 'reason': ''}
+    
     def _load_config(self) -> Dict:
         """加载策略运行配置
+        
+        优先使用数据库回测配置中的止盈止损参数，与回测引擎保持一致。
+        如果数据库中没有配置，则使用默认值。
         
         Returns:
             配置字典
         """
-        config_path = Path("config/strategy_params.yaml")
-        if not config_path.exists():
-            logger.warning("策略运行配置文件不存在，使用默认配置")
-            return {
-                'take_profit_threshold': 0.15,
-                'stop_loss_threshold': -0.05,
-                'max_position_size': 0.1,
-                'min_position_size': 0.01,
-                'max_positions': 10,
-                'selection_limit': 20,
-                'min_score': 70,
-                'working_hour': 9,
-                'working_minute': 30,
-                'check_interval': 60
-            }
+        # 基础配置
+        default_config = {
+            'max_position_size': 0.1,
+            'min_position_size': 0.01,
+            'max_positions': 10,
+            'selection_limit': 20,
+            'min_score': 70,
+            'working_hour': 9,
+            'working_minute': 30,
+            'check_interval': 60
+        }
         
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                runner_config = config.get('strategy_runner', {})
-                logger.info("策略运行配置加载成功")
-                return runner_config
-        except Exception as e:
-            logger.error(f"加载策略运行配置失败: {str(e)}")
-            return {
-                'take_profit_threshold': 0.15,
-                'stop_loss_threshold': -0.05,
-                'max_position_size': 0.1,
-                'min_position_size': 0.01,
-                'max_positions': 10,
-                'selection_limit': 20,
-                'min_score': 70,
-                'working_hour': 9,
-                'working_minute': 30,
-                'check_interval': 60
-            }
+        # 尝试从yaml文件加载
+        config_path = Path("config/strategy_params.yaml")
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    runner_config = config.get('strategy_runner', {})
+                    # 合并yaml配置到默认配置
+                    default_config.update(runner_config)
+                    logger.info("策略运行配置加载成功")
+            except Exception as e:
+                logger.error(f"加载策略运行配置失败: {str(e)}")
+        
+        # 从数据库回测配置获取止盈止损参数（优先级最高）
+        backtest_config = self._get_backtest_config()
+        if backtest_config:
+            # take_profit 和 stop_loss 使用百分比形式（如 21 表示 21%）
+            # 转换为小数形式存储，与回测引擎保持一致
+            default_config['take_profit_threshold'] = backtest_config.get('take_profit', 15) / 100
+            default_config['stop_loss_threshold'] = backtest_config.get('stop_loss', -5) / 100
+            logger.info(f"从回测配置获取止盈止损: take_profit={backtest_config.get('take_profit', 15)}%, stop_loss={backtest_config.get('stop_loss', -5)}%")
+        
+        return default_config
+    
+    # 默认配置参数（统一管理，避免硬编码分散在多处）
+    _DEFAULT_CONFIG = {
+        'initial_capital': 300000,
+        'max_daily_buys': 8,
+        'score_threshold': 60,
+        'buy_amount': 100000,
+        'stop_loss': -5,
+        'take_profit': 15,
+        'hold_period': 10,
+        'support_level_method': 'ma20',
+        'timing_strategy': 'support',
+        'temp_limit_mode': 'both'
+    }
     
     def _get_backtest_config(self) -> Dict:
         """获取回测配置
         
         从数据库获取最新的回测配置，用于策略运行的默认参数。
         与回测引擎保持一致，使用相同的配置源。
+        如果数据库中没有配置，返回默认参数。
         
         Returns:
             回测配置字典，包含 initial_capital, max_daily_buys, score_threshold 等参数
@@ -980,39 +1151,22 @@ class StrategyRunner:
             
             if configs and len(configs) > 0:
                 # 使用最新的配置
-                config = configs[0]
-                logger.info(f"获取到回测配置: config_name={config.get('config_name')}")
-                return {
-                    'initial_capital': config.get('initial_capital', 300000),
-                    'max_daily_buys': config.get('max_daily_buys', 8),
-                    'score_threshold': config.get('score_threshold', 60),
-                    'buy_amount': config.get('buy_amount', 100000),
-                    'stop_loss': config.get('stop_loss', -5),
-                    'take_profit': config.get('take_profit', 15),
-                    'hold_period': config.get('hold_period', 10),
-                    'support_level_method': config.get('support_level_method', 'ma20'),
-                    'timing_strategy': config.get('timing_strategy', 'support'),
-                    'temp_limit_mode': config.get('temp_limit_mode', 'both')
-                }
+                db_config = configs[0]
+                logger.info(f"获取到回测配置: config_name={db_config.get('config_name')}")
+                # 合并配置：使用数据库值，不存在的使用默认值
+                result = self._DEFAULT_CONFIG.copy()
+                for key in result:
+                    if db_config.get(key) is not None:
+                        result[key] = db_config.get(key)
+                return result
             else:
                 logger.warning("未找到回测配置，使用默认参数")
-                return {
-                    'initial_capital': 300000,
-                    'max_daily_buys': 8,
-                    'score_threshold': 60,
-                    'buy_amount': 100000,
-                    'stop_loss': -5,
-                    'take_profit': 15,
-                    'hold_period': 10,
-                    'support_level_method': 'ma20',
-                    'timing_strategy': 'support',
-                    'temp_limit_mode': 'both'
-                }
+                return self._DEFAULT_CONFIG.copy()
         except Exception as e:
             logger.error(f"获取回测配置失败: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return {}
+            return self._DEFAULT_CONFIG.copy()
     
     def _check_cool_down(self, stock_code: str, current_date: str) -> bool:
         """检查股票是否在冷却期内（从股票池的属性中检查）
@@ -1058,28 +1212,38 @@ class StrategyRunner:
             cool_down_end: 冷却结束日期（is_cooling=True时必填）
         """
         for candidate in self.buy_candidate_pool:
-            stock = candidate.get('stock', candidate)
-            code = stock.get('stock_code', '')
-            if code == stock_code:
+            # 与 _check_pool_removal 保持一致，直接从 candidate['stock']['stock_code'] 获取
+            if candidate.get('stock', {}).get('stock_code', '') == stock_code:
                 candidate['is_cooling'] = is_cooling
                 candidate['cool_down_end'] = cool_down_end
                 return
 
-    def _is_stock_cooling(self, stock_code: str) -> bool:
-        """检查股票是否正在冷却（快速检查，不更新状态）
+    def _calculate_hold_days(self, buy_date: str, current_date: str) -> int:
+        """计算持有天数（交易日）
         
         Args:
-            stock_code: 股票代码
+            buy_date: 买入日期字符串 (YYYY-MM-DD)
+            current_date: 当前日期字符串 (YYYY-MM-DD)
             
         Returns:
-            True表示正在冷却，False表示不在冷却期
+            持有天数（交易日数）
         """
-        for candidate in self.buy_candidate_pool:
-            stock = candidate.get('stock', candidate)
-            code = stock.get('stock_code', '')
-            if code == stock_code:
-                return candidate.get('is_cooling', False)
-        return False
+        if not buy_date or not current_date:
+            return 0
+        try:
+            from utils.trade_date_utils import get_trading_days
+            trading_days = get_trading_days(buy_date, current_date)
+            # 持有天数 = 交易日数量 - 1（买入当天不计入）
+            return max(0, len(trading_days) - 1)
+        except Exception as e:
+            logger.debug(f"计算持有天数失败: {e}")
+            # 回退到简单日历天数计算
+            try:
+                buy_dt = datetime.datetime.strptime(buy_date, '%Y-%m-%d').date()
+                current_dt = datetime.datetime.strptime(current_date, '%Y-%m-%d').date()
+                return max(0, (current_dt - buy_dt).days)
+            except:
+                return 0
 
     def _get_future_trading_day(self, start_date: str, days: int) -> str:
         """获取指定日期之后的第N个交易日
@@ -1091,12 +1255,17 @@ class StrategyRunner:
         Returns:
             目标交易日字符串
         """
-        # 粗略估计：每个交易日约1天（忽略周末）
-        # 实际实现可以从交易日历获取
+        from utils.trade_date_utils import is_trading_day
+        
         current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
-        estimated_days = int(days * 1.4)
-        future_date = current_date + datetime.timedelta(days=estimated_days)
-        return future_date.strftime('%Y-%m-%d')
+        trading_days_found = 0
+        
+        while trading_days_found < days:
+            current_date += datetime.timedelta(days=1)
+            if is_trading_day(current_date.strftime('%Y-%m-%d')):
+                trading_days_found += 1
+        
+        return current_date.strftime('%Y-%m-%d')
     
     def _has_kline_data(self, date: str) -> bool:
         """检查指定日期是否有K线数据
@@ -1175,10 +1344,25 @@ class StrategyRunner:
         Returns:
             是否已处理
         """
-        # 检查每日报告文件或信号文件是否存在
-        daily_file = self.running_dir / f"daily_{date}.json"
+        # 检查每日报告文件是否存在（兼容 .json 和 .md 格式）
+        daily_file_json = self.running_dir / f"daily_{date}.json"
+        daily_file_md = self.running_dir / f"daily_{date}.md"
+        if daily_file_json.exists() or daily_file_md.exists():
+            return True
+        
+        # 检查信号文件是否存在且包含实际信号（不是空数组）
         signals_file = self.running_dir / f"signals_{date}.json"
-        return daily_file.exists() or signals_file.exists()
+        if signals_file.exists():
+            try:
+                with open(signals_file, 'r', encoding='utf-8') as f:
+                    signals_data = json.load(f)
+                    # 如果信号数组不为空，说明已处理
+                    if isinstance(signals_data, list) and len(signals_data) > 0:
+                        return True
+            except Exception:
+                pass
+        
+        return False
     
     def initialize_daily_data(self, date: str = None) -> bool:
         """初始化当日数据
@@ -1243,13 +1427,39 @@ class StrategyRunner:
             prev_cash = prev_data.get('cash', 300000)
             prev_initial_capital = prev_data.get('initial_capital', 300000)
             
-            # 更新持仓的持有天数（加上间隔的交易日数）
+            # 更新持仓的持有天数和现价（加上间隔的交易日数）
             updated_positions = {}
             for code, pos in prev_positions.items():
                 updated_pos = pos.copy()
                 updated_pos['holding_days'] = pos.get('holding_days', 0) + days_between
-                updated_pos['profit_loss'] = 0.0
-                updated_pos['profit_rate'] = 0.0
+                
+                # 获取最新价格并更新现价和收益
+                try:
+                    # 获取股票最新数据
+                    df = self._get_stock_data(code, date, date)
+                    if df is not None and not df.empty:
+                        latest_price = df.iloc[0]['close']
+                        updated_pos['current_price'] = latest_price
+                        
+                        # 计算收益
+                        buy_price = pos.get('buy_price', pos.get('cost_price', 0))
+                        if buy_price > 0:
+                            profit_rate = (latest_price - buy_price) / buy_price
+                            profit_loss = profit_rate * pos.get('quantity', 0) * buy_price
+                            updated_pos['profit_rate'] = profit_rate
+                            updated_pos['profit_loss'] = profit_loss
+                        else:
+                            updated_pos['profit_rate'] = 0.0
+                            updated_pos['profit_loss'] = 0.0
+                    else:
+                        # 无法获取最新价格，保持原有现价
+                        updated_pos['profit_rate'] = 0.0
+                        updated_pos['profit_loss'] = 0.0
+                except Exception as e:
+                    logger.warning(f"【数据初始化】更新持仓 {code} 现价失败: {str(e)}")
+                    updated_pos['profit_rate'] = 0.0
+                    updated_pos['profit_loss'] = 0.0
+                
                 updated_positions[code] = updated_pos
             
             # 保存当日持仓文件
@@ -1354,18 +1564,119 @@ class StrategyRunner:
             return []
     
     def _save_signals(self, signals: List, signals_file: str):
-        """保存信号历史
+        """保存信号历史（同时保存JSON和CSV格式）
         
         Args:
             signals: 信号列表
-            signals_file: 信号文件路径
+            signals_file: 信号文件路径（JSON格式）
         """
         try:
+            # 保存JSON格式
             with open(signals_file, 'w', encoding='utf-8') as f:
                 json.dump(signals, f, ensure_ascii=False, indent=2)
             logger.info(f"信号已保存到: {signals_file}")
+            
+            # 保存CSV格式（兼容PTrade批量埋单接口）
+            import csv
+            from pathlib import Path
+            
+            # 根据PTrade集成规范，文件名格式为 KHunter_signals_YYYYMMDD.csv
+            signals_path = Path(signals_file)
+            date_str = signals_path.stem.replace('signals_', '')
+            pt_csv_file = signals_path.parent / f"KHunter_signals_{date_str}.csv"
+            
+            # PTrade批量埋单CSV列定义
+            # 字段规范：symbol, side, order_volume, order_price, price_type, strategy_name, signal_id
+            csv_columns = [
+                'symbol', 'side', 'order_volume', 'order_price', 
+                'price_type', 'strategy_name', 'signal_id'
+            ]
+            
+            # 处理信号数据
+            csv_data = []
+            for signal in signals:
+                stock_code = signal.get('stock_code', '')
+                # 确保股票代码带市场后缀（SH/SZ）
+                symbol = self._format_stock_code(stock_code)
+                
+                # 转换交易类型：buy/sell
+                trade_type = signal.get('trade_type', signal.get('signal_type', ''))
+                side = 'buy' if trade_type in ('buy', 'buy_open') else 'sell' if trade_type in ('sell', 'sell_close', 'strategy_sell') else ''
+                
+                # 获取信号中的价格和收盘价
+                signal_price = signal.get('price', 0)
+                close_price = signal.get('close', signal.get('current_price', signal_price))
+                
+                # 委托类型和价格
+                # 买入：限价单，限价不超过收盘价1%
+                # 卖出：市价单，按当前价格成交
+                if side == 'buy':
+                    price_type = 'limit'
+                    # 买入限价不超过收盘价的1%
+                    max_limit_pct = 0.01  # 1%限制
+                    order_price = signal_price
+                    if close_price > 0:
+                        max_price = close_price * (1 + max_limit_pct)
+                        if order_price > max_price:
+                            order_price = max_price
+                            logger.info(f"【限价调整】买入 {stock_code} 限价从 {signal_price:.2f} 调整为 {order_price:.2f}（不超过收盘价 {close_price:.2f} 的1%）")
+                elif side == 'sell':
+                    price_type = 'market'  # 卖出使用市价单
+                    order_price = signal_price  # 市价单也保留价格字段用于记录
+                else:
+                    price_type = 'limit'
+                    order_price = signal_price
+                
+                csv_row = {
+                    'symbol': symbol,
+                    'side': side,
+                    'order_volume': signal.get('quantity', 0),
+                    'order_price': round(order_price, 2),
+                    'price_type': price_type,
+                    'strategy_name': signal.get('strategy_name', ''),
+                    'signal_id': signal.get('id', signal.get('signal_id', ''))
+                }
+                csv_data.append(csv_row)
+            
+            # 写入CSV文件（UTF-8编码，兼容PTrade批量埋单）
+            with open(pt_csv_file, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=csv_columns)
+                writer.writeheader()
+                writer.writerows(csv_data)
+            
+            logger.info(f"PTrade格式CSV信号文件已保存到: {pt_csv_file}")
+            
         except Exception as e:
             logger.error(f"保存信号文件失败: {str(e)}")
+    
+    def _format_stock_code(self, stock_code: str) -> str:
+        """格式化股票代码，确保带市场后缀
+        
+        Args:
+            stock_code: 股票代码
+            
+        Returns:
+            带市场后缀的股票代码，如 000001.SZ, 600519.SH
+        """
+        if not stock_code:
+            return ''
+        
+        # 如果已经带后缀，直接返回
+        if '.' in stock_code:
+            return stock_code
+        
+        # 根据股票代码判断市场
+        # 60开头 -> 上海, 00开头 -> 深圳, 30开头 -> 创业板, 68开头 -> 科创板
+        if stock_code.startswith('6'):
+            return f"{stock_code}.SH"
+        elif stock_code.startswith('0') or stock_code.startswith('2'):
+            return f"{stock_code}.SZ"
+        elif stock_code.startswith('3'):
+            return f"{stock_code}.SZ"
+        elif stock_code.startswith('8'):
+            return f"{stock_code}.SH"
+        
+        return stock_code
     
     def _save_trade_record(self, trade_record: Dict):
         """保存交易记录
@@ -1407,6 +1718,217 @@ class StrategyRunner:
             logger.info(f"交易记录已保存到: {trade_file}")
         except Exception as e:
             logger.error(f"保存交易记录失败: {str(e)}")
+    
+    # ==================== 除权检测相关方法 ====================
+    
+    def _need_exdividend_check(self) -> bool:
+        """
+        判断当前是否需要进行除权检测
+        
+        规则：交易日收盘前（00:00-15:00）需要处理，收盘后及非交易日不需要处理
+        
+        Returns:
+            是否需要进行除权检测
+        """
+        now = datetime.datetime.now()
+        current_date = now.strftime('%Y-%m-%d')
+        
+        # 检查是否为交易日
+        if not is_trading_day(current_date):
+            logger.debug(f"【除权检测】{current_date} 不是交易日，跳过检测")
+            return False
+        
+        # 检查是否在收盘前（15:00之前）
+        if now.hour < 15:
+            return True
+        
+        logger.debug(f"【除权检测】当前时间 {now.strftime('%H:%M')} >= 15:00，跳过检测")
+        return False
+    
+    def _daily_exdividend_check(self, trade_date: str, portfolio_file, signals_file):
+        """
+        每日除权检测主方法（一天只执行一次）
+        
+        Args:
+            trade_date: 交易日期
+            portfolio_file: 持仓文件路径
+            signals_file: 信号文件路径
+        """
+        # 检查今日是否已经处理过除权
+        if hasattr(self, '_exdividend_processed_date') and self._exdividend_processed_date == trade_date:
+            logger.info(f"【每日除权检测】{trade_date} 已处理过除权检测，跳过")
+            return
+        
+        logger.info(f"【每日除权检测】开始检测 {trade_date} 的除权情况...")
+        
+        has_changes = False
+        
+        # ========== 1. 持仓除权检测 ==========
+        if self._check_portfolio_exdividend(trade_date):
+            has_changes = True
+        
+        # ========== 2. 信号除权检测 ==========
+        if self._check_signals_exdividend(trade_date):
+            has_changes = True
+        
+        # ========== 3. 股票池除权检测 ==========
+        if self._check_pool_exdividend(trade_date):
+            has_changes = True
+        
+        # 如果有调整，保存文件
+        if has_changes:
+            logger.info(f"【每日除权检测】检测到除权，更新持仓、信号和股票池文件")
+            self._save_signals(self.signals, str(signals_file))
+            self._save_portfolio(self.portfolio, str(portfolio_file))
+            self._save_pool_to_file(self.buy_candidate_pool, trade_date)
+        
+        # 标记今日已处理
+        self._exdividend_processed_date = trade_date
+        
+        logger.info(f"【每日除权检测】完成")
+    
+    def _check_portfolio_exdividend(self, trade_date: str) -> bool:
+        """
+        检测持仓股票的除权情况并调整
+        
+        Args:
+            trade_date: 交易日期
+        
+        Returns:
+            是否有调整
+        """
+        from utils.exdividend_utils import ExdividendUtils
+        
+        has_changes = False
+        
+        for stock_code, position in self.portfolio.items():
+            # 检测是否除权
+            exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
+            
+            if exdividend_info:
+                factor = exdividend_info.get('factor', 1.0)
+                logger.info(f"【持仓除权调整】{stock_code} 检测到除权，因子: {factor}")
+                
+                # 调整持仓成本价
+                if 'buy_price' in position:
+                    position['buy_price'] = position['buy_price'] * factor
+                
+                # 调整当前价格（如果存在）
+                if 'current_price' in position:
+                    position['current_price'] = position['current_price'] * factor
+                
+                # 调整数量（考虑送股）
+                bonus_ratio = exdividend_info.get('bonus_ratio', 0)
+                if bonus_ratio and 'quantity' in position:
+                    position['quantity'] = int(position['quantity'] * (1 + bonus_ratio))
+                
+                # 记录除权历史
+                if 'rights_history' not in position:
+                    position['rights_history'] = []
+                position['rights_history'].append({
+                    'date': trade_date,
+                    'factor': factor,
+                    'type': 'exdividend'
+                })
+                
+                has_changes = True
+        
+        return has_changes
+    
+    def _check_signals_exdividend(self, trade_date: str) -> bool:
+        """
+        检测信号涉及股票的除权情况并调整
+        
+        Args:
+            trade_date: 交易日期
+        
+        Returns:
+            是否有调整
+        """
+        from utils.exdividend_utils import ExdividendUtils
+        
+        has_changes = False
+        
+        for signal in self.signals:
+            # 只处理未执行的买入/卖出信号
+            signal_type = signal.get('signal_type', '')
+            if signal.get('executed') or signal.get('ignored'):
+                continue
+            
+            if signal_type not in ('buy', 'sell', 'strategy_sell'):
+                continue
+            
+            stock_code = signal.get('stock_code')
+            if not stock_code:
+                continue
+            
+            # 检测是否除权
+            exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
+            
+            if exdividend_info:
+                factor = exdividend_info.get('factor', 1.0)
+                logger.info(f"【信号除权调整】{stock_code} {signal_type} 信号检测到除权，因子: {factor}")
+                
+                # 买入信号：调整买入价格
+                if signal_type == 'buy' and 'price' in signal:
+                    signal['original_price'] = signal['price']
+                    signal['price'] = signal['price'] * factor
+                    signal['exdividend_adjusted'] = True
+                    signal['exdividend_factor'] = factor
+                
+                # 卖出信号：调整卖出数量（考虑送股）
+                if signal_type in ('sell', 'strategy_sell') and 'quantity' in signal:
+                    signal['original_quantity'] = signal['quantity']
+                    bonus_ratio = exdividend_info.get('bonus_ratio', 0)
+                    if bonus_ratio:
+                        signal['quantity'] = int(signal['quantity'] * (1 + bonus_ratio))
+                    signal['exdividend_adjusted'] = True
+                    signal['exdividend_factor'] = factor
+                
+                has_changes = True
+        
+        return has_changes
+    
+    def _check_pool_exdividend(self, trade_date: str) -> bool:
+        """
+        检测股票池中股票的除权情况并调整支撑位信息
+        
+        Args:
+            trade_date: 交易日期
+        
+        Returns:
+            是否有调整
+        """
+        from utils.exdividend_utils import ExdividendUtils
+        
+        has_changes = False
+        
+        for item in self.buy_candidate_pool:
+            # 适配股票池结构
+            stock_info = item.get('stock', item)
+            stock_code = stock_info.get('stock_code')
+            
+            if not stock_code:
+                continue
+            
+            # 检测是否除权
+            exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
+            
+            if exdividend_info:
+                factor = exdividend_info.get('factor', 1.0)
+                logger.info(f"【股票池除权调整】{stock_code} 支撑位已调整（除权因子={factor}）")
+                
+                # 调整支撑位
+                if 'support_level' in item:
+                    item['support_level'] = item['support_level'] * factor
+                    has_changes = True
+                
+                # 调整股票信息中的支撑位（如果存在）
+                if 'support_level' in stock_info:
+                    stock_info['support_level'] = stock_info['support_level'] * factor
+                    has_changes = True
+        
+        return has_changes
     
     def execute_signal(self, signal_id: str) -> Dict:
         """执行指定的信号（串行执行，确保原子操作）
@@ -1490,6 +2012,11 @@ class StrategyRunner:
             current_cash = self.current_total_capital if hasattr(self, 'current_total_capital') else 300000
             
             if signal_type == 'buy':
+                # 检查当日是否卖出该股票（当日卖出的股票当日不买入）
+                today_sold_stocks = getattr(self, '_today_sold_stocks', set())
+                if stock_code in today_sold_stocks:
+                    return {"success": False, "error": f"当日已卖出股票 {stock_code}，不允许当日买入"}
+                
                 # 计算实际需要支付的总金额（参考回测引擎逻辑）
                 # adjusted_amount: 包含滑点的成交金额
                 # commission: 佣金
@@ -1741,6 +2268,10 @@ class StrategyRunner:
             # 加载股票池
             self.buy_candidate_pool = self._load_pool_from_file()[0]
             
+            # ========== 除权检测（交易日收盘前执行）==========
+            if self._need_exdividend_check():
+                self._daily_exdividend_check(trade_date, portfolio_file, signals_file)
+            
             # 统计待执行的信号
             pending_buy_signals = [s for s in self.signals if s.get('signal_type') == 'buy' and not s.get('executed') and not s.get('ignored')]
             pending_sell_signals = [s for s in self.signals if s.get('signal_type') in ('sell', 'strategy_sell') and not s.get('executed') and not s.get('ignored')]
@@ -1749,10 +2280,15 @@ class StrategyRunner:
             
             # 2. 先执行卖出信号
             executed_sells = 0
+            # 初始化当日卖出股票集合
+            if not hasattr(self, '_today_sold_stocks'):
+                self._today_sold_stocks = set()
             for signal in pending_sell_signals:
                 result = self.execute_signal(signal.get('id'))
                 if result.get('success'):
                     executed_sells += 1
+                    # 记录当日卖出的股票
+                    self._today_sold_stocks.add(signal.get('stock_code'))
                     logger.info(f"【T+1执行】卖出成功: {signal.get('stock_code')}")
             
             # 3. 再执行买入信号
@@ -1826,15 +2362,17 @@ class StrategyRunner:
             candidates = [s for s in record.get('pool_stocks', []) if s.get('status') == 'candidate']
             removed_count = record['pool_summary'].get('removed_count', 0)
             added_count = record['pool_summary'].get('added_count', 0)
+            cooling_count = sum(1 for c in candidates if c.get('is_cooling', False))
             report_lines.append("## 📋 股票池")
             report_lines.append("")
             if candidates:
-                report_lines.append(f"股票池合计 **{len(candidates)}** 只股票 今天移除 **{removed_count}** 只，新增加 **{added_count}** 只：")
+                report_lines.append(f"股票池合计 **{len(candidates)}** 只股票 今天移除 **{removed_count}** 只，新增加 **{added_count}** 只，其中冷却中 **{cooling_count}** 只：")
                 report_lines.append("")
-                report_lines.append("| 股票代码 | 股票名称 | 评分 | 策略 | 支撑位 | 入池日期 |")
-                report_lines.append("|----------|----------|------|------|--------|----------|")
+                report_lines.append("| 股票代码 | 股票名称 | 评分 | 策略 | 支撑位 | 入池日期 | 冷却 |")
+                report_lines.append("|----------|----------|------|------|--------|----------|------|")
                 for stock in candidates:
-                    report_lines.append(f"| {stock['code']} | {stock['name']} | {stock['score']} | {self._get_strategy_name(stock['strategy'])} | {stock['support_level']} | {stock.get('days', 1) > 1 and stock.get('added_date', '') or '今日'} |")
+                    cooling_info = f"❄️ 至{stock['cool_down_end']}" if stock.get('is_cooling') and stock.get('cool_down_end') else ""
+                    report_lines.append(f"| {stock['code']} | {stock['name']} | {stock['score']} | {self._get_strategy_name(stock['strategy'])} | {stock['support_level']} | {stock.get('days', 1) > 1 and stock.get('added_date', '') or '今日'} | {cooling_info} |")
             else:
                 report_lines.append("暂无候选股票")
             report_lines.append("")
@@ -1881,13 +2419,14 @@ class StrategyRunner:
                 total_profit = 0
                 report_lines.append(f"当前持有 **{len(portfolio)}** 只股票：")
                 report_lines.append("")
-                report_lines.append("| 股票代码 | 股票名称 | 持仓数量 | 成本价 | 现价 | 盈亏 | 持有天数 |")
-                report_lines.append("|----------|----------|----------|--------|------|------|----------|")
+                report_lines.append("| 股票代码 | 股票名称 | 持仓数量 | 成本价 | 现价 | 盈亏 | 止损价 | 持有天数 |")
+                report_lines.append("|----------|----------|----------|--------|------|------|--------|----------|")
                 for code, pos in portfolio.items():
                     profit_rate = pos.get('profit_rate', 0)
-                    profit_color = "green" if profit_rate >= 0 else "red"
                     profit_sign = "+" if profit_rate >= 0 else ""
-                    report_lines.append(f"| {code} | {pos['stock_name']} | {pos['quantity']} | ¥{pos['buy_price']} | ¥{pos['current_price']} | <span style='color:{profit_color}'>{profit_sign}{pos['profit_loss']:.2f}</span> | {pos.get('holding_days', 0)} |")
+                    stop_loss_price = pos.get('stop_loss_price', 0)
+                    stop_loss_display = f"¥{stop_loss_price:.2f}" if stop_loss_price > 0 else "-"
+                    report_lines.append(f"| {code} | {pos['stock_name']} | {pos['quantity']} | ¥{pos['buy_price']} | ¥{pos['current_price']} | {profit_sign}{pos['profit_loss']:.2f} | {stop_loss_display} | {pos.get('holding_days', 0)} |")
                     total_value += pos['quantity'] * pos['current_price']
                     total_profit += pos.get('profit_loss', 0)
                 report_lines.append("")
@@ -1932,6 +2471,10 @@ class StrategyRunner:
             'BullishHaramiStrategy': '多方炮策略',
             'BottomTrendReversalStrategy': '底部趋势拐点策略',
             'ResistanceBreakoutStrategy': '阻力位突破策略',
+            'MultiPartyCannonStrategy': '多方炮策略',
+            'MorningStarStrategy': '启明星策略',
+            'Strategy2560Selection': '2560战法',
+            'ShunShiBaoStrategy': '顺势宝',
             'turtle': '海龟策略',
             'bollinger': '布林带策略',
             'rsi': 'RSI策略',
@@ -1999,18 +2542,46 @@ class StrategyRunner:
             logger.error(f"获取股票名称失败 {stock_code}: {str(e)}")
             return stock_code
     
-    def _execute_sell_operations(self, trade_date: str) -> List[Dict]:
+    def _execute_sell_operations(self, trade_date: str, config: Dict = None) -> List[Dict]:
         """执行卖出操作
         
         Args:
             trade_date: 交易日期
+            config: 运行时配置参数（从回测配置获取的止盈止损参数）
             
         Returns:
             卖出信号列表
         """
         sell_signals = []
         
+        # 记录当日卖出的股票（用于限制当天卖出的股票不买入，且卖出后不算加仓）
+        if not hasattr(self, '_today_sold_stocks'):
+            self._today_sold_stocks = set()
+        
         try:
+            # 从运行时配置获取止盈止损参数（与回测引擎保持一致）
+            # 回测配置中 take_profit/stop_loss 单位是百分比（如 21 表示 21%）
+            # 策略运行器使用小数（如 0.21 表示 21%）
+            # 优先级：运行时config > 实例self.config > 默认值
+            if config and 'take_profit' in config and 'stop_loss' in config:
+                take_profit_percent = config.get('take_profit')
+                stop_loss_percent = config.get('stop_loss')
+            elif hasattr(self, 'config') and 'take_profit_threshold' in self.config:
+                # 从实例配置获取（已转换为小数形式）
+                take_profit_threshold = self.config.get('take_profit_threshold')
+                stop_loss_threshold = self.config.get('stop_loss_threshold')
+                logger.info(f"从实例配置获取止盈止损: take_profit={take_profit_threshold*100:.0f}%, stop_loss={stop_loss_threshold*100:.0f}%")
+            else:
+                # 使用默认值
+                take_profit_percent = 15
+                stop_loss_percent = -5
+            
+            # 转换为小数阈值
+            if 'take_profit_threshold' not in locals():
+                take_profit_threshold = take_profit_percent / 100
+            if 'stop_loss_threshold' not in locals():
+                stop_loss_threshold = stop_loss_percent / 100
+            
             # 记录当前资金和持仓情况
             positions_count = len(self.portfolio)
             available_cash = getattr(self, 'current_total_capital', 0)
@@ -2021,6 +2592,11 @@ class StrategyRunner:
                 total_assets += position.get('market_value', 0)
             
             logger.info(f"【卖出准备】{trade_date} 当前资金: ¥{available_cash:.2f}, 持仓: {positions_count}只")
+            
+            # 获取持仓过期配置（提高资金利用率）
+            enable_position_expire = self.config.get('enable_position_expire', True)
+            position_expire_hold_days = self.config.get('position_expire_hold_days', 10)
+            position_expire_return_threshold = self.config.get('position_expire_return_threshold', 5) / 100  # 转换为小数
             
             # 遍历持仓股票
             stocks_to_remove = []
@@ -2036,7 +2612,7 @@ class StrategyRunner:
                 
                 # 调用择时策略判断
                 timing_result = self.timing_strategy.get_timing_result(df, position, use_prev_day_signal=False)
-                
+
                 # 检查止损止盈
                 # 注意：缓存数据是倒序排列的（最新日期在前面）
                 current_price = df.iloc[0]['close']
@@ -2044,74 +2620,77 @@ class StrategyRunner:
                 buy_price = position['buy_price']
                 buy_date = position.get('buy_date', '')
                 profit_rate = (current_price - buy_price) / buy_price
-                
-                # ========== 移动止损逻辑（与回测引擎保持一致） ==========
-                # 获取移动止损配置
+
+                # 更新持仓的现价（确保前端显示最新价格）
+                position['current_price'] = current_price
+                position['profit_rate'] = profit_rate
+                position['profit_loss'] = (current_price - buy_price) * position['quantity']
+
+                # ========== 移动止损逻辑 ==========
+                # 配置参数
                 enable_trailing_stop = self.config.get('enable_trailing_stop', True)
-                trailing_base_stop = self.config.get('trailing_base_stop', -6)
-                trailing_profit_levels = self.config.get('trailing_profit_levels', [
-                    {'profit_threshold': 5, 'stop_level': 0},
-                    {'profit_threshold': 10, 'stop_level': 3},
-                    {'profit_threshold': 15, 'stop_level': 5},
-                    {'profit_threshold': 20, 'stop_level': 8}
-                ])
-                
-                # 计算当前止损线
-                current_stop = self.stop_loss_threshold
+                base_stop_level = -6  # 基础止损固定为-6%
+                trailing_trigger_threshold = 5  # 触发移动止损的最低收益率
+                trailing_offset = -8  # 移动止损偏移量，止损线 = 最高收益率 + trailing_offset
+
+                # 计算当前止损线（默认使用基础止损）
+                current_stop = base_stop_level / 100
+                highest_price_return = 0
+                highest_price = current_price  # 默认使用当前价
+
                 if enable_trailing_stop:
-                    # 计算从买入日期到前一交易日的最高价
-                    # 移动止损的最高价应该是买入日期至前一日的最高价，不包括当日最高价
-                    current_highest_price = buy_price
+                    # 从持仓期间的历史数据中获取最高价
+                    if buy_date and stock_code in self.stock_filtered_cache:
+                        cache_df = self.stock_filtered_cache[stock_code]
+                        # 筛选买入日期之后的数据
+                        holding_df = cache_df[cache_df['date'] >= buy_date].copy()
+                        if not holding_df.empty:
+                            highest_price = holding_df['high'].max()
+                            highest_price_return = (highest_price - buy_price) / buy_price * 100
                     
-                    if buy_date and not df.empty:
-                        buy_date_str = buy_date if isinstance(buy_date, str) else buy_date.strftime('%Y-%m-%d')
-                        # 获取前一交易日（返回字符串类型）
-                        prev_day_str = get_previous_trading_day(trade_date)
-                        if prev_day_str:
-                            # 筛选买入日期到前一交易日的数据
-                            mask = (df['date'] >= buy_date_str) & (df['date'] <= prev_day_str)
-                            filtered_df = df[mask]
-                            if not filtered_df.empty:
-                                current_highest_price = filtered_df['high'].max()
-                    
-                    # 计算最高价收益率
-                    highest_price_return = (current_highest_price - buy_price) / buy_price * 100
-                    
-                    # 根据最高收益率计算移动止损线
-                    current_stop_level = self.stop_loss_threshold * 100
-                    for level in trailing_profit_levels:
-                        if highest_price_return >= level['profit_threshold']:
-                            current_stop_level = level['stop_level']
-                    
-                    current_stop = current_stop_level / 100
-                    
-                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损线={current_stop*100:.2f}%")
+                    # 简化的移动止损逻辑：
+                    # - 最高收益 < 5%：使用固定止损 -6%
+                    # - 最高收益 >= 5%：移动止损 = 最高收益率 - 8%
+                    if highest_price_return >= trailing_trigger_threshold:
+                        current_stop = (highest_price_return + trailing_offset) / 100
+
+                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损线={current_stop*100:.2f}%")
                 # ========== 移动止损逻辑结束 ==========
-                
+
                 # 记录择时信号详情
                 stock_name = position['stock_name']
                 
                 # 生成卖出信号
-                if timing_result.is_sell or profit_rate >= self.take_profit_threshold or profit_rate <= current_stop:
+                if timing_result.is_sell or profit_rate >= take_profit_threshold or profit_rate <= current_stop:
                     # 确定卖出原因
                     if timing_result.is_sell:
                         reason = timing_result.message
                         signal_type = 'strategy_sell'
-                    elif profit_rate >= self.take_profit_threshold:
+                    elif profit_rate >= take_profit_threshold:
                         reason = f'止盈 (收益率: {profit_rate*100:.2f}%)'
                         signal_type = 'take_profit'
-                    elif enable_trailing_stop and current_stop > self.stop_loss_threshold:
-                        reason = f'移动止损 (收益率: {profit_rate*100:.2f}%, 止损线: {current_stop*100:.2f}%)'
+                    elif enable_trailing_stop and current_stop > stop_loss_threshold:
+                        reason = f'移动止损 (最高收益率: {highest_price_return:.2f}%, 当前收益率: {profit_rate*100:.2f}%, 止损线: {current_stop*100:.2f}%)'
                         signal_type = 'trailing_stop'
                     else:
                         reason = f'止损 (收益率: {profit_rate*100:.2f}%)'
                         signal_type = 'stop_loss'
+                    
+                    # 计算止损价
+                    stop_price = buy_price * (1 + current_stop)
+                    
+                    # 构建止损方式说明
+                    if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
+                        stop_method = f"移动止损(最高收益{highest_price_return:.2f}%-8%={current_stop*100:.2f}%)"
+                    else:
+                        stop_method = f"固定止损({base_stop_level}%)"
                     
                     # 记录卖出决策
                     logger.info(f"【卖出信号】{trade_date} {stock_code} {stock_name} | "
                                f"持仓: {position['quantity']}股 | "
                                f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
                                f"收益率: {profit_rate*100:.2f}% | "
+                               f"止损价: ¥{stop_price:.2f} [{stop_method}] | "
                                f"信号类型: {signal_type} | 原因: {reason}")
                     
                     signal = {
@@ -2119,7 +2698,8 @@ class StrategyRunner:
                         'date': trade_date,
                         'stock_code': stock_code,
                         'stock_name': stock_name,
-                        'signal_type': signal_type,
+                        'signal_type': 'sell',  # 统一为 'sell'，便于前端统计
+                        'sell_type': signal_type,  # 保存具体的卖出类型
                         'quantity': position['quantity'],
                         'price': current_price,
                         'amount': current_price * position['quantity'],
@@ -2130,24 +2710,80 @@ class StrategyRunner:
                         'executed': False,
                         'executed_date': None
                     }
+                    # 保存止损价到持仓
+                    position['stop_loss_price'] = round(stop_price, 2)
+                    
                     sell_signals.append(signal)
                     stocks_to_remove.append(stock_code)
+                    # 记录当日卖出的股票（用于限制当天卖出的股票不买入，且卖出后不算加仓）
+                    self._today_sold_stocks.add(stock_code)
                 else:
                     # 没有卖出信号，记录日志
                     # 计算止损价格（参考回测引擎逻辑）
                     stop_price = buy_price * (1 + current_stop)
-                    logger.info(f"【无卖出信号】{trade_date} {stock_code} {stock_name} | "
-                               f"持仓: {position['quantity']}股 | "
-                               f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
-                               f"收益率: {profit_rate*100:.2f}% | "
-                               f"止损价: ¥{stop_price:.2f} | "
-                               f"择时卖出: {timing_result.is_sell} | 止盈未触发 | 止损未触发")
+                    # 构建止损方式说明
+                    if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
+                        stop_method = f"移动止损(最高收益{highest_price_return:.2f}%-8%={current_stop*100:.2f}%)"
+                    else:
+                        stop_method = f"固定止损({base_stop_level}%)"
+                    
+                    # 保存止损价到持仓
+                    position['stop_loss_price'] = round(stop_price, 2)
+                    
+                    # 持仓过期检查
+                    if enable_position_expire and profit_rate <= position_expire_return_threshold:
+                        # 计算持有天数
+                        hold_days = self._calculate_hold_days(position.get('buy_date', ''), trade_date)
+                        if hold_days > position_expire_hold_days:
+                            reason = f'持仓过期 (持有{hold_days}天, 收益率{profit_rate*100:.2f}%<={position_expire_return_threshold*100:.0f}%)'
+                            signal_type = 'position_expire'
+                            
+                            signal = {
+                                'id': f"sell_{stock_code}_{trade_date}",
+                                'date': trade_date,
+                                'stock_code': stock_code,
+                                'stock_name': stock_name,
+                                'signal_type': 'sell',
+                                'sell_type': signal_type,
+                                'quantity': position['quantity'],
+                                'price': current_price,
+                                'amount': current_price * position['quantity'],
+                                'profit_rate': profit_rate,
+                                'reason': reason,
+                                'strategy_name': position.get('strategy_name', 'N/A'),
+                                'timing_strategy': self.timing_strategy_name,
+                                'executed': False,
+                                'executed_date': None
+                            }
+                            
+                            logger.info(f"【卖出信号】{trade_date} {stock_code} {stock_name} | "
+                                       f"持仓: {position['quantity']}股 | "
+                                       f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
+                                       f"收益率: {profit_rate*100:.2f}% | "
+                                       f"信号类型: {signal_type} | 原因: {reason}")
+                            
+                            sell_signals.append(signal)
+                            stocks_to_remove.append(stock_code)
+                            self._today_sold_stocks.add(stock_code)
+                        else:
+                            logger.info(f"【无卖出信号】{trade_date} {stock_code} {stock_name} | "
+                                       f"持仓: {position['quantity']}股 | "
+                                       f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
+                                       f"收益率: {profit_rate*100:.2f}% | "
+                                       f"止损价: ¥{stop_price:.2f} [{stop_method}] | "
+                                       f"择时卖出: {timing_result.is_sell} | 止盈未触发 | 止损未触发 | 持仓过期未触发(持{hold_days}天)")
+                    else:
+                        logger.info(f"【无卖出信号】{trade_date} {stock_code} {stock_name} | "
+                                   f"持仓: {position['quantity']}股 | "
+                                   f"成本: ¥{buy_price:.2f} | 现价: ¥{current_price:.2f} | "
+                                   f"收益率: {profit_rate*100:.2f}% | "
+                                   f"止损价: ¥{stop_price:.2f} [{stop_method}] | "
+                                   f"择时卖出: {timing_result.is_sell} | 止盈未触发 | 止损未触发")
             
-            # 执行卖出操作
-            for stock_code in stocks_to_remove:
-                del self.portfolio[stock_code]
+            # 注意：不立即删除持仓，只生成卖出信号
+            # 持仓将在实际执行卖出信号时（T+1日）才被删除
             
-            # ========== 新增：卖出后更新冷却池和连续亏损计数 ==========
+            # ========== 更新冷却池和连续亏损计数（基于生成的卖出信号）==========
             for sell_signal in sell_signals:
                 stock_code = sell_signal['stock_code']
                 profit_rate = sell_signal['profit_rate'] if 'profit_rate' in sell_signal else 0
@@ -2181,7 +2817,7 @@ class StrategyRunner:
                 # 两个条件独立判断：单笔亏损超8% 或 连续两次亏损
                 if enable_loss_cool_down and profit_rate * 100 <= cool_down_threshold:
                     # 检查是否已经在冷却期，避免重复记录
-                    if not self._is_stock_cooling(stock_code):
+                    if not self._check_cool_down(stock_code, trade_date):
                         cool_down_end = self._get_future_trading_day(trade_date, cool_down_days)
                         # 更新股票池中的冷却状态
                         self._update_stock_cool_down_status(stock_code, True, cool_down_end)
@@ -2189,6 +2825,11 @@ class StrategyRunner:
             # ========== 冷却池和连续亏损计数更新结束 ==========
             
             logger.info(f"【卖出汇总】{trade_date} 执行卖出操作，生成 {len(sell_signals)} 个卖出信号，共检查 {len(self.portfolio) + len(stocks_to_remove)} 只持仓")
+            
+            # 保存更新后的持仓（包含现价更新）
+            portfolio_file = self.running_dir / f"portfolio_{trade_date}.json"
+            self._save_portfolio(self.portfolio, str(portfolio_file))
+            
         except Exception as e:
             logger.error(f"执行卖出操作失败: {str(e)}")
             import traceback
@@ -2242,19 +2883,20 @@ class StrategyRunner:
                 score = stock_info.get('score', 0)
                 
                 # ========== 检查冷却期 ==========
-                # 加入冷却池的条件（卖出执行时处理）：
-                # 1. 单次亏损超过8%
-                # 2. 连续两次亏损
-                # 连续亏损达到限制后会自动加入冷却池，因此只需要检查冷却池即可
-                enable_loss_cool_down = self.config.get('enable_loss_cool_down', True)
-                enable_consecutive_loss_limit = self.config.get('enable_consecutive_loss_limit', True)
-                
-                if enable_loss_cool_down or enable_consecutive_loss_limit:
-                    if self._check_cool_down(stock_code, trade_date):
-                        cool_down_end = self.loss_cool_down_pool.get(stock_code, 'N/A')
-                        logger.info(f"【买入检查】{trade_date} {stock_code} 在冷却期内（至 {cool_down_end}），跳过")
-                        continue
+                # 统一检查：只要在冷却期内（is_cooling=True），就不买入
+                if candidate.get('is_cooling', False):
+                    cool_down_end = candidate.get('cool_down_end', 'N/A')
+                    logger.info(f"【买入检查】{trade_date} {stock_code} 在冷却期内（至 {cool_down_end}），跳过")
+                    continue
                 # ========== 冷却期检查结束 ==========
+                
+                # ========== 检查当日是否卖出 ==========
+                # 当日卖出的股票当日不买入（参考回测引擎逻辑）
+                today_sold_stocks = getattr(self, '_today_sold_stocks', set())
+                if stock_code in today_sold_stocks:
+                    logger.info(f"【买入检查】{trade_date} {stock_code} 当日已卖出，跳过买入")
+                    continue
+                # ========== 当日卖出检查结束 ==========
                 
                 # 获取股票数据（优先从缓存获取）
                 df = self.stock_filtered_cache.get(stock_code)
@@ -2307,12 +2949,21 @@ class StrategyRunner:
                         # 加仓：使用策略返回的买入数量
                         buy_quantity = timing_result.buy_quantity
                         quantity_source = '择时策略（加仓）'
+                        trade_type = 'add'  # 加仓
                     else:
                         # 首次建仓：使用凯莉公式计算
+                        trade_type = 'first'  # 首次建仓
                         strategy_name = candidate.get('strategy_name', 'N/A')
                         
-                        # 使用初始化时计算的总资产
-                        total_assets = getattr(self, 'current_total_assets', current_cash)
+                        # 计算总资产 = 可用现金 + 所有持仓的当前市值
+                        # 参考回测引擎的计算方式
+                        total_assets = current_cash  # 可用现金
+                        for code, pos in self.portfolio.items():
+                            # 使用持仓中已有的当前价格，若不存在则使用买入价
+                            pos_price = pos.get('current_price', pos.get('buy_price', 0))
+                            total_assets += pos['quantity'] * pos_price
+                        
+                        logger.info(f"【总资产计算】{trade_date} 可用现金: ¥{current_cash:.2f}, 持仓市值: ¥{total_assets - current_cash:.2f}, 总资产: ¥{total_assets:.2f}")
                         
                         position_amount = KellyCalculator.calculate_position_amount(
                             total_capital=total_assets,
@@ -2341,6 +2992,7 @@ class StrategyRunner:
                         'stock_code': stock_code,
                         'stock_name': stock_name,
                         'signal_type': 'buy',
+                        'trade_type': trade_type,  # 标记是首次建仓还是加仓
                         'quantity': buy_quantity,
                         'price': current_price,
                         'amount': current_price * buy_quantity,
@@ -2409,7 +3061,14 @@ class StrategyRunner:
             logger.info(f"run_strategy 传入的selection_date: {config.get('selection_date')}")
 
             # 如果 config 中没有提供参数，则从回测配置获取
-            if not config.get('initial_capital') or not config.get('max_daily_buys') or not config.get('score_threshold'):
+            need_backtest_config = (
+                not config.get('initial_capital') or 
+                not config.get('max_daily_buys') or 
+                not config.get('score_threshold') or
+                'take_profit' not in config or
+                'stop_loss' not in config
+            )
+            if need_backtest_config:
                 backtest_config = self._get_backtest_config()
                 if backtest_config:
                     logger.info(f"从回测配置获取参数: {backtest_config}")
@@ -2417,14 +3076,18 @@ class StrategyRunner:
                     logger.info(f"合并后的config: {config}")
             
             # 获取配置参数（与回测引擎保持一致）
-            initial_capital = config.get('initial_capital', 300000)
-            max_daily_buys = config.get('max_daily_buys', 8)  # 使用 max_daily_buys，与回测一致
-            score_threshold = config.get('score_threshold', 60)
+            initial_capital = config.get('initial_capital', self._DEFAULT_CONFIG['initial_capital'])
+            max_daily_buys = config.get('max_daily_buys', self._DEFAULT_CONFIG['max_daily_buys'])
+            score_threshold = config.get('score_threshold', self._DEFAULT_CONFIG['score_threshold'])
+            take_profit = config.get('take_profit', self._DEFAULT_CONFIG['take_profit'])
+            stop_loss = config.get('stop_loss', self._DEFAULT_CONFIG['stop_loss'])
             
             # 将参数存入 config，确保后续代码可以使用
             config['initial_capital'] = initial_capital
             config['max_daily_buys'] = max_daily_buys
             config['score_threshold'] = score_threshold
+            config['take_profit'] = take_profit
+            config['stop_loss'] = stop_loss
 
             # 确定工作日期（优先使用config中的selection_date）
             if config.get('selection_date'):
@@ -2458,7 +3121,6 @@ class StrategyRunner:
             # 检查是否已处理（日期层面的检查，避免重复执行）
             if self.check_if_processed(working_date):
                 logger.info(f"日期 {working_date} 已处理，直接返回结果")
-                _strategy_run_lock.release()
                 return {"status": "success", "message": "日期已处理", "data": {"date": working_date}}
             
             # 检查是否已处理（策略层面的检查）
@@ -2510,6 +3172,25 @@ class StrategyRunner:
                 turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
                 strategy_params.update(turtle_specific_params)
             
+            # 打印策略参数（在任务执行前）
+            logger.info("=" * 80)
+            logger.info(f"策略参数配置 - 择时策略: {timing_strategy_name}")
+            logger.info("=" * 80)
+            logger.info(f"传入的config参数: {config}")
+            logger.info(f"择时策略参数 (timing_params): {timing_params}")
+            logger.info(f"最终使用的策略参数 (strategy_params): {strategy_params}")
+            if timing_strategy_name == 'turtle':
+                logger.info(f"海龟策略详细参数:")
+                logger.info(f"  n_entry: {strategy_params.get('n_entry')}")
+                logger.info(f"  n_exit: {strategy_params.get('n_exit')}")
+                logger.info(f"  atr_period: {strategy_params.get('atr_period')}")
+                logger.info(f"  entry_atr: {strategy_params.get('entry_atr')}")
+                logger.info(f"  add_atr: {strategy_params.get('add_atr')}")
+                logger.info(f"  exit_atr: {strategy_params.get('exit_atr')}")
+                logger.info(f"  base_position_amount: {strategy_params.get('base_position_amount')}")
+                logger.info(f"  preset: {strategy_params.get('preset')}")
+            logger.info("=" * 80)
+            
             self.timing_strategy = TimingStrategyFactory.create_strategy(
                 timing_strategy_name, strategy_params
             )
@@ -2543,12 +3224,14 @@ class StrategyRunner:
             # 2. 检查股票池移除条件（破支撑位、趋势验证）
             logger.info(f"【股票池移除检查】开始检查股票池移除条件，当前股票池数量: {len(self.buy_candidate_pool)}")
             removed = self._check_pool_removal(working_date)
+            removed_count = len(removed) if removed else 0
             if removed:
-                logger.info(f"【股票池移除完成】移除 {len(removed)} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
+                logger.info(f"【股票池移除完成】移除 {removed_count} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
             else:
                 logger.info(f"【股票池移除完成】未移除任何股票，股票池数量保持: {len(self.buy_candidate_pool)} 只")
             
             # 3. 继续选股，加入新股票（仅非首次运行时执行，首次运行已在初始化阶段完成）
+            added_count = 0
             if not is_first_run:
                 selection_date_str = working_date
                 
@@ -2583,6 +3266,7 @@ class StrategyRunner:
                                 'support_level': support_level,
                                 'support_method': support_method
                             })
+                            added_count += 1
             
             logger.info(f"选股后股票池数量: {len(self.buy_candidate_pool)}")
             
@@ -2592,7 +3276,7 @@ class StrategyRunner:
             # ========== T日盘后：生成交易信号 ==========
             
             # 5. 卖出操作（生成卖出信号）
-            sell_signals = self._execute_sell_operations(working_date)
+            sell_signals = self._execute_sell_operations(working_date, config)
             
             # 6. 买入操作（生成买入信号，不限制资金和次数）
             buy_signals = self._execute_buy_operations(working_date, initial_capital, check_capital=False)
@@ -2604,22 +3288,24 @@ class StrategyRunner:
                 "status": "completed",
                 "is_first_run": is_first_run,
                 "pool_summary": {
-                    "stock_count": len(self.buy_candidate_pool),  # 只统计候选股票数量
-                    "removed_count": removed_count if 'removed_count' in locals() else 0,
-                    "added_count": added_count if 'added_count' in locals() else 0
+                    "stock_count": len(self.buy_candidate_pool),
+                    "removed_count": removed_count if 'removed_count' in locals() and removed_count is not None else 0,
+                    "added_count": added_count if 'added_count' in locals() and added_count is not None else 0
                 },
                 "pool_stocks": [
                     {
                         "code": candidate['stock']['stock_code'],
                         "name": candidate['stock']['stock_name'],
                         "score": candidate['stock'].get('score', 0),
-                        "days": (datetime.datetime.strptime(working_date, '%Y-%m-%d') - 
+                        "days": (datetime.datetime.strptime(working_date, '%Y-%m-%d') -
                                 datetime.datetime.strptime(candidate.get('added_date', working_date), '%Y-%m-%d')).days + 1,
                         "added_date": candidate.get('added_date', working_date),
                         "support_level": candidate.get('support_level', 0),
                         "support_method": candidate.get('support_method', ''),
                         "strategy": candidate.get('strategy_name', ''),
-                        "status": "candidate"
+                        "status": "candidate",
+                        "is_cooling": candidate.get('is_cooling', False),
+                        "cool_down_end": candidate.get('cool_down_end', None)
                     } for candidate in self.buy_candidate_pool
                 ] + [
                     {
@@ -2690,12 +3376,35 @@ class StrategyRunner:
             批量执行结果
         """
         # 检查是否正在执行（防止并发）
+        logger.info(f"检查执行状态: _is_running={StrategyRunner._is_running}, 锁状态={_strategy_run_lock.locked()}")
         if StrategyRunner._is_running:
             logger.warning("策略正在执行中，拒绝重复请求")
             return {
                 "status": "failed",
                 "message": "策略正在执行中，请等待当前任务完成"
             }
+        
+        # 检查所有任务的择时策略是否一致
+        if len(tasks) > 1:
+            timing_strategies = []
+            for task in tasks:
+                timing_strategy = task.get('timing_strategy', 'support')
+                timing_strategies.append(timing_strategy)
+            
+            unique_timing_strategies = list(set(timing_strategies))
+            if len(unique_timing_strategies) > 1:
+                StrategyRunner._is_running = False
+                error_msg = (
+                    f"检测到多个不同的择时策略: {unique_timing_strategies}。"
+                    f"策略运行器当前只支持所有任务使用相同的择时策略。"
+                    f"请修改任务配置，确保所有任务使用相同的择时策略后重新执行。"
+                )
+                logger.error(error_msg)
+                return {
+                    "status": "failed",
+                    "message": error_msg
+                }
+            logger.info(f"所有 {len(tasks)} 个任务使用相同的择时策略: {unique_timing_strategies[0]}")
         
         StrategyRunner._is_running = True
         
@@ -2714,13 +3423,27 @@ class StrategyRunner:
             self.stock_filtered_cache.clear()
             self.buy_candidate_pool = []
             
-            # 获取配置参数
-            initial_capital = config.get('initial_capital', 300000)
-            max_daily_buys = config.get('max_daily_buys', 8)
-            score_threshold = config.get('score_threshold', 60)
+            # 获取配置参数（与回测引擎保持一致）
+            # 优先使用用户传入的config，其次从回测配置获取，最后使用默认值
+            initial_capital = config.get('initial_capital', self._DEFAULT_CONFIG['initial_capital'])
+            max_daily_buys = config.get('max_daily_buys', self._DEFAULT_CONFIG['max_daily_buys'])
+            score_threshold = config.get('score_threshold', self._DEFAULT_CONFIG['score_threshold'])
+            
+            # 如果 config 中没有提供止盈止损参数，则从回测配置获取
+            if 'take_profit' not in config or 'stop_loss' not in config:
+                backtest_config = self._get_backtest_config()
+                if backtest_config:
+                    config = {**backtest_config, **config}  # config 中的值优先
+            
+            # 确保止盈止损参数存在
+            take_profit = config.get('take_profit', self._DEFAULT_CONFIG['take_profit'])
+            stop_loss = config.get('stop_loss', self._DEFAULT_CONFIG['stop_loss'])
+            
             config['initial_capital'] = initial_capital
             config['max_daily_buys'] = max_daily_buys
             config['score_threshold'] = score_threshold
+            config['take_profit'] = take_profit
+            config['stop_loss'] = stop_loss
             
             # 确定工作日期
             working_date = self.get_working_date()
@@ -2730,7 +3453,6 @@ class StrategyRunner:
             if self.check_if_processed(working_date):
                 logger.info(f"日期 {working_date} 已处理，直接返回结果")
                 StrategyRunner._is_running = False
-                _strategy_run_lock.release()
                 return {"status": "success", "message": "日期已处理", "data": {"date": working_date}}
             
             # 加载持仓信息
@@ -2779,6 +3501,42 @@ class StrategyRunner:
             if removed:
                 logger.info(f"股票池移除 {len(removed)} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
             
+            # 执行卖出操作（在选股之前，释放资金用于买入）
+            # 先初始化择时策略（使用第一个任务的择时策略）
+            if tasks:
+                first_task = tasks[0]
+                timing_strategy = first_task.get('timing_strategy', 'support')
+                timing_params = config.get('timing_params', {})
+                strategy_params = timing_params.get(timing_strategy, {})
+                
+                # 特殊处理：如果是海龟策略
+                if timing_strategy == 'turtle':
+                    turtle_specific_params = {
+                        'n_entry': config.get('n_entry'),
+                        'n_exit': config.get('n_exit'),
+                        'atr_period': config.get('atr_period'),
+                        'entry_atr': config.get('entry_atr'),
+                        'add_atr': config.get('add_atr'),
+                        'exit_atr': config.get('exit_atr'),
+                        'preset': config.get('turtle_preset'),
+                        'base_position_amount': config.get('base_position_amount')
+                    }
+                    turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
+                    strategy_params.update(turtle_specific_params)
+                
+                self.timing_strategy = TimingStrategyFactory.create_strategy(
+                    timing_strategy, strategy_params
+                )
+                self.timing_strategy_name = timing_strategy
+                self.timing_strategy_params = strategy_params
+            
+            sell_signals = self._execute_sell_operations(working_date, config)
+            logger.info(f"卖出操作完成，生成 {len(sell_signals)} 个卖出信号")
+            
+            # 初始化计数器
+            removed_count = 0
+            added_count = 0
+            
             # 顺序执行每个策略任务
             for idx, task in enumerate(tasks, 1):
                 selection_strategy = task.get('selection_strategy', task.get('strategy_names', ['ImmortalGuidanceStrategy']))
@@ -2807,6 +3565,18 @@ class StrategyRunner:
                         }
                         turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
                         strategy_params.update(turtle_specific_params)
+                    
+                    # 打印任务级别的策略参数
+                    logger.info("-" * 60)
+                    logger.info(f"任务 {idx}/{len(tasks)} 策略参数:")
+                    logger.info(f"  择时策略: {timing_strategy}")
+                    logger.info(f"  完整策略参数: {strategy_params}")
+                    if timing_strategy == 'turtle':
+                        logger.info(f"  海龟策略实际参数:")
+                        logger.info(f"    n_entry: {strategy_params.get('n_entry')}")
+                        logger.info(f"    n_exit: {strategy_params.get('n_exit')}")
+                        logger.info(f"    atr_period: {strategy_params.get('atr_period')}")
+                    logger.info("-" * 60)
                     
                     self.timing_strategy = TimingStrategyFactory.create_strategy(
                         timing_strategy, strategy_params
@@ -2851,6 +3621,7 @@ class StrategyRunner:
                         'pool_count': len(self.buy_candidate_pool),
                         'status': 'success'
                     })
+                    added_count += new_added
                     logger.info(f"{selection_strategy} 选出 {len(candidate_stocks)} 只股票，新增 {new_added} 只")
                     
                 except Exception as e:
@@ -2869,9 +3640,6 @@ class StrategyRunner:
             # 保存股票池
             self._save_pool_to_file(self.buy_candidate_pool, working_date)
             
-            # 执行卖出操作
-            sell_signals = self._execute_sell_operations(working_date)
-            
             # 执行买入操作
             buy_signals = self._execute_buy_operations(working_date, initial_capital)
             
@@ -2883,9 +3651,9 @@ class StrategyRunner:
                 "status": "completed",
                 "is_first_run": is_first_run,
                 "pool_summary": {
-                    "stock_count": len(self.buy_candidate_pool),  # 只统计候选股票数量
-                    "removed_count": removed_count if 'removed_count' in locals() else 0,
-                    "added_count": added_count if 'added_count' in locals() else 0
+                    "stock_count": len(self.buy_candidate_pool),
+                    "removed_count": removed_count if 'removed_count' in locals() and removed_count is not None else 0,
+                    "added_count": added_count if 'added_count' in locals() and added_count is not None else 0
                 },
                 "pool_stocks": [
                     {
@@ -2898,7 +3666,9 @@ class StrategyRunner:
                         "support_level": candidate.get('support_level', 0),
                         "support_method": candidate.get('support_method', ''),
                         "strategy": candidate.get('strategy_name', ''),
-                        "status": "candidate"
+                        "status": "candidate",
+                        "is_cooling": candidate.get('is_cooling', False),
+                        "cool_down_end": candidate.get('cool_down_end', None)
                     } for candidate in self.buy_candidate_pool
                 ] + [
                     {
@@ -2923,9 +3693,11 @@ class StrategyRunner:
             self._save_daily_record(working_date, daily_record, str(records_file))
             logger.info(f"每日记录已保存到: {records_file}")
             
+            # 确保信号文件路径正确
+            signals_file = self.running_dir / f"signals_{working_date}.json"
             self.signals.extend(signals)
             self._save_signals(self.signals, str(signals_file))
-            logger.info(f"信号已保存到: {signals_file}")
+            logger.info(f"信号已保存到: {signals_file}，卖出信号: {len(sell_signals)} 条，买入信号: {len(buy_signals)} 条")
             
             self._save_portfolio(self.portfolio, str(portfolio_file))
             logger.info(f"持仓信息已保存到: {portfolio_file}")
@@ -2995,9 +3767,22 @@ class StrategyRunner:
             self.stock_filtered_cache.clear()
             self.buy_candidate_pool = []
             
-            # 获取配置参数
-            initial_cash = config.get('initial_cash', 300000)
-            score_threshold = config.get('score_threshold', 60)
+            # 获取配置参数（与回测引擎保持一致）
+            # 优先使用用户传入的config，其次从回测配置获取，最后使用默认值
+            initial_cash = config.get('initial_cash', self._DEFAULT_CONFIG['initial_capital'])
+            score_threshold = config.get('score_threshold', self._DEFAULT_CONFIG['score_threshold'])
+            
+            # 如果 config 中没有提供止盈止损参数，则从回测配置获取
+            if 'take_profit' not in config or 'stop_loss' not in config:
+                backtest_config = self._get_backtest_config()
+                if backtest_config:
+                    config = {**backtest_config, **config}  # config 中的值优先
+            
+            # 确保止盈止损参数存在
+            if 'take_profit' not in config:
+                config['take_profit'] = self._DEFAULT_CONFIG['take_profit']
+            if 'stop_loss' not in config:
+                config['stop_loss'] = self._DEFAULT_CONFIG['stop_loss']
             
             # 确定工作日期
             working_date = self.get_working_date()
@@ -3019,6 +3804,10 @@ class StrategyRunner:
             
             # 记录每个组合的执行结果
             combination_results = []
+            
+            # 初始化计数器
+            removed_count = 0
+            added_count = 0
             
             # 顺序执行每个策略组合
             for idx, combination in enumerate(enabled_combinations, 1):
@@ -3071,6 +3860,7 @@ class StrategyRunner:
                 logger.info(f"{selection_strategy} 选出 {len(candidate_stocks)} 只股票")
                 
                 # 将选出的股票加入股票池
+                new_added = 0
                 for stock in candidate_stocks:
                     # 检查是否已在池中
                     exists = any(item['stock']['stock_code'] == stock['stock_code'] for item in self.buy_candidate_pool)
@@ -3096,10 +3886,14 @@ class StrategyRunner:
                             'support_level': support_level,
                             'support_method': support_method
                         })
+                        new_added += 1
+                
+                added_count += new_added
                 
                 # 检查股票池移除条件
                 removed = self._check_pool_removal(working_date)
                 if removed:
+                    removed_count += len(removed)
                     logger.info(f"股票池移除 {len(removed)} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
                 
                 # 记录组合执行结果
@@ -3117,8 +3911,8 @@ class StrategyRunner:
             
             # ========== 执行交易操作 ==========
             
-            # 卖出操作
-            sell_signals = self._execute_sell_operations(working_date)
+            # 卖出操作（传递config以获取止盈止损参数）
+            sell_signals = self._execute_sell_operations(working_date, config)
             
             # 买入操作
             buy_signals = self._execute_buy_operations(working_date, initial_cash)
@@ -3132,9 +3926,9 @@ class StrategyRunner:
                 "plan_name": plan.name,
                 "is_first_run": is_first_run,
                 "pool_summary": {
-                    "stock_count": len(self.buy_candidate_pool),  # 只统计候选股票数量
-                    "removed_count": removed_count if 'removed_count' in locals() else 0,
-                    "added_count": added_count if 'added_count' in locals() else 0
+                    "stock_count": len(self.buy_candidate_pool),
+                    "removed_count": removed_count if 'removed_count' in locals() and removed_count is not None else 0,
+                    "added_count": added_count if 'added_count' in locals() and added_count is not None else 0
                 },
                 "pool_stocks": [
                     {
@@ -3147,7 +3941,9 @@ class StrategyRunner:
                         "support_level": candidate.get('support_level', 0),
                         "support_method": candidate.get('support_method', ''),
                         "strategy": candidate.get('strategy_name', ''),
-                        "status": "candidate"
+                        "status": "candidate",
+                        "is_cooling": candidate.get('is_cooling', False),
+                        "cool_down_end": candidate.get('cool_down_end', None)
                     } for candidate in self.buy_candidate_pool
                 ] + [
                     {
