@@ -2,6 +2,15 @@
 # 说明：配置哪些选股策略需要执行股票池移除，以及移除条件的参数
 # 择时策略（TurtleStrategy、SupportStrategy等）不用于选股，不参与股票池移除
 
+# 资金流向移除规则全局配置
+# 当股票同时满足以下两个条件时，将被移除出股票池：
+# 1. 5日主力资金累计净流入 < -10000万元
+# 2. 大单净流出 且 小单净流入（出货信号）
+fund_flow_rules:
+  is_enabled: true                    # 是否启用资金流向检查
+  net_flow_threshold: -10000          # 5日主力净额阈值（万元）
+  min_hold_days: 1                   # 加入股票池多少天后开始检查
+
 removal_strategies:
   # 仙人指路策略
   ImmortalGuidanceStrategy:
@@ -41,7 +50,7 @@ removal_strategies:
   # 多方炮策略
   MultiPartyCannonStrategy:
     display_name: "多方炮策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池7天后验证趋势"
 
@@ -79,3 +88,18 @@ removal_strategies:
     min_hold_days: 30
     is_enabled: true
     remark: "加入股票池5天后验证趋势"
+
+  # 2560战法选股策略
+  Strategy2560Selection:
+    display_name: "2560战法选股策略"
+    min_hold_days: 30
+    is_enabled: true
+    remark: "加入股票池7天后验证趋势"
+
+  # 趋势起点策略
+  TrendStartStrategy:
+    display_name: "趋势起点策略"
+    min_hold_days: 30
+    is_enabled: true
+    remark: "加入股票池7天后验证趋势"
+

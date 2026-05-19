@@ -9,8 +9,8 @@ strategies:
     description: W底策略
 
   ImmortalGuidanceStrategy:
-    win_rate: 0.28
-    profit_loss_ratio: 3.2
+    win_rate: 0.3
+    profit_loss_ratio: 3.3
     description: 仙人指路策略
 
   LimitUpPullbackStrategy:
@@ -19,13 +19,13 @@ strategies:
     description: 涨停回调策略
 
   LimitUpSidewaysStrategy:
-    win_rate: 0.3
-    profit_loss_ratio: 3.2
+    win_rate: 0.28
+    profit_loss_ratio: 3.4
     description: 涨停横盘策略
 
   MorningStarStrategy:
-    win_rate: 0.25
-    profit_loss_ratio: 3.5
+    win_rate: 0.28
+    profit_loss_ratio: 3.3
     description: 启明星策略
 
   BottomTrendInflectionStrategy:
@@ -44,19 +44,29 @@ strategies:
     description: 强洗弱转强策略
 
   MultiGoldenCrossStrategy:
-    win_rate: 0.3
-    profit_loss_ratio: 3.4
+    win_rate: 0.28
+    profit_loss_ratio: 3.2
     description: 多金叉共振策略
 
   MultiPartyCannonStrategy:
-    win_rate: 0.25
-    profit_loss_ratio: 3.5
+    win_rate: 0.3
+    profit_loss_ratio: 3.3
     description: 多方炮策略
 
   TrendAccelerationInflectionStrategy:
     win_rate: 0.25
     profit_loss_ratio: 3.5
     description: 趋势加速拐点策略
+
+  Strategy2560Selection:
+    win_rate: 0.28
+    profit_loss_ratio: 3.2
+    description: 2560战法选股策略
+
+  TrendStartStrategy:
+    win_rate: 0.28
+    profit_loss_ratio: 3.3
+    description: 趋势起点策略
 
   _default_:
     win_rate: 0.28

@@ -67,6 +67,16 @@ strategies:
     support_method: ma20
     description: 深度下跌后底部反转，使用20日均线作为支撑位
 
+  # 2560战法选股策略
+  Strategy2560Selection:
+    support_method: ma20
+    description: 2560战法选股策略，使用20日均线作为支撑位
+
+  # 趋势起点策略
+  TrendStartStrategy:
+    support_method: ma20
+    description: 趋势起点策略，使用20日均线作为支撑位
+
 # 默认支撑位计算方法（当策略未配置时使用）
 default_support_method: ma20
 

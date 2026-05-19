@@ -155,9 +155,9 @@ class BaseStrategy(ABC):
         if not self._validate_data(df):
             return []
 
-        # 停牌股检查：如果selection_date当天没有K线数据，则跳过
-        if selection_date and self._is_suspended(df, selection_date):
-            return []
+        # 停牌股检查已禁用 - 暂时跳过此检查以避免非交易日无法选股
+        # if selection_date and self._is_suspended(df, selection_date):
+        #     return []
 
         if hasattr(self, '_quick_filter_with_lookback'):
             if not self._quick_filter_with_lookback(df):
