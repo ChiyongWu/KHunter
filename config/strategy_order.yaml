@@ -76,7 +76,7 @@ strategy_order:
   - order: 16
     name: TrendStartStrategy
     display_name: 趋势起点策略
-    description: MACD在0轴上方金叉+布林带上穿中轨，识别趋势启动信号
+    description: 今日MACD在0轴上方金叉+今日布林带上穿中轨，识别趋势启动信号
 
   - order: 30
     name: MA20MA60Strategy

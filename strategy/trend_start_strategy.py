@@ -1,14 +1,9 @@
 """
 趋势起点策略 - MACD金叉+布林带上穿中轨
 
-策略逻辑：
-1. MACD金叉在0轴上方：DIF从下往上穿越DEA线，且DIF值 > 0
+策略逻辑（今天同时满足）：
+1. MACD金叉在0轴上方：DIF > 0 且 DIF从下往上穿越DEA
 2. 布林带上穿中轨：收盘价从下往上穿越BOLL中轨
-
-时间窗口（今天或昨天）：
-- 情况1: 今日MACD金叉 AND 今日布林带上穿中轨
-- 情况2: 今日MACD金叉 AND 昨日布林带上穿中轨
-- 情况3: 昨日MACD金叉 AND 今日布林带上穿中轨
 
 参数（与顺势宝策略保持一致）：
 - macd_fast: 12
@@ -162,46 +157,32 @@ class TrendStartStrategy(BaseStrategy):
         """
         检查是否满足趋势起点形态
         
+        规则：今天同时满足
+        1. MACD金叉在0轴上方（DIF > 0 且 DIF上穿DEA）
+        2. 布林带上穿中轨（收盘价从下往上穿越中轨）
+        
         数据排列：倒序（最新在前）
         - df.iloc[0] = 今天（T日）
         - df.iloc[1] = 昨天（T-1日）
-        - df.iloc[2] = 前天（T-2日）
         
         Returns:
             信号信息字典，如果满足条件的话
         """
-        # 获取近3天数据
-        if len(df) < 3:
+        if len(df) < 2:
             return None
         
         today = df.iloc[0]      # 今天
         yesterday = df.iloc[1]  # 昨天
-        day_before = df.iloc[2]  # 前天
         
-        # 计算MACD金叉条件
-        # 情况1: 今日MACD金叉
+        # 检查今日MACD金叉（需DIF>0）
         today_macd_cross = self._is_macd_cross(today, yesterday)
-        # 情况2: 昨日MACD金叉
-        yesterday_macd_cross = self._is_macd_cross(yesterday, day_before)
         
-        # 计算布林带上穿中轨条件
-        # 情况1: 今日布林带上穿中轨
+        # 检查今日布林带上穿中轨
         today_boll_cross = self._is_boll_cross_mid(df, 0)
-        # 情况2: 昨日布林带上穿中轨
-        yesterday_boll_cross = self._is_boll_cross_mid(df, 1)
         
-        # 检查三种情况
-        # 情况1: 今日MACD金叉 AND 今日布林带上穿中轨
+        # 今天同时满足两个条件
         if today_macd_cross and today_boll_cross:
             return self._build_signal(df, 0, 'today_macd_today_boll')
-        
-        # 情况2: 今日MACD金叉 AND 昨日布林带上穿中轨
-        if today_macd_cross and yesterday_boll_cross:
-            return self._build_signal(df, 0, 'today_macd_yesterday_boll')
-        
-        # 情况3: 昨日MACD金叉 AND 今日布林带上穿中轨
-        if yesterday_macd_cross and today_boll_cross:
-            return self._build_signal(df, 0, 'yesterday_macd_today_boll')
         
         return None
     
