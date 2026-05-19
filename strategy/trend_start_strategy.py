@@ -4,6 +4,9 @@
 策略逻辑（今天同时满足）：
 1. MACD金叉在0轴上方：DIF > 0 且 DIF从下往上穿越DEA
 2. 布林带上穿中轨：收盘价从下往上穿越BOLL中轨
+3. 当日阳线：收盘价 > 开盘价
+4. 站上5日线：收盘价 > MA5
+5. 成交量放大：今日成交量 > 1.2倍5日均量
 
 参数（与顺势宝策略保持一致）：
 - macd_fast: 12
@@ -11,6 +14,8 @@
 - macd_signal: 9
 - boll_period: 20
 - boll_multiplier: 2
+- ma5_period: 5      # 5日均线周期
+- volume_ratio: 1.2  # 成交量放大倍数
 """
 import pandas as pd
 import sys
@@ -31,6 +36,8 @@ class TrendStartStrategy(BaseStrategy):
             'macd_signal': 9,       # MACD信号线周期
             'boll_period': 20,      # 布林带周期
             'boll_multiplier': 2,   # 布林带标准差倍数
+            'ma5_period': 5,        # 5日均线周期
+            'volume_ratio': 1.2,    # 成交量放大倍数
         }
         
         # 合并用户参数
@@ -76,6 +83,11 @@ class TrendStartStrategy(BaseStrategy):
         result['boll_upper'] = mid + boll_multiplier * std
         result['boll_lower'] = mid - boll_multiplier * std
         
+        # 计算5日均线和5日均量
+        ma5_period = self.params['ma5_period']
+        result['ma5'] = result['close'].rolling(window=ma5_period).mean()
+        result['ma5_volume'] = result['volume'].rolling(window=ma5_period).mean()
+        
         # 填充缺失值
         result = result.ffill().bfill()
         
@@ -93,7 +105,9 @@ class TrendStartStrategy(BaseStrategy):
             f"布林带参数: period={self.params['boll_period']}, multiplier={self.params['boll_multiplier']}",
             "1. MACD金叉在0轴上方：DIF > DEA 且 DIF > 0",
             "2. 布林带上穿中轨：收盘价从下往上穿越BOLL中轨",
-            "3. 时间窗口：今天或昨天（金叉与上穿前后一天内均可）",
+            "3. 当日阳线：收盘价 > 开盘价",
+            "4. 站上5日线：收盘价 > MA5",
+            "5. 成交量放大：今日成交量 > 1.2倍5日均量",
         ]
     
     def select_stocks(self, df, stock_name='') -> list:
@@ -141,10 +155,13 @@ class TrendStartStrategy(BaseStrategy):
             if market_cap_val is None:
                 market_cap_val = latest['close'] * 2e8
             
+            # 计算实际成交量比
+            actual_volume_ratio = latest['volume'] / latest['ma5_volume'] if latest['ma5_volume'] > 0 else 1.0
+            
             signal_info.update({
                 'date': latest_date,
                 'close': round(latest['close'], 2),
-                'volume_ratio': 1.0,
+                'volume_ratio': round(actual_volume_ratio, 2),
                 'market_cap': round(market_cap_val / 1e8, 2),
                 'key_date': signal_info.get('key_date', str(latest_date)[:10]),
                 'key_date_type': '趋势起点确认日',
@@ -160,6 +177,9 @@ class TrendStartStrategy(BaseStrategy):
         规则：今天同时满足
         1. MACD金叉在0轴上方（DIF > 0 且 DIF上穿DEA）
         2. 布林带上穿中轨（收盘价从下往上穿越中轨）
+        3. 当日阳线（收盘价 > 开盘价）
+        4. 站上5日线（收盘价 > MA5）
+        5. 成交量放大（今日成交量 > 1.2倍5日均量）
         
         数据排列：倒序（最新在前）
         - df.iloc[0] = 今天（T日）
@@ -168,7 +188,7 @@ class TrendStartStrategy(BaseStrategy):
         Returns:
             信号信息字典，如果满足条件的话
         """
-        if len(df) < 2:
+        if len(df) < 6:  # 需要至少6天数据计算5日均线和均量
             return None
         
         today = df.iloc[0]      # 今天
@@ -180,8 +200,18 @@ class TrendStartStrategy(BaseStrategy):
         # 检查今日布林带上穿中轨
         today_boll_cross = self._is_boll_cross_mid(df, 0)
         
-        # 今天同时满足两个条件
-        if today_macd_cross and today_boll_cross:
+        # 检查当日阳线（收盘 > 开盘）
+        is_bullish = today['close'] > today['open']
+        
+        # 检查站上5日线（收盘 > MA5）
+        above_ma5 = today['close'] > today['ma5']
+        
+        # 检查成交量放大（今日 > 1.2倍5日均量）
+        volume_ratio = self.params['volume_ratio']
+        volume_enough = today['volume'] > today['ma5_volume'] * volume_ratio
+        
+        # 今天同时满足所有条件
+        if today_macd_cross and today_boll_cross and is_bullish and above_ma5 and volume_enough:
             return self._build_signal(df, 0, 'today_macd_today_boll')
         
         return None
@@ -254,9 +284,7 @@ class TrendStartStrategy(BaseStrategy):
         
         # 信号原因描述
         reason_map = {
-            'today_macd_today_boll': '今日MACD金叉+今日布林带上穿中轨',
-            'today_macd_yesterday_boll': '今日MACD金叉+昨日布林带上穿中轨',
-            'yesterday_macd_today_boll': '昨日MACD金叉+今日布林带上穿中轨',
+            'today_macd_today_boll': '今日MACD金叉+布林带上穿+阳线+站上5日线+量能放大',
         }
         
         return {
@@ -267,6 +295,8 @@ class TrendStartStrategy(BaseStrategy):
                 'dif': round(today['dif'], 4),
                 'dea': round(today['dea'], 4),
                 'boll_mid': round(today['boll_mid'], 2),
+                'ma5': round(today['ma5'], 2),
                 'close': round(today['close'], 2),
+                'volume_ratio': round(today['volume'] / today['ma5_volume'], 2),
             }
         }
