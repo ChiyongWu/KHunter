@@ -141,7 +141,7 @@ class ShunShiBaoStrategy(TimingStrategy):
     
     def _check_add_signal(self, current: pd.Series, prev: pd.Series) -> bool:
         """判断加仓信号
-        条件：MACD多头 且 价格突破布林带上轨
+        条件：MACD持续强势 且 价格突破布林带上轨
         
         Args:
             current: 当前数据
@@ -150,9 +150,10 @@ class ShunShiBaoStrategy(TimingStrategy):
         Returns:
             是否满足加仓条件
         """
-        # MACD条件：多头状态（放宽条件）
+        # MACD条件：强势延续
         macd_add = (
             current['dif'] > 0 and                    # DIF在零轴上方
+            current['macd'] > prev['macd'] and        # MACD柱持续放大
             current['dif'] > current['dea']           # 保持金叉状态
         )
         
@@ -290,19 +291,11 @@ class ShunShiBaoStrategy(TimingStrategy):
                 result.message = "MACD零轴上方金叉且价格突破中轨，买入信号（稳健型）"
                 result.signal_strength = 1.0
                 result.trade_type = 'buy'
-                # 计算买入数量：使用底仓金额
-                trade_price = current['open']
-                buy_quantity = int(self.base_position_amount / trade_price) // 100 * 100
-                result.buy_quantity = max(buy_quantity, 100)
             elif self._check_buy_signal_2(current, prev):
                 result.is_buy = True
                 result.message = "MACD强势且价格突破上轨，买入信号（突破型）"
                 result.signal_strength = 0.8
                 result.trade_type = 'buy'
-                # 计算买入数量：使用底仓金额
-                trade_price = current['open']
-                buy_quantity = int(self.base_position_amount / trade_price) // 100 * 100
-                result.buy_quantity = max(buy_quantity, 100)
         else:
             # 有持仓：检查加仓信号或买入信号，都作为加仓处理
             if self._check_add_signal(current, prev):
