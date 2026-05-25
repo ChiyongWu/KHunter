@@ -480,7 +480,7 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
     def get_working_date(self) -> str:
         """获取工作日期
         
-        返回最近的可处理交易日。如果今天是交易日且已收盘（>= 15:00），返回今天；
+        返回最近的可处理交易日。如果今天是交易日且已收盘（>= 15:30），返回今天；
         否则返回最近的历史交易日。
         """
         now = datetime.datetime.now()
@@ -488,14 +488,14 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
         
         # 检查今天是否是交易日
         if is_trading_day(today):
-            # 如果时间在15:00之前，处理前一交易日的数据
-            if now.hour < 15:
+            # 如果时间在15:30之前，处理前一交易日的数据
+            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
                 prev_day = get_previous_trading_day(today)
-                logger.info(f"【工作日期】今日({today})是交易日但未收盘(当前{now.hour}:{now.minute:02d}< 15:00)，使用前一交易日: {prev_day}")
+                logger.info(f"【工作日期】今日({today})是交易日但未收盘(当前{now.hour}:{now.minute:02d}<15:30)，使用前一交易日: {prev_day}")
                 return prev_day
             else:
-                # 15:00及之后，处理当日数据
-                logger.info(f"【工作日期】今日({today})是交易日且已收盘(当前{now.hour}:{now.minute:02d}>=15:00)，使用今日作为工作日期")
+                # 15:30及之后，处理当日数据
+                logger.info(f"【工作日期】今日({today})是交易日且已收盘(当前{now.hour}:{now.minute:02d}>=15:30)，使用今日作为工作日期")
                 return today
         
         # 非交易日，返回最近的历史交易日
