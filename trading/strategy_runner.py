@@ -154,8 +154,8 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
             self.portfolio = portfolio_data.get('positions', {})
             self.signals = self._load_signals(str(signals_file))
             
-            # 从持仓数据中读取可用资金
-            available_cash = portfolio_data.get('cash', config.get('initial_capital', 1000000))
+            # 获取可用资金
+            available_cash = self._get_available_cash(portfolio_data, working_date, config)
             logger.info(f"可用资金: ¥{available_cash:,.2f}")
             
             # 初始化择时策略
@@ -565,8 +565,10 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
         
         if prev_portfolio_file.exists():
             portfolio_data = self._load_portfolio(str(prev_portfolio_file))
-            self._save_portfolio(portfolio_data.get('positions', {}), str(portfolio_file))
-            logger.info(f"【数据初始化】从 {prev_date} 继承持仓数据")
+            # 完整继承持仓数据，包括 cash、initial_capital 等字段
+            with open(portfolio_file, 'w', encoding='utf-8') as f:
+                json.dump(portfolio_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"【数据初始化】从 {prev_date} 完整继承持仓数据（positions, cash, initial_capital等）")
         
         if not signals_file.exists():
             self._save_signals([], str(signals_file))
@@ -574,6 +576,43 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
         
         self._initialized_dates.add(date)
         return True
+    
+    def _get_available_cash(self, portfolio_data: Dict, working_date: str, config: Dict) -> float:
+        """获取可用资金
+        
+        Args:
+            portfolio_data: 持仓数据
+            working_date: 工作日期
+            config: 配置信息
+            
+        Returns:
+            可用资金金额
+        """
+        # 优先从当前持仓文件读取 cash
+        if 'cash' in portfolio_data:
+            cash = portfolio_data['cash']
+            logger.info(f"从当前持仓文件读取可用资金: ¥{cash:,.2f}")
+            return cash
+        
+        # 如果当前文件没有 cash，尝试从前一天继承
+        logger.warning(f"当前持仓文件缺少 cash 字段，尝试从前一交易日继承")
+        prev_date = get_previous_trading_day(working_date)
+        prev_portfolio_file = self.running_dir / f"portfolio_{prev_date}.json"
+        
+        if prev_portfolio_file.exists():
+            try:
+                prev_portfolio_data = self._load_portfolio(str(prev_portfolio_file))
+                if 'cash' in prev_portfolio_data:
+                    cash = prev_portfolio_data['cash']
+                    logger.info(f"从前一交易日({prev_date})继承可用资金: ¥{cash:,.2f}")
+                    return cash
+            except Exception as e:
+                logger.error(f"从前一交易日加载持仓失败: {str(e)}")
+        
+        # 最后 fallback 到 initial_capital
+        initial_capital = portfolio_data.get('initial_capital', config.get('initial_capital', 1000000))
+        logger.warning(f"无法获取可用资金，使用初始资金: ¥{initial_capital:,.2f}")
+        return initial_capital
     
     def _get_backtest_config(self) -> Dict:
         """获取回测配置"""
