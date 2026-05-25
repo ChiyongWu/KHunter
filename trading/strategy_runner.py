@@ -480,40 +480,29 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
     def get_working_date(self) -> str:
         """获取工作日期
         
-        返回最近的可处理交易日。如果今天是交易日且已收盘（>= 15:30），返回今天；
-        否则返回最近的历史交易日（从信号文件中获取）。
+        返回最近的可处理交易日。如果今天是交易日且已收盘（>= 15:00），返回今天；
+        否则返回最近的历史交易日。
         """
         now = datetime.datetime.now()
         today = now.strftime('%Y-%m-%d')
         
-        # 检查今天是否是交易日，并且时间是否已过15:30收盘时间
+        # 检查今天是否是交易日
         if is_trading_day(today):
-            # 如果时间在15:30之前，即使今天是交易日，也应该处理前一交易日的数据
-            if now.hour >= 15 and now.minute >= 30:
-                logger.info(f"【工作日期】今日({today})是交易日且已收盘，使用今日作为工作日期")
-                return today
-            else:
-                # 还未收盘，使用前一交易日
+            # 如果时间在15:00之前，处理前一交易日的数据
+            if now.hour < 15:
                 prev_day = get_previous_trading_day(today)
-                logger.info(f"【工作日期】今日({today})是交易日但未收盘，使用前一交易日: {prev_day}")
+                logger.info(f"【工作日期】今日({today})是交易日但未收盘(当前{now.hour}:{now.minute:02d}< 15:00)，使用前一交易日: {prev_day}")
                 return prev_day
+            else:
+                # 15:00及之后，处理当日数据
+                logger.info(f"【工作日期】今日({today})是交易日且已收盘(当前{now.hour}:{now.minute:02d}>=15:00)，使用今日作为工作日期")
+                return today
         
-        # 非交易日，从信号文件中获取最新的日期
-        logger.info(f"【工作日期】今日({today})非交易日，从历史信号文件获取最近日期")
-        import os
-        dates = []
-        for file in os.listdir(self.running_dir):
-            if file.startswith('signals_') and file.endswith('.json'):
-                date_str = file.replace('signals_', '').replace('.json', '')
-                dates.append(date_str)
-        
-        if dates:
-            latest_date = max(dates)
-            logger.info(f"【工作日期】从信号文件获取到最近日期: {latest_date}")
-            return latest_date
-        
-        logger.warning(f"【工作日期】未找到信号文件，返回今日日期: {today}")
-        return today
+        # 非交易日，返回最近的历史交易日
+        logger.info(f"【工作日期】今日({today})非交易日，获取最近的历史交易日")
+        prev_day = get_previous_trading_day(today)
+        logger.info(f"【工作日期】最近的交易日: {prev_day}")
+        return prev_day
     
     def check_if_processed(self, date: str) -> bool:
         """检查日期是否已处理"""
