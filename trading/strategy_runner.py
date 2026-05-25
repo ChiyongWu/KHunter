@@ -154,6 +154,10 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
             self.portfolio = portfolio_data.get('positions', {})
             self.signals = self._load_signals(str(signals_file))
             
+            # 从持仓数据中读取可用资金
+            available_cash = portfolio_data.get('cash', config.get('initial_capital', 1000000))
+            logger.info(f"可用资金: ¥{available_cash:,.2f}")
+            
             # 初始化择时策略
             self._init_timing_strategy(timing_strategy_name, config)
             
@@ -175,7 +179,7 @@ class StrategyRunner(SignalManager, PortfolioManager, PoolManager, TradeExecutor
             
             # 执行交易操作（生成信号）
             sell_signals = self._execute_sell_operations(working_date, config)
-            buy_signals = self._execute_buy_operations(working_date, config.get('initial_capital', 1000000), check_capital=False)
+            buy_signals = self._execute_buy_operations(working_date, available_cash, check_capital=False)
             
             # 保存当日数据
             self._save_daily_data(working_date, sell_signals, buy_signals, is_first_run, removed_count)
