@@ -232,9 +232,12 @@ export async function showTemperatureDetail() {
             </div>
             
             <!-- 操作按钮 -->
-            <div style="margin-top: 20px; text-align: center;">
+            <div style="margin-top: 20px; display: flex; justify-content: center; gap: 12px;">
                 <button onclick="showTemperatureTrend()" class="btn btn-primary" style="padding: 8px 16px; font-size: 13px;">
                     查看趋势图
+                </button>
+                <button id="recalculate-temp-btn" onclick="recalculateTemperature()" class="btn btn-secondary" style="padding: 8px 16px; font-size: 13px;">
+                    重新计算当日温度
                 </button>
             </div>
         </div>
@@ -516,6 +519,73 @@ function closeModal() {
     }
 }
 
+/**
+ * 重新计算当日温度
+ */
+export async function recalculateTemperature() {
+    try {
+        // 获取当前日期
+        const today = new Date();
+        const tradeDate = today.toISOString().slice(0, 10).replace(/-/g, '');
+        
+        // 显示加载提示
+        const btn = document.getElementById('recalculate-temp-btn');
+        if (!btn) {
+            console.error('未找到重新计算按钮');
+            return;
+        }
+        const originalText = btn.textContent;
+        btn.textContent = '计算中...';
+        btn.disabled = true;
+        
+        // 发送请求重新计算温度（不使用缓存）
+        const response = await fetch('/api/market-temperature/calculate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                trade_date: tradeDate,
+                use_cache: false 
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success && result.data) {
+            // 更新缓存
+            marketTempCache = result.data;
+            
+            // 更新温度徽章
+            updateTemperatureBadge(result.data);
+            
+            // 重新显示温度详情弹窗
+            closeModal();
+            setTimeout(showTemperatureDetail, 100);
+            
+            // 显示成功提示
+            alert(`温度计算成功！\n日期: ${tradeDate}\n温度: ${result.data.temperature.toFixed(1)}°\n状态: ${result.data.status}`);
+        } else {
+            // 显示失败原因
+            alert(`温度计算失败：${result.message || '未知错误'}`);
+        }
+        
+        // 恢复按钮状态
+        btn.textContent = originalText;
+        btn.disabled = false;
+        
+    } catch (error) {
+        console.error('重新计算温度失败:', error);
+        alert('重新计算温度失败：' + error.message);
+        
+        // 恢复按钮状态
+        const btn = document.getElementById('recalculate-temp-btn');
+        if (btn) {
+            btn.textContent = '重新计算当日温度';
+            btn.disabled = false;
+        }
+    }
+}
+
 // 暴露到全局
 window.closeModal = closeModal;
 window.showTemperatureTrend = showTemperatureTrend;
+window.recalculateTemperature = recalculateTemperature;

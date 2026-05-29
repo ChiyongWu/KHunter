@@ -330,15 +330,12 @@ strategies:
       anti_body_ratio: 0.5
       anti_body_window: 3
       lookback_days: 3
-      ma_periods:
-        - 5
-        - 10
-        - 20
+      ma_periods: 5,10,20
       strategy_weight: 70
-      surge_threshold: 0.08
+      surge_threshold: 0.06
       trend_lookback_days: 20
       trend_r_squared_threshold: 0.5
-      upper_shadow_ratio: 0.04
+      upper_shadow_ratio: 0.03
       volume_ratio_max: 'null'
       volume_ratio_min: 1.5
     support_method: key_open
@@ -632,6 +629,83 @@ strategies:
       volume_ratio_threshold: 1.8
       volume_shrinkage_ratio: 0.6
     support_method: key_close_5
+  Strategy2560Selection:
+    color: '#f59e0b'
+    description: 2560战法选股策略，股价向上突破25日均线且5日均量线上穿60日均量线
+    display_name: 2560战法
+    icon: 📊
+    param_details:
+      ma10_period:
+        default: 10
+        description: 10日均线周期，用于判断收盘价是否在MA10之上
+        display_name: 10日均线周期
+        group: 均线参数
+        max: 20
+        min: 5
+        type: int
+      ma_period:
+        default: 25
+        description: 均线周期，股价突破此周期均线买入
+        display_name: 均线周期
+        group: 均线参数
+        max: 60
+        min: 10
+        type: int
+      min_price_change:
+        default: 0.05
+        description: 最小涨幅要求，当日涨幅需要超过此值
+        display_name: 最小涨幅(%)
+        group: 选股条件
+        max: 0.15
+        min: 0.02
+        type: float
+      min_volume_ratio:
+        default: 1.2
+        description: 最小量能倍数，当日成交量需要是前5日均量的此倍数以上
+        display_name: 量能倍数
+        group: 选股条件
+        max: 3.0
+        min: 1.0
+        type: float
+      strategy_weight:
+        default: 70
+        description: 技术面评分权重
+        display_name: 策略权重
+        group: 评分参数
+        type: int
+      vol_ma_long:
+        default: 60
+        description: 长期均量线周期
+        display_name: 长期均量线周期
+        group: 均量参数
+        max: 120
+        min: 30
+        type: int
+      vol_ma_short:
+        default: 5
+        description: 短期均量线周期
+        display_name: 短期均量线周期
+        group: 均量参数
+        max: 20
+        min: 3
+        type: int
+    param_groups:
+    - description: 控制均线参数的设置
+      name: 均线参数
+    - description: 控制均量线参数的设置
+      name: 均量参数
+    - description: 控制选股条件的参数
+      name: 选股条件
+    - description: 控制评分参数
+      name: 评分参数
+    params:
+      ma10_period: 10
+      ma_period: 25
+      min_price_change: 0.05
+      min_volume_ratio: 1.2
+      strategy_weight: 70
+      vol_ma_long: 60
+      vol_ma_short: 5
   MA20MA60Strategy:
     color: '#10b981'
     description: 5日均线金叉20日均线，5日均量线≥60日均量线，20日均线方向向上，三者同日发生
@@ -685,6 +759,14 @@ strategies:
     display_name: 启明星策略
     icon: ⭐
     param_details:
+      first_body_threshold:
+        default: 0.03
+        description: 第一根K线（长阴线）实体最小百分比
+        display_name: 长阴线实体(%)
+        group: 形态参数
+        max: 0.05
+        min: 0.01
+        type: float
       long_candle_ratio:
         default: 0.5
         description: 第三根K线实体与第一根K线实体的最小比例
@@ -723,6 +805,7 @@ strategies:
     - description: 控制成交量条件的参数
       name: 成交量参数
     params:
+      first_body_threshold: 0.03
       long_candle_ratio: 0.5
       lookback_days: 3
       small_body_ratio: 0.3
@@ -1651,6 +1734,65 @@ strategies:
       volume_ma_period: 5
       volume_shrink_ratio: 0.8
     support_method: ma20
+  TrendStartStrategy:
+    color: '#10b981'
+    description: MACD 0轴上方金叉 + 布林带上穿中轨，识别趋势启动信号
+    display_name: 趋势起点策略
+    icon: 🚀
+    param_details:
+      macd_fast:
+        default: 12
+        description: MACD快速线周期
+        display_name: MACD快线周期
+        group: MACD参数
+        max: 15
+        min: 8
+        type: int
+      macd_signal:
+        default: 9
+        description: MACD信号线周期
+        display_name: MACD信号线周期
+        group: MACD参数
+        max: 12
+        min: 5
+        type: int
+      macd_slow:
+        default: 26
+        description: MACD慢速线周期
+        display_name: MACD慢线周期
+        group: MACD参数
+        max: 35
+        min: 20
+        type: int
+      boll_period:
+        default: 20
+        description: 布林带周期
+        display_name: 布林带周期
+        group: 布林带参数
+        max: 30
+        min: 10
+        type: int
+      boll_multiplier:
+        default: 2
+        description: 布林带标准差倍数
+        display_name: 布林带倍数
+        group: 布林带参数
+        max: 3
+        min: 1
+        type: float
+    param_groups:
+    - description: 控制MACD指标计算的参数
+      name: MACD参数
+    - description: 控制布林带指标计算的参数
+      name: 布林带参数
+    params:
+      macd_fast: 12
+      macd_signal: 9
+      macd_slow: 26
+      boll_period: 20
+      boll_multiplier: 2
+    support_method: ma20
+
 strategy_runner:
   check_interval: 60
   max_position_size: 0.1
@@ -1663,7 +1805,7 @@ strategy_runner:
     exclude_recent_days: 0
   selection_limit: 20
   stop_loss_threshold: -0.05
-  take_profit_threshold: 0.15
+  take_profit_threshold: 0.21
   trading:
     commission_rate: 0.00015
     min_commission: 5

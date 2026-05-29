@@ -272,6 +272,10 @@ class BacktestBatchQueue:
         end_date = task.get('end_date')
         timing_strategy = task.get('timing_strategy', 'turtle')
         support_level_method = task.get('support_level_method', 'ma20')
+        
+        # 记录实际要执行的策略名称，确保日志和实际执行一致
+        logger.info(f"_execute_single_task 开始执行: strategy_name={strategy_name}, timing_strategy={timing_strategy}, "
+                   f"start_date={start_date}, end_date={end_date}")
 
         config = self._data.get('config', {}).copy()
         config.update({
@@ -318,7 +322,7 @@ class BacktestBatchQueue:
             # 构建保存到数据库的结果格式
             save_result = {
                 'strategy_name': strategy_name,
-                'support_level_method': support_level_method,
+                'support_level_method': timing_strategy,  # 保存择时策略
                 'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
                 'start_date': start_date,
                 'end_date': end_date,
@@ -338,20 +342,9 @@ class BacktestBatchQueue:
                 'final_capital': final_capital
             }
 
-            # 检查是否已存在相同参数的回测结果
-            existing_result = backtest_dao.get_result_by_strategy_and_dates(
-                strategy_name, start_date, end_date
-            )
-
-            if existing_result:
-                result_id = existing_result['id']
-                backtest_dao.update_result(result_id, save_result)
-                backtest_dao.delete_trades(result_id)
-                backtest_dao.delete_equity_curve(result_id)
-                logger.info(f"批量回测更新已存在的回测结果，result_id: {result_id}")
-            else:
-                result_id = backtest_dao.save_result(save_result)
-                logger.info(f"批量回测保存新回测结果，result_id: {result_id}")
+            # 直接保存新回测结果，不检查是否已存在
+            result_id = backtest_dao.save_result(save_result)
+            logger.info(f"批量回测保存新回测结果，result_id: {result_id}")
 
             # 保存交易记录
             if 'trades' in result and result['trades']:

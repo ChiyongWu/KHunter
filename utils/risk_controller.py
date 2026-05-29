@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from utils.index_data_fetcher import IndexDataFetcher
-from utils.var_calculator import HistoricalVaRCalculator
+from utils.var_calculator import EnhancedVaRCalculator
 from utils.risk_manager import RiskManager, RiskStatus
 from utils.risk_config_loader import RiskConfigLoader
 
@@ -33,17 +33,26 @@ class RiskController:
             logger.error("加载风控配置失败，使用默认配置")
             config = {}
         
-        # 初始化各模块
-        self.index_fetcher = IndexDataFetcher()
-        self.var_calculator = HistoricalVaRCalculator()
-        
         # 提取风控配置
         risk_config = config.get('risk', {})
-        self.risk_manager = RiskManager(risk_config)
         
         # 获取基础配置
         self.lookback_days = risk_config.get('lookback_days', 500)
         self.confidence_level = risk_config.get('confidence_level', 0.99)
+        
+        # 初始化各模块
+        self.index_fetcher = IndexDataFetcher()
+        
+        # 使用增强版VaR计算器，支持多种计算方法
+        var_method = risk_config.get('calculation_method', 'hybrid')
+        lambda_ewma = risk_config.get('lambda_ewma', 0.94)
+        self.var_calculator = EnhancedVaRCalculator(
+            method=var_method,
+            lambda_ewma=lambda_ewma,
+            lookback_days=self.lookback_days
+        )
+        
+        self.risk_manager = RiskManager(risk_config)
         
         # 历史风控状态缓存
         self.risk_history = []
@@ -104,10 +113,12 @@ class RiskController:
         # 需要重新计算
         try:
             # 获取指数收益率
+            # 使用查询日期作为结束日期，确保计算的是该日期当时的VaR
             logger.info(f"计算风控状态: {date}")
             returns = self.index_fetcher.fetch_index_returns(
+                end_date=date.replace('-', ''),  # 转换为YYYYMMDD格式
                 lookback_days=self.lookback_days,
-                use_cache=True
+                use_cache=not force_refresh  # 强制刷新时不使用缓存
             )
             
             if returns is None or len(returns) < 100:

@@ -5,6 +5,7 @@ import importlib
 import sys
 from pathlib import Path
 import yaml
+from utils.feature_config_checker import FeatureConfigChecker
 
 
 class StrategyRegistry:
@@ -63,6 +64,7 @@ class StrategyRegistry:
         
         # 提取参数值（排除元数据和定义字段）
         params = strategy_config.get('params', {})
+        params = self._convert_param_types(params, strategy_name)
         
         # 实例化策略
         strategy = strategy_class(params=params)
@@ -86,12 +88,47 @@ class StrategyRegistry:
         :param strategy_name: 策略名称
         :return: 参数字典
         """
-        # 重新加载配置文件
         params_config = self._load_params()
         strategies_config = params_config.get('strategies', {})
         strategy_config = strategies_config.get(strategy_name, {})
-        # 返回该策略的参数值
-        return strategy_config.get('params', {})
+        params = strategy_config.get('params', {})
+        return self._convert_param_types(params, strategy_name)
+    
+    def _convert_param_types(self, params: dict, strategy_name: str) -> dict:
+        """
+        转换参数类型，确保配置文件中的字符串格式正确转换为Python类型
+        :param params: 原始参数字典
+        :param strategy_name: 策略名称
+        :return: 类型正确的参数字典
+        """
+        if not params:
+            return {}
+        
+        converted = {}
+        for key, value in params.items():
+            if key == 'ma_periods' and value is not None:
+                converted[key] = self._parse_ma_periods(value)
+            elif key == 'volume_ratio_max' and value == 'null':
+                converted[key] = None
+            else:
+                converted[key] = value
+        return converted
+    
+    def _parse_ma_periods(self, value):
+        """
+        解析 ma_periods 参数，支持多种格式
+        :param value: 原始值 (如 "5,10,20", "[5, 10, 20]", [5, 10, 20])
+        :return: 整数列表
+        """
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith('[') and value.endswith(']'):
+                value = value[1:-1]
+            parts = [p.strip() for p in value.split(',')]
+            return [int(p) for p in parts if p]
+        return value
     
     def get_strategy(self, name):
         """
@@ -139,6 +176,8 @@ class StrategyRegistry:
         """
         自动从目录加载策略
         导入所有非 _ 开头的 .py 文件
+        
+        注意：择时策略不在此注册，选股策略不需要配置文件检查
         """
         # 注意：移除了"如果已经有策略注册，跳过自动注册"的检查
         # 这样可以确保即使registry已经初始化过，仍然可以重新注册策略
@@ -168,6 +207,9 @@ class StrategyRegistry:
                 # 查找策略类（继承自 BaseStrategy 的类）
                 from strategy.base_strategy import BaseStrategy
                 
+                # 配置检查标志（只在需要时检查一次）
+                has_valid_config = None
+                
                 for attr_name in dir(module):
                     attr = getattr(module, attr_name)
                     if (isinstance(attr, type) and 
@@ -183,6 +225,8 @@ class StrategyRegistry:
                         if strategy_instance.name == "事件驱动策略":
                             print(f"  [SKIP] 跳过策略: {strategy_instance.name}")
                             continue
+                        
+                        # 仙人指路策略（ImmortalGuidanceStrategy）不需要配置文件检查
                         
                         # 注册策略（使用类名作为键，以便与配置文件匹配）
                         self.register(attr, name=strategy_class_name)

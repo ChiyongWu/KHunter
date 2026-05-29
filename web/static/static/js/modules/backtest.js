@@ -70,30 +70,46 @@ export function initBacktestHistoryPage() {
 }
 
 /**
- * 加载回测历史页面的策略列表
+ * 加载回测历史页面的策略列表（参考选股历史页面实现）
  */
 async function loadHistoryStrategies() {
     try {
+        console.log('loadHistoryStrategies 开始执行');
+        // 使用与选股历史页面相同的策略接口
         const response = await fetch('/api/strategies');
+        console.log('API 响应状态:', response.status);
         if (!response.ok) {
-            throw new Error('加载策略列表失败');
+            throw new Error('加载策略列表失败: ' + response.status);
         }
         const data = await response.json();
-        if (data.success) {
-            const strategies = data.data;
-            const strategySelect = document.getElementById('history-strategy-filter');
-            if (strategySelect) {
-                strategySelect.innerHTML = '<option value="">全部策略</option>';
-                strategies.forEach(strategy => {
+        console.log('API 返回数据:', data);
+        
+        // 查找正确的元素 ID
+        const strategySelect = document.getElementById('backtest-history-strategy-filter');
+        console.log('strategySelect 元素:', strategySelect);
+        
+        if (strategySelect) {
+            // 保留原有的"全部策略"选项，追加API返回的策略
+            const existingOptions = Array.from(strategySelect.options);
+            const optionsToKeep = existingOptions.slice(0, 1); // 保留第一个选项（全部策略）
+            
+            strategySelect.innerHTML = '';
+            optionsToKeep.forEach(opt => strategySelect.appendChild(opt));
+            
+            if (data.success && data.data && data.data.length > 0) {
+                data.data.forEach(strategy => {
+                    const strategyName = strategy.display_name || strategy.name;
                     const option = document.createElement('option');
-                    // 使用中文名称作为value和显示文本
-                    const chineseName = strategy.display_name || strategy.name;
-                    option.value = strategy.name;  // 使用英文名作为value，用于API调用
-                    option.textContent = chineseName;
+                    option.value = strategyName;
+                    option.textContent = strategyName;
                     strategySelect.appendChild(option);
                 });
-                console.log('回测历史策略列表加载成功:', strategies.length);
+                console.log('回测历史策略列表加载成功, 共', data.data.length, '个策略');
+            } else {
+                console.warn('API 返回数据为空或格式不正确:', data.message);
             }
+        } else {
+            console.warn('未找到 backtest-history-strategy-filter 元素');
         }
     } catch (error) {
         console.error('加载回测历史策略列表失败:', error);

@@ -37,6 +37,26 @@ let backtestConfig = {
 };
 
 /**
+ * 格式化日期时间
+ * @param {string} dateTimeStr - 日期时间字符串
+ * @returns {string} 格式化后的日期时间
+ */
+function formatDateTime(dateTimeStr) {
+    if (!dateTimeStr) return '--';
+    // 支持 YYYY-MM-DD HH:MM:SS 格式
+    const match = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+    if (match) {
+        return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
+    }
+    // 支持 YYYY-MM-DDTHH:MM:SS 格式
+    const match2 = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+    if (match2) {
+        return `${match2[1]}-${match2[2]}-${match2[3]} ${match2[4]}:${match2[5]}`;
+    }
+    return dateTimeStr;
+}
+
+/**
  * 切换支撑位置选择框的启用/禁用状态
  */
 function toggleSupportLevel() {
@@ -60,14 +80,50 @@ function toggleSupportLevel() {
 export async function initBacktestConfigPage() {
     console.log('初始化回测配置页面');
     
-    // 加载策略列表
+    // 加载选股策略列表
     await loadStrategies();
+    
+    // 加载择时策略列表
+    await loadTimingStrategies();
     
     // 绑定表单事件
     bindConfigFormEvents();
     
     // 初始化日期选择器
     initDatePickers();
+}
+
+/**
+ * 加载择时策略列表
+ */
+async function loadTimingStrategies() {
+    try {
+        console.log('开始加载择时策略列表');
+        const response = await fetch('/api/timing-strategies');
+        if (!response.ok) {
+            throw new Error('加载择时策略列表失败: ' + response.status);
+        }
+        const data = await response.json();
+        console.log('择时策略API返回:', data);
+        
+        if (data.success && data.strategies) {
+            const timingSelect = document.getElementById('backtest-timing-strategy');
+            if (timingSelect) {
+                timingSelect.innerHTML = '';
+                data.strategies.forEach(strategy => {
+                    const option = document.createElement('option');
+                    option.value = strategy.name;
+                    option.textContent = strategy.display_name || strategy.name;
+                    timingSelect.appendChild(option);
+                });
+                console.log('择时策略列表加载成功, 共', data.strategies.length, '个策略');
+            }
+        } else {
+            console.warn('择时策略列表为空或数据格式不正确');
+        }
+    } catch (error) {
+        console.error('加载择时策略列表失败:', error);
+    }
 }
 
 /**
@@ -112,39 +168,69 @@ export function initBacktestHistoryPage() {
 async function loadHistoryStrategies() {
     try {
         console.log('loadHistoryStrategies 开始执行');
-        const response = await fetch('/api/strategies');
+        
+        // 先清空并重新构建选项
+        const strategySelect = document.getElementById('backtest-history-strategy-filter');
+        if (!strategySelect) {
+            console.warn('未找到 backtest-history-strategy-filter 元素');
+            return;
+        }
+        
+        // 清空所有选项
+        strategySelect.innerHTML = '';
+        
+        // 添加默认选项
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = '全部策略';
+        defaultOption.selected = true;
+        strategySelect.appendChild(defaultOption);
+        
+        // 调用策略API加载策略列表
+        const response = await fetch('/api/trading/backtest/strategies');
         console.log('API 响应状态:', response.status);
+        
         if (!response.ok) {
             throw new Error('加载策略列表失败: ' + response.status);
         }
+        
         const data = await response.json();
         console.log('API 返回数据:', data);
-        if (data.success) {
-            const strategies = data.data;
-            console.log('策略数量:', strategies ? strategies.length : 0);
-            const strategySelect = document.getElementById('history-strategy-filter');
-            console.log('strategySelect 元素:', strategySelect);
-            if (strategySelect) {
-                strategySelect.innerHTML = '<option value="">全部策略</option>';
-                if (strategies && strategies.length > 0) {
-                    strategies.forEach(strategy => {
-                        const option = document.createElement('option');
-                        // 使用中文名称作为value和显示文本
-                        const chineseName = strategy.display_name || strategy.name;
-                        option.value = strategy.name;  // 使用英文名作为value，用于API调用
-                        option.textContent = chineseName;
-                        strategySelect.appendChild(option);
-                    });
-                }
-                console.log('回测历史策略列表加载成功, 共', strategySelect.options.length - 1, '个策略');
-            } else {
-                console.warn('未找到 history-strategy-filter 元素');
-            }
+        
+        if (data.success && data.data && data.data.strategies) {
+            const strategies = data.data.strategies;
+            
+            strategies.forEach(strategy => {
+                const strategyName = strategy.display_name || strategy.name;
+                const option = document.createElement('option');
+                option.value = strategyName;
+                option.textContent = strategyName;
+                strategySelect.appendChild(option);
+            });
+            
+            console.log('回测历史策略列表加载成功, 共', strategies.length, '个策略');
         } else {
-            console.error('API 返回失败:', data.error);
+            console.warn('API 返回数据为空或格式不正确:', data.message);
+            // 如果没有策略数据，添加提示
+            const emptyOption = document.createElement('option');
+            emptyOption.value = '';
+            emptyOption.textContent = '暂无策略数据';
+            emptyOption.disabled = true;
+            strategySelect.appendChild(emptyOption);
         }
     } catch (error) {
         console.error('加载回测历史策略列表失败:', error);
+        // 加载失败时显示错误提示
+        const strategySelect = document.getElementById('backtest-history-strategy-filter');
+        if (strategySelect) {
+            strategySelect.innerHTML = '';
+            const errorOption = document.createElement('option');
+            errorOption.value = '';
+            errorOption.textContent = '加载策略失败，请刷新页面';
+            errorOption.disabled = true;
+            errorOption.selected = true;
+            strategySelect.appendChild(errorOption);
+        }
     }
 }
 
@@ -158,7 +244,7 @@ async function loadStrategies() {
             throw new Error('加载策略列表失败');
         }
         const data = await response.json();
-        if (data.success) {
+        if (data.success && data.data && data.data.strategies) {
             const strategies = data.data.strategies;
             const strategySelect = document.getElementById('strategy-select');
             if (strategySelect) {
@@ -172,6 +258,8 @@ async function loadStrategies() {
                     strategySelect.appendChild(option);
                 });
             }
+        } else {
+            console.warn('策略列表为空或数据格式不正确');
         }
     } catch (error) {
         console.error('加载策略列表失败:', error);
@@ -214,10 +302,6 @@ async function saveBacktestParams() {
         const stopLossInput = document.getElementById('params-stop-loss');
         const takeProfitInput = document.getElementById('params-take-profit');
         const maxHoldDaysInput = document.getElementById('params-max-hold-days');
-        const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
-        const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
-        const enableFridayBuyBanInput = document.getElementById('params-enable-friday-buy-ban');
-        const enableDynamicStopLossInput = document.getElementById('params-enable-dynamic-stop-loss');
         
         const params = {
             config_name: '默认配置',
@@ -227,13 +311,7 @@ async function saveBacktestParams() {
             take_profit: parseFloat(takeProfitInput?.value) * 100, // 转换为百分比
             initial_capital: parseFloat(initialCapitalInput?.value) || 300000,
             buy_amount: parseFloat(buyAmountInput?.value) || 100000,
-            max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5,
-            // 温度约束参数
-            enable_temp_limit: parseInt(enableTempLimitSelect?.value) || 1,
-            temp_limit_mode: tempLimitModeSelect?.value || 'both',
-            // 新增：周五禁买和动态止损
-            enable_friday_buy_ban: enableFridayBuyBanInput?.checked ? 1 : 0,
-            enable_dynamic_stop_loss: enableDynamicStopLossInput?.checked ? 1 : 0
+            max_daily_buys: parseInt(maxDailyBuysInput?.value) || 5
         };
         
         // 调用后端API保存配置
@@ -285,10 +363,6 @@ async function loadBacktestParams() {
             const stopLossInput = document.getElementById('params-stop-loss');
             const takeProfitInput = document.getElementById('params-take-profit');
             const maxHoldDaysInput = document.getElementById('params-max-hold-days');
-            const enableTempLimitSelect = document.getElementById('params-enable-temp-limit');
-            const tempLimitModeSelect = document.getElementById('params-temp-limit-mode');
-            const enableFridayBuyBanInput = document.getElementById('params-enable-friday-buy-ban');
-            const enableDynamicStopLossInput = document.getElementById('params-enable-dynamic-stop-loss');
             
             if (initialCapitalInput) initialCapitalInput.value = params.initial_capital || 300000;
             if (scoreThresholdInput) scoreThresholdInput.value = params.score_threshold || 60;
@@ -297,12 +371,6 @@ async function loadBacktestParams() {
             if (stopLossInput) stopLossInput.value = (params.stop_loss || -5) / 100; // 转换为小数
             if (takeProfitInput) takeProfitInput.value = (params.take_profit || 15) / 100; // 转换为小数
             if (maxHoldDaysInput) maxHoldDaysInput.value = params.hold_period || 10;
-            // 温度约束参数
-            if (enableTempLimitSelect) enableTempLimitSelect.value = params.enable_temp_limit !== undefined ? params.enable_temp_limit : 1;
-            if (tempLimitModeSelect) tempLimitModeSelect.value = params.temp_limit_mode || 'both';
-            // 新增：周五禁买和动态止损
-            if (enableFridayBuyBanInput) enableFridayBuyBanInput.checked = params.enable_friday_buy_ban !== 0;
-            if (enableDynamicStopLossInput) enableDynamicStopLossInput.checked = params.enable_dynamic_stop_loss !== 0;
         }
     } catch (error) {
         console.error('加载回测配置失败:', error);
@@ -513,6 +581,18 @@ async function loadBacktestResult(resultId) {
  * @param {Object} result - 回测结果数据
  */
 function displayBacktestResult(result) {
+    // 择时策略中文名称映射
+    const timingStrategyNames = {
+        'turtle': '海龟策略',
+        'rsi': 'RSI策略',
+        'bollinger': '布林带策略',
+        'support': '支撑位策略',
+        'macd_bollinger': '顺势宝'
+    };
+    
+    // 获取择时策略显示名称
+    const timingStrategyDisplay = timingStrategyNames[result.support_level_method] || result.support_level_method || '支撑位策略';
+    
     const resultsContainer = document.getElementById('backtest-results-container');
     if (resultsContainer) {
         resultsContainer.innerHTML = `
@@ -532,11 +612,7 @@ function displayBacktestResult(result) {
                         </div>
                         <div class="form-group">
                             <label>择时策略</label>
-                            <input type="text" value="${result.timing_strategy || ''}" disabled>
-                        </div>
-                        <div class="form-group">
-                            <label>支撑位置计算方法</label>
-                            <input type="text" value="${result.support_level_method || ''}" disabled>
+                            <input type="text" value="${timingStrategyDisplay}" disabled>
                         </div>
                         <div class="form-group">
                             <label>初始资金</label>
@@ -723,16 +799,30 @@ async function loadBacktestHistory() {
  * @param {Array} results - 回测结果数组
  */
 function displayBacktestHistory(results) {
+    // 择时策略中文名称映射
+    const timingStrategyNames = {
+        'turtle': '海龟策略',
+        'rsi': 'RSI策略',
+        'bollinger': '布林带策略',
+        'support': '支撑位策略',
+        'macd_bollinger': '顺势宝'
+    };
+    
     const historyBody = document.getElementById('backtest-history-body');
     if (historyBody) {
         if (results.length === 0) {
-            historyBody.innerHTML = '<tr><td colspan="9" class="loading">暂无回测历史记录</td></tr>';
+            historyBody.innerHTML = '<tr><td colspan="12" class="loading">暂无回测历史记录</td></tr>';
         } else {
-            historyBody.innerHTML = results.map(result => `
+            historyBody.innerHTML = results.map(result => {
+                // 获取择时策略显示名称
+                const timingStrategyDisplay = timingStrategyNames[result.support_level_method] || result.support_level_method || '支撑位策略';
+                return `
                 <tr>
                     <td>${result.strategy_name || ''}</td>
+                    <td>${timingStrategyDisplay}</td>
                     <td>${result.start_date || ''}</td>
                     <td>${result.end_date || ''}</td>
+                    <td>${result.created_at ? formatDateTime(result.created_at) : ''}</td>
                     <td class="${result.total_return >= 0 ? 'text-green-500' : 'text-red-500'}">
                         ${(result.total_return || 0).toFixed(2)}%
                     </td>
@@ -750,9 +840,46 @@ function displayBacktestHistory(results) {
                             📥 导出
                         </button>
                     </td>
+                    <td>
+                        <button class="btn btn-danger btn-sm" onclick="deleteBacktestResult(${result.id})" title="删除回测结果">
+                            🗑️ 删除
+                        </button>
+                    </td>
                 </tr>
-            `).join('');
+            `}).join('');
         }
+    }
+}
+
+/**
+ * 删除回测结果
+ * @param {number} resultId - 回测结果ID
+ */
+export async function deleteBacktestResult(resultId) {
+    try {
+        // 确认删除操作
+        if (!confirm('确定要删除这条回测结果吗？此操作不可撤销！')) {
+            return;
+        }
+
+        const response = await fetch(`/api/trading/backtest/results/${resultId}`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showAlert('删除回测结果成功', 'success');
+            // 刷新回测历史列表
+            loadBacktestHistory();
+        } else {
+            throw new Error(data.message || '删除失败');
+        }
+    } catch (error) {
+        console.error('删除回测结果失败:', error);
+        showAlert('删除回测结果失败: ' + error.message, 'error');
     }
 }
 
@@ -885,10 +1012,6 @@ function displayBacktestResultInModal(result) {
                         </div>
                         <div class="form-group" style="flex: 1; min-width: 200px;">
                             <label>择时策略</label>
-                            <input type="text" value="${result.timing_strategy || ''}" disabled>
-                        </div>
-                        <div class="form-group" style="flex: 1; min-width: 200px;">
-                            <label>支撑位置计算方法</label>
                             <input type="text" value="${result.support_level_method || ''}" disabled>
                         </div>
                     </div>
@@ -1101,7 +1224,7 @@ function showResultsEmptyState(message) {
 function showHistoryEmptyState(message) {
     const historyBody = document.getElementById('backtest-history-body');
     if (historyBody) {
-        historyBody.innerHTML = `<tr><td colspan="8" class="loading">${message}</td></tr>`;
+        historyBody.innerHTML = `<tr><td colspan="11" class="loading">${message}</td></tr>`;
     }
 }
 
@@ -1110,14 +1233,12 @@ function showHistoryEmptyState(message) {
  */
 export async function searchBacktestHistory() {
     try {
-        const strategyFilter = document.getElementById('history-strategy-filter');
-        const startDateInput = document.getElementById('history-start-date');
-        const endDateInput = document.getElementById('history-end-date');
+        const strategyFilter = document.getElementById('backtest-history-strategy-filter');
+        const dateInput = document.getElementById('backtest-history-date');
         
         const params = new URLSearchParams();
         if (strategyFilter?.value) params.append('strategy', strategyFilter.value);
-        if (startDateInput?.value) params.append('start_date', startDateInput.value);
-        if (endDateInput?.value) params.append('end_date', endDateInput.value);
+        if (dateInput?.value) params.append('created_date', dateInput.value);
         
         const queryString = params.toString();
         const url = `/api/trading/backtest/results${queryString ? `?${queryString}` : ''}`;

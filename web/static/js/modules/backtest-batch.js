@@ -209,7 +209,8 @@ class BacktestUIManager {
       'turtle': '海龟策略',
       'rsi': 'RSI策略',
       'bollinger': '布林带策略',
-      'support': '支撑位策略'
+      'support': '支撑位策略',
+      'macd_bollinger': '顺势宝'
     };
 
     // 添加任务行
@@ -275,7 +276,35 @@ class BacktestUIManager {
    * @param {Object} result - 回测结果
    */
   addResultTab(task, result) {
-    // 检查是否已经存在相同的页签（根据任务ID或策略名称+日期范围）
+    // 择时策略中文名称映射
+    const timingStrategyNames = {
+      'turtle': '海龟策略',
+      'rsi': 'RSI策略',
+      'bollinger': '布林带策略',
+      'support': '支撑位策略',
+      'macd_bollinger': '顺势宝'
+    };
+    
+    // 获取择时策略名称（优先从结果中获取，其次从任务中获取）
+    let timingStrategy = null;
+    if (result.timing_strategy) {
+      if (typeof result.timing_strategy === 'object') {
+        timingStrategy = result.timing_strategy.name;
+      } else {
+        timingStrategy = result.timing_strategy;
+      }
+    }
+    if (!timingStrategy && task.timing_strategy) {
+      timingStrategy = task.timing_strategy;
+    }
+    if (!timingStrategy) {
+      timingStrategy = 'turtle';
+    }
+    
+    // 获取择时策略显示名称
+    const timingStrategyDisplay = timingStrategyNames[timingStrategy] || timingStrategy;
+    
+    // 检查是否已经存在相同的页签（根据任务ID或策略名称+择时策略+日期范围）
     const existingTabs = this.elements.resultTabsContainer.querySelectorAll('.result-tab');
     
     // 首先检查是否有相同任务ID的结果内容
@@ -285,12 +314,14 @@ class BacktestUIManager {
       return;
     }
     
-    // 然后检查是否有相同策略名称的页签（处理日期为空的情况）
+    // 然后检查是否有相同策略名称+择时策略+日期范围的页签
     const strategyName = result.strategy_name || task.strategy_name;
+    const dateRange = task.start_date && task.end_date ? `${task.start_date}~${task.end_date}` : '';
+    const uniqueKey = `${strategyName}-${timingStrategyDisplay}-${dateRange}`;
+    
     for (const tab of existingTabs) {
-      if (tab.textContent.includes(strategyName) && !tab.textContent.includes('~')) {
-        // 如果已有同名页签且没有日期范围，说明是重复的
-        console.warn(`已经存在相同策略 ${strategyName} 的结果页签，跳过添加`);
+      if (tab.dataset.uniqueKey === uniqueKey) {
+        console.warn(`已经存在相同策略 ${strategyName} (${timingStrategyDisplay}) ${dateRange} 的结果页签，跳过添加`);
         return;
       }
     }
@@ -301,6 +332,7 @@ class BacktestUIManager {
     // 创建页签标题
     const tabTitle = document.createElement('div');
     tabTitle.className = 'result-tab';
+    tabTitle.dataset.uniqueKey = uniqueKey;
     tabTitle.style.cssText = `
       padding: 8px 16px;
       border: 1px solid #e5e7eb;
@@ -314,8 +346,9 @@ class BacktestUIManager {
       white-space: nowrap;
     `;
     
-    // 构建页签标题，处理日期为空的情况
+    // 构建页签标题，包含择时策略
     let tabText = strategyName;
+    tabText += ` - ${timingStrategyDisplay}`;
     if (task.start_date && task.end_date) {
       tabText += ` ${task.start_date}~${task.end_date}`;
     }
@@ -368,6 +401,34 @@ class BacktestUIManager {
    * @returns {string} HTML内容
    */
   formatResultContent(task, result) {
+    // 择时策略中文名称映射
+    const timingStrategyNames = {
+      'turtle': '海龟策略',
+      'rsi': 'RSI策略',
+      'bollinger': '布林带策略',
+      'support': '支撑位策略',
+      'macd_bollinger': '顺势宝'
+    };
+    
+    // 获取择时策略名称（优先从结果中获取，其次从任务中获取）
+    let timingStrategy = null;
+    if (result.timing_strategy) {
+      if (typeof result.timing_strategy === 'object') {
+        timingStrategy = result.timing_strategy.name;
+      } else {
+        timingStrategy = result.timing_strategy;
+      }
+    }
+    if (!timingStrategy && task.timing_strategy) {
+      timingStrategy = task.timing_strategy;
+    }
+    if (!timingStrategy) {
+      timingStrategy = 'turtle';
+    }
+    
+    // 获取择时策略显示名称
+    const timingStrategyDisplay = timingStrategyNames[timingStrategy] || timingStrategy;
+    
     // 获取绩效指标（支持两种格式：直接字段或performance子对象）
     const performance = result.performance || result;
     const totalReturn = parseFloat(performance.total_return) || 0;
@@ -382,6 +443,34 @@ class BacktestUIManager {
     return `
       <div style="padding: 16px;">
         <h4 style="margin-bottom: 16px; color: #374151;">${result.strategy_name || task.strategy_name} 回测结果</h4>
+
+        <!-- 基本信息 -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px;">
+          <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">择时策略</div>
+            <div style="font-size: 14px; font-weight: 600; color: #374151;">
+              ${timingStrategyDisplay}
+            </div>
+          </div>
+          <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">开始日期</div>
+            <div style="font-size: 14px; font-weight: 600; color: #374151;">
+              ${result.start_date || task.start_date || ''}
+            </div>
+          </div>
+          <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">结束日期</div>
+            <div style="font-size: 14px; font-weight: 600; color: #374151;">
+              ${result.end_date || task.end_date || ''}
+            </div>
+          </div>
+          <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #ffffff;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">初始资金</div>
+            <div style="font-size: 14px; font-weight: 600; color: #374151;">
+              ${(result.initial_capital || 300000).toLocaleString()}
+            </div>
+          </div>
+        </div>
 
         <!-- 统计数据 -->
         <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 24px;">
@@ -869,7 +958,7 @@ async function loadStrategies() {
       throw new Error('加载策略列表失败');
     }
     const data = await response.json();
-    if (data.success) {
+    if (data.success && data.data && data.data.strategies) {
       const strategies = data.data.strategies;
       const strategySelect = document.getElementById('strategy-select');
       if (strategySelect) {
@@ -883,6 +972,8 @@ async function loadStrategies() {
           strategySelect.appendChild(option);
         });
       }
+    } else {
+      console.warn('策略列表为空或数据格式不正确');
     }
   } catch (error) {
     console.error('加载策略列表失败:', error);
@@ -1162,17 +1253,27 @@ async function pollBatchStatus(batchId, totalTasks) {
         if (status.task_results && status.task_results.length > 0) {
           status.task_results.forEach((taskResult, index) => {
             if (taskResult.status === 'completed' && taskResult.result && !displayedTaskIndices.has(index)) {
+              // 从结果中获取择时策略
+              let timingStrategy = null;
+              if (taskResult.result.timing_strategy) {
+                if (typeof taskResult.result.timing_strategy === 'object') {
+                  timingStrategy = taskResult.result.timing_strategy.name;
+                } else {
+                  timingStrategy = taskResult.result.timing_strategy;
+                }
+              }
               // 创建临时任务对象用于显示结果
               const tempTask = {
                 id: index + 1,
                 strategy_name: taskResult.strategy_name,
                 start_date: taskResult.start_date || '',
-                end_date: taskResult.end_date || ''
+                end_date: taskResult.end_date || '',
+                timing_strategy: timingStrategy
               };
               backtestTaskManager.updateTaskStatus(tempTask.id, 'completed', taskResult.result);
               backtestUIManager.addResultTab(tempTask, taskResult.result);
               displayedTaskIndices.add(index);
-              console.log(`已显示任务 ${index + 1} 的结果: ${taskResult.strategy_name}`);
+              console.log(`已显示任务 ${index + 1} 的结果: ${taskResult.strategy_name}, 择时: ${timingStrategy}`);
             }
           });
         }
@@ -1183,11 +1284,21 @@ async function pollBatchStatus(batchId, totalTasks) {
           if (status.task_results && status.task_results.length > 0) {
             status.task_results.forEach((taskResult, index) => {
               if (taskResult.status === 'completed' && taskResult.result && !displayedTaskIndices.has(index)) {
+                // 从结果中获取择时策略
+                let timingStrategy = null;
+                if (taskResult.result.timing_strategy) {
+                  if (typeof taskResult.result.timing_strategy === 'object') {
+                    timingStrategy = taskResult.result.timing_strategy.name;
+                  } else {
+                    timingStrategy = taskResult.result.timing_strategy;
+                  }
+                }
                 const tempTask = {
                   id: index + 1,
                   strategy_name: taskResult.strategy_name,
                   start_date: taskResult.start_date || '',
-                  end_date: taskResult.end_date || ''
+                  end_date: taskResult.end_date || '',
+                  timing_strategy: timingStrategy
                 };
                 backtestTaskManager.updateTaskStatus(tempTask.id, 'completed', taskResult.result);
                 backtestUIManager.addResultTab(tempTask, taskResult.result);

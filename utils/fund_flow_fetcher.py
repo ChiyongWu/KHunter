@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 import time
 from utils.base_fetcher import DataFetcher, FetcherFactory
 
+# 导入速率限制器
+from utils.stock_data_fetcher import _tushare_limiter
+
 # 配置日志
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,9 @@ class FundFlowFetcher(DataFetcher):
                 current_date_str = current_dt.strftime('%Y%m%d')
                 
                 try:
+                    # 速率限制
+                    _tushare_limiter.wait_if_needed()
+                    
                     # 调用接口获取该日期的数据
                     df_daily = pro.moneyflow(trade_date=current_date_str)
                     
@@ -173,6 +179,9 @@ class FundFlowFetcher(DataFetcher):
                 current_date_str = current_dt.strftime('%Y%m%d')
                 
                 try:
+                    # 速率限制
+                    _tushare_limiter.wait_if_needed()
+                    
                     # 调用接口获取该日期的数据
                     df_daily = pro.moneyflow_ind_ths(trade_date=current_date_str)
                     
@@ -253,6 +262,9 @@ class FundFlowFetcher(DataFetcher):
                 current_date_str = current_dt.strftime('%Y%m%d')
                 
                 try:
+                    # 速率限制
+                    _tushare_limiter.wait_if_needed()
+                    
                     # 调用接口获取该日期的数据
                     df_daily = pro.moneyflow_cnt_ths(trade_date=current_date_str)
                     
@@ -311,6 +323,9 @@ class FundFlowFetcher(DataFetcher):
             
             # 创建Tushare API实例
             pro = ts.pro_api(token)
+            
+            # 速率限制
+            _tushare_limiter.wait_if_needed()
             
             # 使用 moneyflow_ind_ths 接口获取行业资金流向数据
             df_flow = pro.moneyflow_ind_ths(trade_date=trade_date)
@@ -442,6 +457,9 @@ class FundFlowFetcher(DataFetcher):
             
             # 创建Tushare API实例
             pro = ts.pro_api(token)
+            
+            # 速率限制
+            _tushare_limiter.wait_if_needed()
             
             # 使用 moneyflow_cnt_ths 接口获取板块资金流向数据
             df_flow = pro.moneyflow_cnt_ths(trade_date=trade_date)

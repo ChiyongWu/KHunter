@@ -167,6 +167,58 @@ async function cancelInitialization() {
 }
 
 /**
+ * 开始强制重新初始化
+ */
+function startReinit() {
+    try {
+        console.log('用户点击了重新初始化按钮');
+        
+        if (!confirm('⚠️ 警告：重新初始化将删除所有现有数据（基础数据 + K线数据）！\n\n确定要继续吗？')) {
+            console.log('用户取消了重新初始化');
+            return;
+        }
+        
+        if (!confirm('再次确认：所有现有数据将被删除，确定要重新初始化吗？')) {
+            console.log('用户取消了重新初始化');
+            return;
+        }
+        
+        console.log('发送重新初始化请求...');
+        
+        fetch('/api/data/reinit', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({})
+        })
+        .then(response => response.json())
+        .then(result => {
+            console.log('后端响应:', result);
+            
+            if (result.success) {
+                const taskId = result.taskId;
+                console.log('重新初始化已启动，任务ID:', taskId);
+                
+                document.getElementById('init-step1').style.display = 'none';
+                document.getElementById('init-step2').style.display = 'block';
+                
+                pollInitProgress();
+            } else {
+                alert('启动重新初始化失败: ' + (result.message || '未知错误'));
+            }
+        })
+        .catch(error => {
+            console.error('启动重新初始化时出错:', error);
+            alert('启动重新初始化失败: ' + error.message);
+        });
+    } catch (error) {
+        console.error('开始重新初始化时出错:', error);
+        alert('启动重新初始化失败: ' + error.message);
+    }
+}
+
+/**
  * 重置初始化表单
  */
 function resetInitForm() {

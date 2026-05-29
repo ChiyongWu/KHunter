@@ -24,6 +24,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -643,6 +644,61 @@ class MoneyflowScorer:
             logger.debug(f"北向资金持平: {stock_code}")
             return base_score, "hold"
 
+    def _score_north_fund_with_data(
+        self, stock_code: str, north_df: Optional[pd.DataFrame]
+    ) -> Tuple[float, str]:
+        """
+        使用已获取的北向资金数据计算得分
+
+        这是 _score_north_fund 的优化版本，避免重复获取数据。
+
+        评分标准：
+          没有持股：0分
+          有持股基础分：50分
+            增持：+50分 = 100分
+            减持：-50分 = 0分
+            不变：维持 = 50分
+
+        参数:
+            stock_code: 股票代码（6位数字）
+            north_df: 已获取的北向资金数据
+        返回:
+            Tuple[float, str]: (北向资金得分, 持股状态)
+            状态: "none" / "increase" / "decrease" / "hold"
+        """
+        if north_df is None or north_df.empty:
+            logger.debug(f"北向资金无持股: {stock_code}")
+            return 0, "none"
+
+        df = north_df.copy()
+        
+        if "trade_date" in df.columns:
+            df = df.sort_values("trade_date", ascending=False)
+        latest = df.iloc[0]
+        vol_field = "vol" if "vol" in df.columns else "ratio"
+        latest_vol = float(latest.get(vol_field, 0))
+
+        if latest_vol <= 0:
+            return 0, "none"
+
+        base_score = 50
+        if len(df) < 2:
+            logger.debug(f"北向资金仅一期数据: {stock_code}")
+            return base_score, "hold"
+
+        prev = df.iloc[1]
+        prev_vol = float(prev.get(vol_field, 0))
+
+        if latest_vol > prev_vol:
+            logger.debug(f"北向资金增持: {stock_code}")
+            return base_score + 50, "increase"
+        elif latest_vol < prev_vol:
+            logger.debug(f"北向资金减持: {stock_code}")
+            return base_score - 50, "decrease"
+        else:
+            logger.debug(f"北向资金持平: {stock_code}")
+            return base_score, "hold"
+
     def _score_direction(self, large_net: float, small_net: float) -> float:
         """
         计算主力与散户方向维度得分
@@ -670,6 +726,41 @@ class MoneyflowScorer:
             return VETO_SCORE
         # 其他情况（大单流出 + 小单也流出等）
         return 0
+
+    def _fetch_moneyflow_and_north_concurrent(
+        self, stock_code: str, score_date: str
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        """
+        并发获取资金流向数据和北向资金数据
+
+        使用 ThreadPoolExecutor 并发调用两个独立的 Tushare API，
+        可以显著减少单只股票评分的 API 调用时间。
+
+        参数:
+            stock_code: 股票代码（6位数字）
+            score_date: 评分日期（YYYYMMDD 格式）
+        返回:
+            Tuple[DataFrame, DataFrame]: (资金流向数据, 北向资金数据)
+        """
+        formatted_date = self._format_date(score_date)
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_mf = executor.submit(self._fetch_moneyflow_data, stock_code, formatted_date)
+            future_nf = executor.submit(self._fetch_north_fund_data, stock_code)
+            
+            try:
+                df = future_mf.result(timeout=10)
+            except Exception as e:
+                logger.warning(f"获取资金流向数据超时或失败: {stock_code}, {e}")
+                df = None
+            
+            try:
+                north_df = future_nf.result(timeout=10)
+            except Exception as e:
+                logger.warning(f"获取北向资金数据超时或失败: {stock_code}, {e}")
+                north_df = None
+        
+        return df, north_df
 
     def _extract_flow_metrics(
         self, df: pd.DataFrame
@@ -798,16 +889,17 @@ class MoneyflowScorer:
         # 统一日期格式为 YYYYMMDD
         formatted_date = self._format_date(score_date)
 
-        # 获取资金流向数据（无论是否触发一票否决都需要）
-        df = self._fetch_moneyflow_data(stock_code, formatted_date)
-        # 提取评分指标
+        # 并发获取资金流向数据和北向资金数据
+        df, north_df = self._fetch_moneyflow_and_north_concurrent(stock_code, formatted_date)
+        
+        # 提取资金流向评分指标
         metrics = self._extract_flow_metrics(df)
         
         # 保存主力净流入数据
         detail.main_net_flow = metrics["net_flow_5d"]
 
-        # 先检查一票否决条件
-        is_veto, veto_reason = self.check_veto(stock_code, formatted_date)
+        # 先检查一票否决条件（使用已提取的指标，避免重复获取数据）
+        is_veto, veto_reason = self.check_veto(stock_code, formatted_date, metrics)
         if is_veto:
             # 触发一票否决
             detail.veto = True
@@ -833,8 +925,8 @@ class MoneyflowScorer:
         large_ratio_score = self._score_large_ratio(daily_ratios)
         detail.large_ratio_score = large_ratio_score
 
-        # 3. 计算北向资金得分
-        north_score, north_status = self._score_north_fund(stock_code)
+        # 3. 计算北向资金得分（使用已获取的 north_df）
+        north_score, north_status = self._score_north_fund_with_data(stock_code, north_df)
         detail.north_fund_score = north_score
         detail.north_fund_status = north_status
 
@@ -870,7 +962,7 @@ class MoneyflowScorer:
         return total_score, detail
 
     def check_veto(
-        self, stock_code: str, score_date: str
+        self, stock_code: str, score_date: str, metrics: dict = None
     ) -> Tuple[bool, str]:
         """
         检查资金面一票否决条件
@@ -882,16 +974,18 @@ class MoneyflowScorer:
         参数:
             stock_code: 股票代码（6位数字）
             score_date: 评分日期（YYYYMMDD 格式）
+            metrics: 已提取的指标字典（可选，用于避免重复计算）
         返回:
             Tuple[bool, str]: (是否触发一票否决, 否决原因)
         """
-        # 统一日期格式
-        formatted_date = self._format_date(score_date)
-
-        # 获取资金流向数据
-        df = self._fetch_moneyflow_data(stock_code, formatted_date)
-        # 提取评分指标
-        metrics = self._extract_flow_metrics(df)
+        # 如果没有传入指标，先获取数据并提取指标
+        if metrics is None:
+            # 统一日期格式
+            formatted_date = self._format_date(score_date)
+            # 获取资金流向数据
+            df = self._fetch_moneyflow_data(stock_code, formatted_date)
+            # 提取评分指标
+            metrics = self._extract_flow_metrics(df)
 
         # 条件1：5日主力净额 < -10000万元
         net_flow_5d = metrics["net_flow_5d"]

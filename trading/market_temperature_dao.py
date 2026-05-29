@@ -81,7 +81,7 @@ class MarketTemperatureDAO:
             
             if existing:
                 # 更新现有记录
-                self.db.update('market_temperature', record, 'trade_date = ?', (trade_date,))
+                self.db.update('market_temperature', record, {'trade_date': trade_date})
                 logger.info(f"更新市场温度数据: {trade_date}, 温度={record['temperature']}")
                 return existing['id']
             else:

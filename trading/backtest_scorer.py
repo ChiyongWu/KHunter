@@ -227,11 +227,11 @@ class BacktestScoreCalculator:
         # 第六步：计算综合得分
         # ============================================================
         total_score = (
-            score_obj.technical_score * 0.25  # 技术面权重 25%
-            + score_obj.moneyflow_score * 0.30  # 资金面权重 30%
-            + score_obj.fundamental_score * 0.15  # 基本面权重 15%
-            + score_obj.sector_score * 0.15  # 板块权重 15%
-            + score_obj.event_score * 0.15  # 事件权重 15%
+            score_obj.technical_score * 0.35  # 技术面权重 35%
+            + score_obj.moneyflow_score * 0.35  # 资金面权重 35%
+            + score_obj.fundamental_score * 0.10  # 基本面权重 10%
+            + score_obj.sector_score * 0.10  # 板块权重 10%
+            + score_obj.event_score * 0.10  # 事件权重 10%
         )
         
         # 限制范围

@@ -254,12 +254,9 @@ class WBottomStrategy(BaseStrategy):
             if h_price <= l1_price or h_price <= l2_price:
                 return None
 
-            # 关键验证：确认颈线位置（H的价格应该在L1和L2之间）
-            # 这里的"之间"是指H的价格应该高于L1和L2
-            # 实际上上面已经验证了 H > L1 且 H > L2，所以这个条件已经满足
-            # 但我们还需要验证H不是异常高点（例如，H不应该远高于L1和L2）
-            # 这个验证可以通过检查H是否在合理范围内来实现
-            # 为了简化，我们认为只要 H > L1 且 H > L2 就满足条件
+            # 新增验证：颈线位 >= L1 * 110%（确保W底涨幅空间足够）
+            if h_price < l1_price * 1.1:
+                return None
 
             # 返回满足条件的W底形态
             return (l1_idx, l1_price, h_pos_in_original, h_price, l2_idx, l2_price)
@@ -466,7 +463,7 @@ class WBottomStrategy(BaseStrategy):
         low_window = self.params['low_window']
         min_gap = self.params['min_gap']
         bottom_diff_threshold = self.params['bottom_diff_threshold'] * 100
-        criteria.append(f"2. W形态过滤：最近{pattern_days}个交易日内形成双底结构，两个低点价格差异不超过{bottom_diff_threshold:.0f}%，间隔至少{min_gap}个交易日，确认颈线位置")
+        criteria.append(f"2. W形态过滤：最近{pattern_days}个交易日内形成双底结构，两个低点价格差异不超过{bottom_diff_threshold:.0f}%，间隔至少{min_gap}个交易日，颈线位>=L1*110%")
         
         # 条件3：颈线突破确认
         criteria.append(f"3. 颈线突破确认：放量日收盘价突破颈线（突破1%），且前一日收盘价低于颈线")

@@ -3,7 +3,11 @@
 """
 from abc import ABC, abstractmethod
 import pandas as pd
+import logging
 from typing import Dict, Optional, Any
+from utils.feature_config_checker import FeatureConfigChecker
+
+logger = logging.getLogger(__name__)
 
 
 class TimingResult:
@@ -115,17 +119,45 @@ class TimingStrategyFactory:
         Returns:
             择时策略实例
         """
+        logger.info(f"开始创建择时策略: {strategy_name}")
+        
+        # 顺势宝策略需要检查功能配置
+        if strategy_name == "macd_bollinger":
+            logger.info("检测到顺势宝策略，开始检查功能配置")
+            checker = FeatureConfigChecker()
+            try:
+                valid_files, expire_date = checker.check_config()
+                logger.info(f"配置检查结果: 有效文件={valid_files}, 过期日期={expire_date}")
+                # 没有有效配置文件时必须阻止创建策略
+                if not valid_files:
+                    logger.error("顺势宝策略创建失败：未找到有效的功能配置文件")
+                    raise ValueError("顺势宝策略创建失败：未找到有效的功能配置文件")
+                logger.info("顺势宝策略配置检查通过")
+            except ValueError:
+                raise  # 直接重新抛出 ValueError
+            except Exception as e:
+                logger.error(f"顺势宝策略：检查功能配置失败: {e}")
+        
         if strategy_name == "turtle":
+            logger.info("创建海龟策略实例")
             from trading.turtle_strategy import TurtleStrategy
             return TurtleStrategy(config)
         elif strategy_name == "rsi":
+            logger.info("创建RSI策略实例")
             from trading.rsi_strategy import RSIStrategy
             return RSIStrategy(config)
         elif strategy_name == "bollinger":
+            logger.info("创建布林带策略实例")
             from trading.bollinger_strategy import BollingerStrategy
             return BollingerStrategy(config)
         elif strategy_name == "support":
+            logger.info("创建支撑位策略实例")
             from trading.support_strategy import SupportStrategy
             return SupportStrategy(config)
+        elif strategy_name == "macd_bollinger":
+            logger.info("创建顺势宝策略实例")
+            from trading.macd_bollinger_strategy import ShunShiBaoStrategy
+            return ShunShiBaoStrategy(config)
         else:
+            logger.error(f"未知的择时策略: {strategy_name}")
             raise ValueError(f"Unknown timing strategy: {strategy_name}")

@@ -66,6 +66,8 @@ def _get_default_mapping():
         'WBottomStrategy': 'W底策略',
         'ImmortalGuidanceStrategy': '仙人指路策略',
         'MA20MA60Strategy': '520560策略',
+        'Strategy2560Selection': '2560战法选股策略',
+        'TrendStartStrategy': '趋势起点策略',
     }
     
     reverse_map = {v: k for k, v in default_map.items()}

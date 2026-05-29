@@ -200,8 +200,9 @@ class KellyCalculator:
         # 计算基于凯莉比例的金额
         amount_by_kelly = total_capital * kelly_ratio
         
-        # 使用凯莉公式计算的金额，但不超过可用资金（兜底逻辑）
-        amount = min(amount_by_kelly, available_cash)
+        # 使用凯莉公式计算的金额（出信号时不考虑可用资金，按总资产×凯利系数计算）
+        # 实际执行时再检查可用资金是否充足
+        amount = amount_by_kelly
         
         # 应用最小投资金额约束
         if amount < min_invest_amount:
@@ -210,9 +211,11 @@ class KellyCalculator:
         # 向下取整为100的整数倍
         amount = int(amount // 100 * 100)
         
-        logger.debug(f"凯莉计算结果 - 策略:{strategy_name}, 胜率:{win_rate}, 盈亏比:{profit_loss_ratio}, "
-                    f"凯莉比例:{kelly_ratio:.4f}, 总资金:{total_capital}, 可用资金:{available_cash}, "
-                    f"计算金额:{amount}")
+        logger.info(f"【凯莉公式计算】策略:{strategy_name} | 胜率:{win_rate} | 盈亏比:{profit_loss_ratio} | "
+                    f"败率:{1-win_rate:.2f} | 凯莉比例:({win_rate:.2f}×{profit_loss_ratio:.2f}-{1-win_rate:.2f})÷{profit_loss_ratio:.2f}={kelly_ratio:.4f} | "
+                    f"约束:min={min_kelly_ratio},max={max_kelly_ratio},最大仓位={max_position_ratio} | "
+                    f"总资金:¥{total_capital:.2f} | 可用资金:¥{available_cash:.2f} | "
+                    f"凯莉金额:¥{amount_by_kelly:.2f} | 最终金额:¥{amount:.2f}")
         
         return amount
     
@@ -263,8 +266,9 @@ class KellyCalculator:
         # 计算基于凯莉比例的金额
         amount_by_kelly = total_capital * kelly_ratio
         
-        # 使用凯莉公式计算的金额，但不超过可用资金（兜底逻辑）
-        amount = min(amount_by_kelly, available_cash)
+        # 使用凯莉公式计算的金额（出信号时不考虑可用资金，按总资产×凯利系数计算）
+        # 实际执行时再检查可用资金是否充足
+        amount = amount_by_kelly
         
         # 应用最小投资金额约束
         if amount < min_invest_amount:
@@ -273,9 +277,11 @@ class KellyCalculator:
         # 向下取整为100的整数倍
         amount = int(amount // 100 * 100)
         
-        logger.debug(f"凯莉计算结果 - 策略:{strategy_name}, 胜率:{win_rate}, 盈亏比:{profit_loss_ratio}, "
-                    f"凯莉比例:{kelly_ratio:.4f}, 总资金:{total_capital}, 可用资金:{available_cash}, "
-                    f"计算金额:{amount}")
+        logger.info(f"【凯莉公式计算】策略:{strategy_name} | 胜率:{win_rate} | 盈亏比:{profit_loss_ratio} | "
+                    f"败率:{1-win_rate:.2f} | 凯莉比例:({win_rate:.2f}×{profit_loss_ratio:.2f}-{1-win_rate:.2f})÷{profit_loss_ratio:.2f}={kelly_ratio:.4f} | "
+                    f"约束:min={min_kelly_ratio},max={max_kelly_ratio},最大仓位={max_position_ratio} | "
+                    f"总资金:¥{total_capital:.2f} | 可用资金:¥{available_cash:.2f} | "
+                    f"凯莉金额:¥{amount_by_kelly:.2f} | 最终金额:¥{amount:.2f}")
         
         return {
             'amount': amount,
@@ -288,21 +294,23 @@ class KellyCalculator:
         }
     
     @staticmethod
-    def calculate_buy_quantity(position_amount: float, price: float) -> int:
+    def calculate_buy_quantity(position_amount: float, price: float, stock_code: str = '') -> int:
         """
-        计算买入数量（A股规则：必须是100的整数倍）
-        
+        计算买入数量（A股规则：必须是100/200的整数倍）
+
         Args:
             position_amount: 投资金额
             price: 当前价格
-            
+            stock_code: 股票代码（用于判断板块，默认为空时按100股处理）
+
         Returns:
-            买入数量（100的整数倍）
+            买入数量（100/200的整数倍）
         """
         if position_amount <= 0 or price <= 0:
             return 0
-        
-        # 计算数量并向下取整为100的整数倍
-        quantity = int(position_amount / price // 100 * 100)
-        
+
+        from utils.stock_utils import normalize_quantity
+        raw_quantity = position_amount / price
+        quantity = normalize_quantity(stock_code, raw_quantity)
+
         return max(quantity, 0)

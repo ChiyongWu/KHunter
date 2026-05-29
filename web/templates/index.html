@@ -238,11 +238,14 @@
                 <li class="nav-item active" data-page="dashboard">
                     <span class="icon">🏠</span> 市场速览
                 </li>
+                <li class="nav-item" data-page="strategy-runner">
+                    <span class="icon">🚀</span> 策略执行器
+                </li>
                 <li class="nav-item" data-page="khunter">
                     <span class="icon">🎯</span> 狩猎场
                 </li>
                 <li class="nav-item" data-page="khunter-track">
-                    <span class="icon">📈</span> 狩猎跟踪
+                    <span class="icon">🔭</span> 狩猎跟踪
                 </li>
                 
                 <!-- 形态选股 -->
@@ -251,13 +254,7 @@
                     <span class="icon">⚡</span> 选股结果
                 </li>
                 <li class="nav-item" data-page="history">
-                    <span class="icon">📊</span> 历史选股
-                </li>
-                
-                <!-- 资金选股 -->
-                <li class="nav-group-title">资金选股</li>
-                <li class="nav-item" data-page="money-flow">
-                    <span class="icon">💰</span> 资金流向
+                    <span class="icon">📑</span> 历史选股
                 </li>
                 
                 <!-- 智能分析 -->
@@ -265,11 +262,14 @@
                 <li class="nav-item" data-page="analysis">
                     <span class="icon">📈</span> 个股图谱
                 </li>
+                <li class="nav-item" data-page="money-flow">
+                    <span class="icon">💰</span> 资金流向
+                </li>
                 <li class="nav-item" data-page="stock-ranking">
                     <span class="icon">🏆</span> 选股排名
                 </li>
                 <li class="nav-item" data-page="ranking-track">
-                    <span class="icon">📈</span> 排名跟踪
+                    <span class="icon">📉</span> 排名跟踪
                 </li>
                 
                 <!-- 回测管理 -->
@@ -281,16 +281,10 @@
                     <span class="icon">📜</span> 回测历史
                 </li>
                 
-                <!-- 策略执行 -->
-                <li class="nav-group-title">策略执行</li>
-                <li class="nav-item" data-page="strategy-runner">
-                    <span class="icon">🚀</span> 策略执行器
-                </li>
-                
                 <!-- 数据管理 -->
                 <li class="nav-group-title">数据管理</li>
                 <li class="nav-item" data-page="stocks">
-                    <span class="icon">📊</span> 基础数据
+                    <span class="icon">📄</span> 基础数据
                 </li>
                 <li class="nav-item" data-page="data-init">
                     <span class="icon">📋</span> 初始化数据
@@ -301,10 +295,10 @@
                 <!-- 系统设置 -->
                 <li class="nav-group-title">系统设置</li>
                 <li class="nav-item" data-page="strategies">
-                    <span class="icon">⚙️</span> 策略配置
+                    <span class="icon">🛠️</span> 策略配置
                 </li>
                 <li class="nav-item" data-page="backtest-params">
-                    <span class="icon">⚙️</span> 回测配置
+                    <span class="icon">🔧</span> 回测配置
                 </li>
             </ul>
 
@@ -336,7 +330,7 @@
             <div class="content">
                 <!-- 概览页 -->
                 <div id="dashboard-page" class="page active">
-                    <div class="stats-grid">
+                    <div class="stats-grid" id="init-stats">
                         <div class="stat-card">
                             <div class="stat-icon">📈</div>
                             <div class="stat-info">
@@ -357,6 +351,27 @@
                                 <h3 id="stat-strategies">-</h3>
                                 <p>策略数量</p>
                             </div>
+                        </div>
+                        <!-- 风控指标卡片 -->
+                        <div class="stat-card risk-stat-card" onclick="openRiskModal()">
+                            <div class="stat-icon">🛡️</div>
+                            <div class="stat-info">
+                                <h3 id="stat-var" class="var-display">-</h3>
+                                <span id="stat-risk-level" class="risk-badge">-</span>
+                            </div>
+                            <div class="stat-arrow">→</div>
+                        </div>
+                        <!-- 市场温度卡片 -->
+                        <div class="stat-card temp-stat-card" onclick="openTemperatureModal()">
+                            <div class="stat-icon">🌡️</div>
+                            <div class="stat-info">
+                                <div class="temp-main-row">
+                                    <h3 id="stat-temperature" class="temp-display">-</h3>
+                                    <span id="stat-temp-status" class="temp-badge">-</span>
+                                </div>
+                                <div id="stat-temp-action" class="temp-action">-</div>
+                            </div>
+                            <div class="stat-arrow">→</div>
                         </div>
                     </div>
 
@@ -488,6 +503,7 @@
                             <div style="display: flex; gap: 10px; justify-content: flex-end;">
                                 <button class="btn btn-secondary" onclick="resetInitForm()">重置</button>
                                 <button class="btn btn-primary" onclick="startInitialization()">开始初始化</button>
+                                <button class="btn btn-danger" onclick="startReinit()">重新初始化</button>
                             </div>
                         </div>
                     </div>
@@ -591,7 +607,7 @@
                     <div class="card">
                         <div class="card-header">
                             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                <span id="selection-date" class="text-primary" style="font-weight:600;"></span>
+                                <span id="selection-date-display" class="text-primary" style="font-weight:600;"></span>
                                 <span id="selection-time" class="text-muted"></span>
                                 <button class="btn btn-success" id="export-selection-btn" onclick="exportSelectionResults()" style="display:none;">
                                     <span class="icon">📥</span> 导出结果
@@ -798,54 +814,6 @@
                                     <label for="params-take-profit" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">止盈比例</label>
                                     <input type="number" id="params-take-profit" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" min="0.01" max="1" step="0.01" value="0.15" aria-label="止盈比例">
                                 </div>
-                                <div>
-                                    <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">交易约束</label>
-                                    <div style="display:flex; flex-direction:column; gap:6px;">
-                                        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
-                                            <input type="checkbox" id="params-enable-friday-buy-ban" checked style="width:14px; height:14px; cursor:pointer;" aria-label="周五禁买">
-                                            <span>周五禁买</span>
-                                        </label>
-                                        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
-                                            <input type="checkbox" id="params-enable-dynamic-stop-loss" checked style="width:14px; height:14px; cursor:pointer;" aria-label="3天内动态止损">
-                                            <span>持股3天内止损2/3</span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- 温度约束配置 -->
-                            <div style="margin-top: 20px; padding: 16px; background: #f9fafb; border-radius: 6px; border: 1px solid #e5e7eb;">
-                                <h4 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: #374151; display: flex; align-items: center; gap: 8px;">
-                                    🌡️ 市场温度约束
-                                </h4>
-                                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
-                                    <div>
-                                        <label for="params-enable-temp-limit" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">启用温度约束</label>
-                                        <select id="params-enable-temp-limit" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" aria-label="启用温度约束">
-                                            <option value="1">启用</option>
-                                            <option value="0">禁用</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label for="params-temp-limit-mode" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">约束模式</label>
-                                        <select id="params-temp-limit-mode" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;" aria-label="约束模式">
-                                            <option value="both">同时约束数量和仓位</option>
-                                            <option value="count">仅约束买入数量</option>
-                                            <option value="position">仅约束仓位</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div style="margin-top: 12px; font-size: 12px; color: #6b7280;">
-                                    <p style="margin: 0 0 4px 0;"><strong>温度约束规则说明：</strong></p>
-                                    <ul style="margin: 0; padding-left: 18px;">
-                                        <li>活跃(≥80°)：不限买入/满仓</li>
-                                        <li>正常(65-79°)：最多5只/80%仓位</li>
-                                        <li>偏冷(50-64°)：最多3只/50%仓位</li>
-                                        <li>寒冷(30-49°)：最多1只/25%仓位</li>
-                                        <li>冰封(15-29°)：0-1只/10%仓位</li>
-                                        <li>极端(&lt;15°)：禁止买入/0%仓位</li>
-                                    </ul>
-                                </div>
                             </div>
                             
                             <button type="button" id="save-backtest-params-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px; margin-top: 16px;" aria-label="保存回测配置">保存配置</button>
@@ -868,13 +836,7 @@
                                 <div>
                                     <label for="backtest-timing-strategy" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">择时策略</label>
                                     <select id="backtest-timing-strategy" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:150px;">
-                                        <option value="turtle">海龟策略</option>
-                                        <option value="rsi">RSI策略</option>
-                                        <option value="bollinger">布林带策略</option>
-                                        <option value="support_ma20">支撑位-20日均线</option>
-                                        <option value="support_close95">支撑位-关键日收盘价下5%</option>
-                                        <option value="support_open">支撑位-关键日开盘价</option>
-                                        <option value="support_close">支撑位-关键日收盘价</option>
+                                        <!-- 动态加载策略列表 -->
                                     </select>
                                 </div>
                                 <div>
@@ -1046,20 +1008,17 @@
                     <div class="card">
                         <div class="card-body">
                             <!-- 筛选条件 -->
-                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin-bottom:24px;">
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:15px; margin-bottom:24px;">
                                 <div>
-                                    <label for="history-strategy-filter" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">策略选择</label>
-                                    <select id="history-strategy-filter" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; background-color:white;">
+                                    <label for="backtest-history-strategy-filter" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">策略选择</label>
+                                    <select id="backtest-history-strategy-filter" style="width:100%; padding:8px 12px; border:1px solid #d1d5db; border-radius:6px; font-size:12px; background-color:white; appearance:none; cursor:pointer;">
+                                        <option value="" disabled selected>请选择策略</option>
                                         <option value="">全部策略</option>
                                     </select>
                                 </div>
                                 <div>
-                                    <label for="history-start-date" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">开始日期</label>
-                                    <input type="date" id="history-start-date" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;">
-                                </div>
-                                <div>
-                                    <label for="history-end-date" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">结束日期</label>
-                                    <input type="date" id="history-end-date" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;">
+                                    <label for="history-date" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">执行日期</label>
+                                    <input type="date" id="history-date" style="width:100%; padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px;">
                                 </div>
                                 <div style="align-self:flex-end;">
                                     <button class="btn btn-primary" onclick="searchBacktestHistory()" style="padding:6px 16px; font-size:12px; width:100%;">查询</button>
@@ -1072,8 +1031,10 @@
                                     <thead>
                                         <tr>
                                             <th scope="col">策略名称</th>
+                                            <th scope="col">择时策略</th>
                                             <th scope="col">开始日期</th>
                                             <th scope="col">结束日期</th>
+                                            <th scope="col">回测时间</th>
                                             <th scope="col">总收益率</th>
                                             <th scope="col">胜率</th>
                                             <th scope="col">盈亏比</th>
@@ -1081,10 +1042,11 @@
                                             <th scope="col">夏普比率</th>
                                             <th scope="col">操作</th>
                                             <th scope="col">导出</th>
+                                            <th scope="col">删除</th>
                                         </tr>
                                     </thead>
                                     <tbody id="backtest-history-body">
-                                        <tr><td colspan="10" class="loading">加载中...</td></tr>
+                                        <tr><td colspan="13" class="loading">加载中...</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -1107,10 +1069,7 @@
                                 <div>
                                     <label for="timing-strategy" style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:5px;">择时策略</label>
                                     <select id="timing-strategy" style="padding:6px; border:1px solid #d1d5db; border-radius:4px; font-size:12px; min-width:180px;">
-                                        <option value="turtle">海龟策略</option>
-                                        <option value="rsi">RSI策略</option>
-                                        <option value="bollinger">布林带策略</option>
-                                        <option value="support">支撑位策略</option>
+                                        <!-- 动态加载策略列表 -->
                                     </select>
                                 </div>
                                 <button type="button" id="add-runner-task-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px;">加入任务</button>
@@ -1134,11 +1093,14 @@
                                     </table>
                                 </div>
                                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                                    <div style="font-size:12px; color:#6b7280;">
-                                        <span>任务总数: <span id="runner-task-count" style="font-weight:bold;">0</span></span>
+                                        <div style="font-size:12px; color:#6b7280;">
+                                            <span>任务总数: <span id="runner-task-count" style="font-weight:bold;">0</span></span>
+                                        </div>
+                                        <div style="display:flex; gap:10px;">
+                                            <button type="button" id="init-runner-btn" class="btn btn-primary" style="padding:6px 16px; font-size:12px;">初始化策略运行器</button>
+                                            <button type="button" id="start-runner-btn" class="btn btn-success" style="padding:6px 16px; font-size:12px;" disabled>开始执行</button>
+                                        </div>
                                     </div>
-                                    <button type="button" id="start-runner-btn" class="btn btn-success" style="padding:6px 16px; font-size:12px;">开始执行</button>
-                                </div>
                             </div>
                             
                             <!-- 执行进度区域 -->
@@ -1188,11 +1150,12 @@
                                     <div style="font-size:20px; font-weight:bold; color:#374151;" id="portfolio-profit">0%</div>
                                 </div>
                             </div>
+                            <div style="text-align:right; margin-bottom:12px; font-size:12px; color:#6b7280;" id="portfolio-date">资金日期: N/A</div>
                             
                             <!-- 股票池 -->
                             <div class="card" style="margin-bottom:16px;">
                                 <div class="card-header" style="padding:10px 16px;">
-                                    <span style="font-weight:600; color:#374151;">股票池（用于择时）</span>
+                                    <span style="font-weight:600; color:#374151;" id="pool-title">股票池（用于择时）</span>
                                 </div>
                                 <div class="card-body" style="padding:0;">
                                     <div class="table-responsive">
@@ -1245,8 +1208,8 @@
                             
                             <!-- 今日信号 -->
                             <div class="card" style="margin-bottom:16px;">
-                                <div class="card-header" style="padding:10px 16px;">
-                                    <span style="font-weight:600; color:#374151;">今日信号</span>
+                                <div class="card-header" style="padding:10px 16px; display:flex; justify-content:space-between; align-items:center;">
+                                    <span style="font-weight:600; color:#374151;" id="signals-title">今日信号</span>
                                 </div>
                                 <div class="card-body" style="padding:0;">
                                     <div class="table-responsive">
@@ -1258,6 +1221,7 @@
                                                     <th>名称</th>
                                                     <th>价格</th>
                                                     <th>数量</th>
+                                                    <th>策略</th>
                                                     <th>原因</th>
                                                     <th>操作</th>
                                                 </tr>
@@ -1682,10 +1646,7 @@
                                 <div class="form-group" style="display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 200px;">
                                     <label for="timing-strategy" style="white-space: nowrap;">择时策略</label>
                                     <select id="timing-strategy" class="form-control">
-                                        <option value="support" selected>支撑位策略</option>
-                                        <option value="turtle">海龟策略</option>
-                                        <option value="rsi">RSI策略</option>
-                                        <option value="bollinger">布林带策略</option>
+                                        <!-- 动态加载策略列表 -->
                                     </select>
                                 </div>
                                 
@@ -1952,6 +1913,7 @@
         </div>
     </div>
 
+    <script src="/static/js/dashboard_stats.js"></script>
     <script type="module" src="/static/js/app.js?v=14"></script>
     <script src="/static/js/kline_chart.js"></script>
     <script src="/static/js/init_simple.js?v=2"></script>
@@ -2081,6 +2043,200 @@
         <div class="loading-content">
             <span class="spinner"></span>
             <span>处理中...</span>
+        </div>
+    </div>
+
+    <!-- 风控详情模态窗口 -->
+    <div id="risk-modal" class="modal-overlay">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3>🛡️ 风控状态详情</h3>
+                <button class="modal-close" onclick="closeRiskModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- 风控指标详情 -->
+                <div class="modal-section">
+                    <h4>风险指标</h4>
+                    <div class="grid-2">
+                        <div class="info-box">
+                            <label>日期</label>
+                            <span id="modal-risk-date">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>风险等级</label>
+                            <span id="modal-risk-level" class="risk-badge-lg">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>VaR(1日)</label>
+                            <span id="modal-var-1d" class="var-value">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>VaR(5日)</label>
+                            <span id="modal-var-5d" class="var-value">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>ES(1日)</label>
+                            <span id="modal-es-1d" class="var-value">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>策略状态</label>
+                            <span id="modal-strategy-enabled" class="strategy-status">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 风控参数 -->
+                <div class="modal-section">
+                    <h4>风控参数</h4>
+                    <div class="grid-2">
+                        <div class="info-box">
+                            <label>仓位上限</label>
+                            <span id="modal-position-limit">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>止损倍数</label>
+                            <span id="modal-stop-loss-multiplier">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>额外分数门槛</label>
+                            <span id="modal-score-extra">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>强制清仓</label>
+                            <span id="modal-liquidate" class="liquidate-status">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 风险等级历史趋势图表 -->
+                <div class="modal-section">
+                    <h4>近30天风险趋势</h4>
+                    <div class="chart-container">
+                        <canvas id="risk-trend-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="refreshRiskData()">刷新数据</button>
+                <button class="btn btn-secondary" onclick="closeRiskModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 市场温度详情模态窗口 -->
+    <div id="temperature-modal" class="modal-overlay">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3>🌡️ 市场温度详情</h3>
+                <button class="modal-close" onclick="closeTemperatureModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- 温度概览 -->
+                <div class="modal-section">
+                    <h4>市场温度概览</h4>
+                    <div class="grid-2">
+                        <div class="info-box">
+                            <label>交易日期</label>
+                            <span id="modal-temp-date">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>综合温度</label>
+                            <span id="modal-temperature" class="temp-value-lg">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>市场状态</label>
+                            <span id="modal-temp-status" class="temp-badge-lg">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>仓位系数</label>
+                            <span id="modal-position-ratio">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>狩猎场规则</label>
+                            <span id="modal-action">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 各维度得分 -->
+                <div class="modal-section">
+                    <h4>各维度得分</h4>
+                    <div class="grid-2">
+                        <div class="score-box">
+                            <label>涨跌家数比</label>
+                            <div class="score-bar-container">
+                                <div id="score-up-down" class="score-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="score-up-down-value">-</span>
+                        </div>
+                        <div class="score-box">
+                            <label>跌停家数</label>
+                            <div class="score-bar-container">
+                                <div id="score-limit-down" class="score-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="score-limit-down-value">-</span>
+                        </div>
+                        <div class="score-box">
+                            <label>涨停表现</label>
+                            <div class="score-bar-container">
+                                <div id="score-limit-up" class="score-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="score-limit-up-value">-</span>
+                        </div>
+                        <div class="score-box">
+                            <label>成交额</label>
+                            <div class="score-bar-container">
+                                <div id="score-volume" class="score-bar" style="width: 0%"></div>
+                            </div>
+                            <span id="score-volume-value">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 原始数据 -->
+                <div class="modal-section">
+                    <h4>原始数据</h4>
+                    <div class="grid-2">
+                        <div class="info-box">
+                            <label>上涨家数</label>
+                            <span id="modal-up-count">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>下跌家数</label>
+                            <span id="modal-down-count">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>跌停家数</label>
+                            <span id="modal-limit-down-count">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>涨停平均涨幅</label>
+                            <span id="modal-avg-limit-up">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>总成交额</label>
+                            <span id="modal-total-volume">-</span>
+                        </div>
+                        <div class="info-box">
+                            <label>成交量/MA5</label>
+                            <span id="modal-volume-ma5">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 温度历史趋势图表 -->
+                <div class="modal-section">
+                    <h4>近30天温度趋势</h4>
+                    <div class="chart-container">
+                        <canvas id="temperature-trend-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="refreshTemperatureData()">刷新数据</button>
+                <button class="btn btn-warning" onclick="recalculateTemperatureData()">重新计算当日温度</button>
+                <button class="btn btn-secondary" onclick="closeTemperatureModal()">关闭</button>
+            </div>
         </div>
     </div>
 </body>

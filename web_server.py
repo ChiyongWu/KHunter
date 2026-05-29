@@ -1,6 +1,7 @@
 """
 Web 服务器 - A股量化选股系统前端
 """
+from trading.strategy_runner import StrategyRunner
 from flask import Flask, render_template, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
 import json
@@ -15,6 +16,13 @@ import os
 import traceback
 import sqlite3
 from json import JSONEncoder
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # 自定义JSON编码器，处理numpy类型和NaN值
 class NumpyEncoder(JSONEncoder):
@@ -197,6 +205,7 @@ logger.info("已注册个股评分API蓝图")
 
 # 注册KHunter蓝图
 from trading.routes import khunter_bp
+from utils.strategy_config_manager import StrategyConfigManager
 app.register_blueprint(khunter_bp)
 logger.info("已注册KHunter蓝图")
 
@@ -1506,6 +1515,72 @@ def get_strategies():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@ app.route('/api/timing-strategies')
+def get_timing_strategies():
+    """获取择时策略列表 - 根据配置文件存在与否决定是否包含顺势宝策略"""
+    logger.info("开始获取择时策略列表")
+    try:
+        from utils.feature_config_checker import FeatureConfigChecker
+        
+        # 检查功能配置
+        checker = FeatureConfigChecker()
+        has_valid_config = False
+        try:
+            valid_files, expire_date = checker.check_config()
+            has_valid_config = bool(valid_files)
+            logger.info(f"功能配置检查结果: 有效文件={valid_files}, 过期日期={expire_date}, has_valid_config={has_valid_config}")
+        except Exception as e:
+            logger.warning(f"检查功能配置时发生异常: {e}")
+        
+        # 基础择时策略列表
+        timing_strategies = [
+            {'name': 'turtle', 'display_name': '海龟策略'},
+            {'name': 'support', 'display_name': '支撑位策略'},
+            {'name': 'rsi', 'display_name': 'RSI策略'},
+            {'name': 'bollinger', 'display_name': '布林带策略'}
+        ]
+        logger.info(f"基础择时策略列表: {[s['display_name'] for s in timing_strategies]}")
+        
+        # 只有配置文件存在时才添加顺势宝策略
+        if has_valid_config:
+            timing_strategies.append({'name': 'macd_bollinger', 'display_name': '顺势宝'})
+            logger.info("检测到有效配置文件，添加顺势宝策略")
+        else:
+            logger.info("未检测到有效配置文件，不添加顺势宝策略")
+        
+        return jsonify({'success': True, 'strategies': timing_strategies})
+    except Exception as e:
+        logger.error(f"获取择时策略列表失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/strategy/has-config')
+def check_strategy_config():
+    """检查策略配置文件是否存在"""
+    logger.info("检查策略配置文件是否存在")
+    try:
+        from utils.feature_config_checker import FeatureConfigChecker
+        
+        checker = FeatureConfigChecker()
+        valid_files, expire_date = checker.check_config()
+        has_valid_config = bool(valid_files)
+        
+        logger.info(f"配置文件检查结果: has_valid_config={has_valid_config}, expire_date={expire_date}")
+        
+        return jsonify({
+            'success': True,
+            'has_config': has_valid_config,
+            'expire_date': expire_date
+        })
+    except Exception as e:
+        logger.error(f"检查配置文件失败: {str(e)}")
+        return jsonify({
+            'success': True,
+            'has_config': False,
+            'expire_date': None
+        })
+
+
 @app.route('/api/strategies/<name>/validate', methods=['POST'])
 def validate_strategy_params(name):
     """验证策略参数 - 检查策略是否存在"""
@@ -2336,6 +2411,76 @@ def resume_initialization():
         })
 
 
+@app.route('/api/data/check')
+def check_data_completeness():
+    """
+    检查数据完整性
+    
+    返回：
+        各数据表的完整性信息
+    """
+    try:
+        result = data_collection_service.check_data_completeness()
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"检查数据完整性失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/data/status')
+def get_data_status():
+    """
+    获取数据状态摘要
+    
+    返回：
+        数据状态信息
+    """
+    try:
+        status = data_collection_service.get_data_status()
+        return jsonify({
+            'success': True,
+            'data': status
+        })
+    except Exception as e:
+        logger.error(f"获取数据状态失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
+@app.route('/api/data/reinit', methods=['POST'])
+def start_reinit():
+    """
+    强制重新初始化数据
+    
+    请求体（可选）：
+        {
+            'stockCount': 2000,
+            'klineDays': 250
+        }
+    
+    返回：
+        任务信息
+    """
+    try:
+        data = request.get_json() or {}
+        stock_count = data.get('stockCount')
+        kline_days = data.get('klineDays')
+        
+        result = data_collection_service.start_reinit(stock_count, kline_days)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"启动重新初始化失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
+
 @app.route('/api/data/update/config')
 def get_update_config():
     """
@@ -3122,10 +3267,17 @@ strategy_runner = None
 import threading
 _strategy_run_lock = threading.Lock()
 
-def get_strategy_runner():
-    """获取策略运行器实例（延迟初始化）"""
+def get_strategy_runner(auto_init=False):
+    """获取策略运行器实例（延迟初始化）
+    
+    Args:
+        auto_init: 是否自动初始化，默认False（禁止自动初始化）
+    
+    Returns:
+        策略运行器实例，如果未初始化且auto_init=False则返回None
+    """
     global strategy_runner
-    if strategy_runner is None:
+    if strategy_runner is None and auto_init:
         try:
             from trading.strategy_runner import StrategyRunner
             logger.info("开始初始化策略运行器...")
@@ -3142,47 +3294,6 @@ def get_strategy_runner():
 
 
 
-@app.route('/api/strategy/run', methods=['POST'])
-def run_strategy():
-    """
-    运行策略
-
-    参数：
-        strategies: 选股策略列表（兼容 strategy_names）
-        timing_strategy: 择时策略名称
-        config: 配置参数（包含 max_stocks 最大持仓数等）
-        end_date: 选股日期（YYYY-MM-DD格式），如果不提供则使用当前工作日期
-
-    返回：
-        {"status": "success", "message": "策略运行完成", "data": {...}}
-    """
-    try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
-        if not runner:
-            return jsonify({"status": "failed", "message": "策略运行器初始化失败"})
-
-        # 获取请求参数
-        data = request.json or {}
-        # 兼容两种参数名称：strategies 和 strategy_names
-        strategy_names = data.get('strategies', data.get('strategy_names', []))
-        timing_strategy = data.get('timing_strategy', 'support')
-        config = data.get('config', {})
-        end_date = data.get('end_date')
-
-        # 如果提供了end_date，在config中设置selection_date
-        if end_date:
-            config['selection_date'] = end_date
-
-        # 运行策略
-        result = runner.run_strategy(strategy_names, timing_strategy, config)
-
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"运行策略失败: {str(e)}")
-        return jsonify({"status": "failed", "message": str(e)})
-
-
 @app.route('/api/strategy/run-batch', methods=['POST'])
 def run_strategy_batch():
     """
@@ -3197,10 +3308,10 @@ def run_strategy_batch():
         {"status": "success", "message": "批量策略运行完成", "results": [...]}
     """
     try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 不自动初始化策略运行器，需要手动调用初始化接口
+        runner = get_strategy_runner(auto_init=False)
         if not runner:
-            return jsonify({"status": "failed", "message": "策略运行器初始化失败"})
+            return jsonify({"status": "failed", "message": "策略运行器未初始化，请先调用初始化接口"})
         
         data = request.json or {}
         tasks = data.get('tasks', [])
@@ -3217,12 +3328,43 @@ def run_strategy_batch():
             if backtest_config:
                 config = backtest_config
         
+        # 检查是否有任务使用海龟策略，从配置文件读取海龟策略参数（与 run_strategy 保持一致）
+        has_turtle = any(task.get('timing_strategy') == 'turtle' for task in tasks)
+        if has_turtle:
+            try:
+                config_manager = StrategyConfigManager()
+                turtle_config = config_manager.get_strategy_config('TurtleStrategy')
+                turtle_params = turtle_config.get('params', {})
+                logger.info(f"从配置文件读取海龟策略参数: n_entry={turtle_params.get('n_entry')}, "
+                           f"n_exit={turtle_params.get('n_exit')}, atr_period={turtle_params.get('atr_period')}")
+                # 将海龟策略参数添加到config中
+                config['n_entry'] = turtle_params.get('n_entry')
+                config['n_exit'] = turtle_params.get('n_exit')
+                config['atr_period'] = turtle_params.get('atr_period')
+                config['entry_atr'] = turtle_params.get('entry_atr')
+                config['add_atr'] = turtle_params.get('add_atr')
+                config['exit_atr'] = turtle_params.get('exit_atr')
+                config['base_position_amount'] = turtle_params.get('base_position_amount')
+            except Exception as e:
+                logger.warning(f"读取海龟策略配置失败，使用默认值: {str(e)}")
+                # 使用默认值
+                config['n_entry'] = 20
+                config['n_exit'] = 10
+                config['atr_period'] = 20
+                config['entry_atr'] = 0.02
+                config['add_atr'] = 0.5
+                config['exit_atr'] = 2.0
+                config['base_position_amount'] = 20000
+        
         # 执行批量任务
         results = runner.run_strategies_batch(tasks, config)
         
         if results.get('status') == 'success':
+            # 获取择时策略（所有任务使用相同的择时策略）
+            timing_strategy = tasks[0].get('timing_strategy', 'support') if tasks else 'support'
             runner.save_task_record({
                 'strategies': [task.get('selection_strategy', '') for task in tasks],
+                'timing_strategy': timing_strategy,
                 'initial_capital': config.get('initial_capital', 300000),
                 'mode': 'realtime'
             })
@@ -3235,6 +3377,32 @@ def run_strategy_batch():
         return jsonify({"status": "failed", "message": str(e)})
 
 
+@app.route('/api/strategy/initialize', methods=['POST'])
+def initialize_strategy_runner():
+    """
+    手动初始化策略运行器
+    
+    返回：
+        {"success": true, "message": "策略运行器初始化成功"}
+    """
+    try:
+        global strategy_runner
+        if strategy_runner is not None:
+            return jsonify({"success": True, "message": "策略运行器已经初始化"})
+        
+        from trading.strategy_runner import StrategyRunner
+        logger.info("手动初始化策略运行器...")
+        strategy_runner = StrategyRunner()
+        logger.info("策略运行器初始化成功")
+        
+        return jsonify({"success": True, "message": "策略运行器初始化成功"})
+    except Exception as e:
+        logger.error(f"策略运行器初始化失败: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "message": f"策略运行器初始化失败: {str(e)}"})
+
+
 @app.route('/api/strategy/status')
 def get_strategy_status():
     """
@@ -3244,8 +3412,8 @@ def get_strategy_status():
         {"success": true, "data": {"date": "2026-04-24", "status": "completed", "strategy": "海龟策略"}}
     """
     try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 不自动初始化策略运行器，只在有需要时才初始化
+        runner = get_strategy_runner(auto_init=False)
         if not runner:
             return jsonify({"success": True, "data": {"date": "", "status": "not_initialized", "strategy": "",
                                                      "running": False, "selected_stocks": 0, "today_trades": 0, "last_run": "从未"}})
@@ -3318,19 +3486,12 @@ def get_portfolio():
         {"success": true, "data": {"positions": {...}, "initial_cash": 300000}}
     """
     try:
-        # 延迟初始化策略运行器
+        # 延迟初始化策略运行器（仅在未初始化时才初始化）
         runner = get_strategy_runner()
         if not runner:
-            return jsonify({
-                "success": True, 
-                "data": {
-                    "positions": [],
-                    "positions_count": 0,
-                    "available_cash": 300000,
-                    "total_assets": 300000,
-                    "total_profit_percent": 0
-                }
-            })
+            logger.info("策略运行器未初始化，进行初始化...")
+            from trading.strategy_runner import StrategyRunner
+            runner = StrategyRunner()
         
         # 获取当前工作日期
         working_date = runner.get_working_date()
@@ -3362,31 +3523,44 @@ def get_portfolio():
         # 先从文件中获取资金，如果没有就用默认
         available_cash = file_data.get('cash', 300000)
         initial_capital = file_data.get('initial_capital', 300000)
-        total_assets = initial_capital
-        total_profit_percent = 0
         
-        # 如果有持仓，计算实际的资产和盈亏
-        if positions and isinstance(positions, dict):
-            total_value = 0
-            for stock_code, pos in positions.items():
-                if isinstance(pos, dict):
-                    total_value += pos.get('quantity', 0) * pos.get('current_price', 0)
-            
-            total_assets = available_cash + total_value
-            total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
-        
-        # 转换为列表格式
+        # 转换为列表格式（同时更新价格和计算总资产）
         positions_list = []
+        total_value = 0  # 用新价格计算的持仓总市值
+        
         if positions and isinstance(positions, dict):
             for stock_code, pos in positions.items():
                 if isinstance(pos, dict):
                     # 获取成本价（优先buy_price，兼容cost_price）
-                    cost_price = pos.get('buy_price', pos.get('cost_price', 0))
+                    cost_price = round(pos.get('buy_price', pos.get('cost_price', 0)), 2)
+                    
+                    # 获取最新价格（从数据库获取working_date的收盘价）
                     current_price = pos.get('current_price', 0)
+                    try:
+                        df_price = runner.db_manager.read_stock(stock_code)
+                        if df_price is not None and not df_price.empty:
+                            # 查找working_date对应的行
+                            price_row = df_price[df_price['date'] == working_date]
+                            if not price_row.empty:
+                                current_price = float(price_row['close'].values[0])
+                            else:
+                                # 如果没有working_date的数据，取最后一行
+                                current_price = float(df_price['close'].values[-1])
+                    except Exception as e:
+                        logger.debug(f"获取股票 {stock_code} 价格失败: {e}")
+                    
                     quantity = pos.get('quantity', 0)
+                    
                     # 计算盈亏
                     profit_loss = (current_price - cost_price) * quantity
                     profit_loss_percent = ((current_price - cost_price) / cost_price * 100 if cost_price > 0 else 0)
+                    
+                    # 计算止损止盈价格（止损5%，止盈15%）
+                    stop_loss_price = cost_price * 0.95
+                    take_profit_price = cost_price * 1.15
+                    
+                    # 累加持仓市值（用新价格）
+                    total_value += quantity * current_price
                     
                     positions_list.append({
                         'id': pos.get('id', stock_code),
@@ -3395,10 +3569,16 @@ def get_portfolio():
                         'quantity': quantity,
                         'cost_price': cost_price,
                         'current_price': current_price,
+                        'stop_loss_price': stop_loss_price,
+                        'take_profit_price': take_profit_price,
                         'profit_loss': pos.get('profit_loss', profit_loss),
                         'profit_loss_percent': pos.get('profit_loss_percent', profit_loss_percent),
                         'hold_days': pos.get('hold_days', pos.get('holding_days', 0))
                     })
+        
+        # 计算总资产和盈亏率（用新价格计算）
+        total_assets = available_cash + total_value
+        total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
         
         # 返回持仓信息和统计数据
         return jsonify({
@@ -3415,6 +3595,106 @@ def get_portfolio():
         })
     except Exception as e:
         logger.error(f"获取持仓信息失败: {str(e)}")
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/portfolio/sell', methods=['POST'])
+def sell_position():
+    """
+    卖出持仓中的股票（按现价执行）
+    
+    参数：
+        stock_code: 股票代码
+        
+    返回：
+        {"success": true, "data": {...}} 或 {"success": false, "error": "..."}
+    """
+    try:
+        data = request.get_json()
+        stock_code = data.get('stock_code')
+        
+        if not stock_code:
+            return jsonify({"success": False, "error": "股票代码不能为空"})
+        
+        # 获取策略运行器
+        runner = get_strategy_runner()
+        if not runner:
+            logger.info("策略运行器未初始化，进行初始化...")
+            from trading.strategy_runner import StrategyRunner
+            runner = StrategyRunner()
+        
+        # 获取当前工作日期
+        working_date = runner.get_working_date()
+        
+        # 加载持仓
+        portfolio_file = runner.running_dir / f"portfolio_{working_date}.json"
+        if portfolio_file.exists():
+            portfolio_result = runner._load_portfolio(str(portfolio_file))
+            runner.portfolio = portfolio_result.get('positions', {})
+        else:
+            return jsonify({"success": False, "error": "持仓文件不存在"})
+        
+        # 检查是否持有该股票
+        if stock_code not in runner.portfolio:
+            return jsonify({"success": False, "error": f"未持有股票: {stock_code}"})
+        
+        position = runner.portfolio[stock_code]
+        quantity = position.get('quantity', 0)
+        
+        if quantity <= 0:
+            return jsonify({"success": False, "error": "持仓数量为0"})
+        
+        # 获取当前价格
+        current_price = position.get('current_price', 0)
+        try:
+            df_price = runner.db_manager.read_stock(stock_code)
+            if df_price is not None and not df_price.empty:
+                price_row = df_price[df_price['date'] == working_date]
+                if not price_row.empty:
+                    current_price = float(price_row['close'].values[0])
+                else:
+                    current_price = float(df_price['close'].values[-1])
+        except Exception as e:
+            logger.debug(f"获取股票 {stock_code} 价格失败: {e}")
+        
+        if current_price <= 0:
+            return jsonify({"success": False, "error": "无法获取当前价格"})
+        
+        # 创建卖出信号
+        signal_id = f"manual_sell_{stock_code}_{working_date}"
+        signal = {
+            'id': signal_id,
+            'date': working_date,
+            'stock_code': stock_code,
+            'stock_name': position.get('stock_name', ''),
+            'signal_type': 'sell',
+            'sell_type': 'manual',
+            'quantity': quantity,
+            'price': current_price,
+            'amount': quantity * current_price,
+            'profit_rate': position.get('profit_rate', 0),
+            'reason': '手动卖出',
+            'strategy_name': position.get('strategy_name', 'N/A'),
+            'timing_strategy': 'manual',
+            'executed': False,
+            'executed_date': None
+        }
+        
+        # 添加到信号列表
+        runner.signals.append(signal)
+        
+        # 执行卖出
+        result = runner.execute_signal(signal_id)
+        
+        if result.get('success'):
+            # 保存持仓（_save_portfolio只需要传入持仓字典）
+            runner._save_portfolio(runner.portfolio, str(portfolio_file))
+            logger.info(f"手动卖出成功: {stock_code} x {quantity} @ ¥{current_price:.2f}")
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"卖出持仓失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
 
 
@@ -3454,7 +3734,7 @@ def get_last_task():
     """
     try:
         # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        runner: StrategyRunner | None = get_strategy_runner()
         if not runner:
             # 没有策略运行器，返回空任务列表
             return jsonify({
@@ -3526,8 +3806,8 @@ def get_signals():
         {"success": true, "data": {"signals": [...]}}
     """
     try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 初始化策略运行器
+        runner = get_strategy_runner(auto_init=True)
         if not runner:
             return jsonify({"success": True, "data": {"signals": []}})
         
@@ -3564,8 +3844,8 @@ def get_stock_pool():
         {"success": true, "data": {"pool": [...]}}
     """
     try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 初始化策略运行器
+        runner = get_strategy_runner(auto_init=True)
         if not runner:
             return jsonify({"success": True, "data": {"pool": []}})
         
@@ -3586,22 +3866,61 @@ def get_stock_pool():
         else:
             pool = []
         
+        # 【优化】只调用一次获取交易日列表，避免对每只股票重复查询
+        # 获取历史交易日（过去60天足够了）
+        from datetime import datetime, timedelta
+        hist_start = (datetime.strptime(working_date, '%Y-%m-%d') - timedelta(days=60)).strftime('%Y-%m-%d')
+        all_trading_days = get_trading_days(hist_start, working_date)
+        trading_days_set = set(all_trading_days)  # 用集合加速查找
+        
         # 转换格式
         pool_list = []
         for item in pool:
             stock = item.get('stock', {})
             added_date = item.get('added_date', working_date)
-            # 按交易日计算入池天数
-            trading_days = get_trading_days(added_date, working_date)
-            days_in_pool = len(trading_days)
+            stock_code = stock.get('stock_code', '')
+            # 【优化】用集合快速计算入池天数（交易日数量）
+            if added_date in trading_days_set:
+                days_in_pool = len([d for d in all_trading_days if d >= added_date])
+            else:
+                days_in_pool = 0
+            
+            # 获取最新价格（从数据库获取working_date的收盘价）
+            current_price = stock.get('signal', {}).get('close', 0)
+            try:
+                df_price = runner.db_manager.read_stock(stock_code)
+                if df_price is not None and not df_price.empty:
+                    # 查找working_date对应的行
+                    price_row = df_price[df_price['date'] == working_date]
+                    if not price_row.empty:
+                        current_price = float(price_row['close'].values[0])
+                    else:
+                        # 如果没有working_date的数据，取最后一行
+                        current_price = float(df_price['close'].values[-1])
+            except Exception as e:
+                logger.debug(f"获取股票 {stock_code} 价格失败: {e}")
+            
+            # 检查冷却状态
+            is_cooling = item.get('is_cooling', False)
+            cool_down_end = item.get('cool_down_end', None)
+            
+            # 确定状态显示
+            status = 'candidate'
+            status_text = '候选'
+            if is_cooling and cool_down_end:
+                status = 'cooling'
+                status_text = f'冷却中(至{cool_down_end})'
             
             pool_list.append({
-                'stock_code': stock.get('stock_code', ''),
+                'stock_code': stock_code,
                 'stock_name': stock.get('stock_name', ''),
                 'score': stock.get('score', 0),
-                'status': 'candidate',
+                'status': status,
+                'status_text': status_text,
+                'is_cooling': is_cooling,
+                'cool_down_end': cool_down_end,
                 'days_in_pool': days_in_pool,
-                'current_price': stock.get('signal', {}).get('close', 0),
+                'current_price': current_price,
                 'support_level': item.get('support_level', 0),
                 'strategy_name': get_chinese_name(item.get('strategy_name', ''))
             })
@@ -3628,8 +3947,8 @@ def execute_signal(signal_id):
         # 添加详细日志追踪请求
         logger.info(f"【路由层】接收到执行信号请求: {signal_id}")
         
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 手动触发时才初始化策略运行器
+        runner = get_strategy_runner(auto_init=True)
         if not runner:
             logger.error(f"【路由层】策略运行器未初始化")
             return jsonify({"success": False, "message": "策略运行器未初始化"})
@@ -3663,8 +3982,8 @@ def ignore_signal(signal_id):
         {"success": true, "message": "信号已忽略"}
     """
     try:
-        # 延迟初始化策略运行器
-        runner = get_strategy_runner()
+        # 手动触发时才初始化策略运行器
+        runner = get_strategy_runner(auto_init=True)
         if not runner:
             return jsonify({"success": False, "message": "策略运行器未初始化"})
         
@@ -3694,7 +4013,7 @@ def execute_pending_signals():
         {"success": true, "message": "信号执行完成", "data": {...}}
     """
     try:
-        runner = get_strategy_runner()
+        runner = get_strategy_runner(auto_init=True)
         if not runner:
             return jsonify({"success": False, "message": "策略运行器未初始化"})
         
@@ -3802,6 +4121,212 @@ def run_web_server(host='0.0.0.0', port=5000, debug=False):
         debug=debug,
         allow_unsafe_werkzeug=True
     )
+
+
+# ==================== 风控模块API ====================
+
+@app.route('/api/risk/status')
+def get_risk_status():
+    """
+    获取当日风控状态
+    
+    查询参数：
+        date: 日期（可选），格式YYYY-MM-DD，默认为当日
+        force_refresh: 是否强制刷新（可选），true/false
+    
+    返回：
+        {
+            "success": true,
+            "data": {
+                "date": "2026-05-14",
+                "var_1d": -0.04,
+                "var_5d": -0.09,
+                "es_1d": -0.05,
+                "risk_level": "注意",
+                "position_limit": 0.7,
+                "stop_loss_multiplier": 1.5,
+                "score_extra": 5,
+                "strategy_enabled": true,
+                "liquidate": false
+            }
+        }
+    """
+    try:
+        from utils.risk_controller import get_risk_controller
+        
+        # 获取查询参数
+        date = request.args.get('date')
+        force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+        
+        # 获取风控控制器
+        controller = get_risk_controller()
+        
+        # 获取风控状态
+        risk_status = controller.get_risk_status(date, force_refresh)
+        
+        if risk_status is None:
+            return jsonify({
+                'success': False,
+                'message': '获取风控状态失败'
+            }), 500
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(risk_status.to_dict())
+        })
+        
+    except Exception as e:
+        logger.error(f"获取风控状态失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'获取风控状态失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/risk/history')
+def get_risk_history():
+    """
+    获取历史风控状态
+    
+    查询参数：
+        days: 天数（可选），默认30天
+    
+    返回：
+        {
+            "success": true,
+            "data": [
+                {
+                    "date": "2026-05-14",
+                    "var_1d": -0.04,
+                    "risk_level": "注意",
+                    ...
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        from utils.risk_controller import get_risk_controller
+        
+        # 获取查询参数
+        days = request.args.get('days', 30, type=int)
+        
+        # 获取风控控制器
+        controller = get_risk_controller()
+        
+        # 获取历史风控状态
+        history = controller.get_risk_history(days)
+        
+        # 转换为字典列表
+        history_data = [status.to_dict() for status in history]
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(history_data)
+        })
+        
+    except Exception as e:
+        logger.error(f"获取风控历史失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'获取风控历史失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/risk/config', methods=['GET'])
+def get_risk_config():
+    """
+    获取风控配置
+    
+    返回：
+        {
+            "success": true,
+            "data": {
+                "risk": {...},
+                "evt": {...},
+                "cache": {...}
+            }
+        }
+    """
+    try:
+        from utils.risk_controller import get_risk_controller
+        
+        # 获取风控控制器
+        controller = get_risk_controller()
+        
+        # 获取配置
+        config = controller.get_risk_config()
+        
+        return jsonify({
+            'success': True,
+            'data': clean_data_for_json(config)
+        })
+        
+    except Exception as e:
+        logger.error(f"获取风控配置失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'获取风控配置失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/risk/config', methods=['POST'])
+def update_risk_config():
+    """
+    更新风控配置
+    
+    请求体：
+        {
+            "risk": {...},
+            "evt": {...},
+            "cache": {...}
+        }
+    
+    返回：
+        {
+            "success": true,
+            "message": "配置更新成功"
+        }
+    """
+    try:
+        from utils.risk_controller import get_risk_controller
+        
+        # 获取请求体
+        new_config = request.get_json()
+        
+        if not new_config:
+            return jsonify({
+                'success': False,
+                'message': '请求体为空'
+            }), 400
+        
+        # 获取风控控制器
+        controller = get_risk_controller()
+        
+        # 更新配置
+        success = controller.update_risk_config(new_config)
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': '配置更新成功'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': '配置更新失败'
+            }), 400
+        
+    except Exception as e:
+        logger.error(f"更新风控配置失败: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'更新风控配置失败: {str(e)}'
+        }), 500
 
 
 if __name__ == '__main__':

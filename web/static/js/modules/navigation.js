@@ -119,7 +119,11 @@ export function switchPage(page) {
     } else if (page === 'strategy-runner') {
         // 策略执行器页面 - 初始化
         import('./strategy-runner.js').then(module => {
-            module.default.initStrategyRunnerModule();
+            module.default.initStrategyRunnerModule().catch(err => {
+                console.error('初始化策略执行器模块失败:', err);
+            });
+        }).catch(err => {
+            console.error('加载策略执行器模块失败:', err);
         });
     }
 }

@@ -18,17 +18,23 @@ export function formatVolume(volume) {
 }
 
 /**
- * 格式化日期
- * @param {string} dateStr - 日期字符串
- * @returns {string} 格式化后的日期
+ * 格式化日期时间
+ * @param {string} dateTimeStr - 日期时间字符串
+ * @returns {string} 格式化后的日期时间
  */
-export function formatDate(dateStr) {
-    if (!dateStr) return '--';
-    // 假设 dateStr 是 YYYYMMDD 格式
-    if (dateStr.length === 8) {
-        return `${dateStr.substring(0, 4)}-${dateStr.substring(4, 6)}-${dateStr.substring(6, 8)}`;
+export function formatDateTime(dateTimeStr) {
+    if (!dateTimeStr) return '--';
+    // 支持 YYYY-MM-DD HH:MM:SS 格式
+    const match = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+    if (match) {
+        return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}`;
     }
-    return dateStr;
+    // 支持 YYYY-MM-DDTHH:MM:SS 格式
+    const match2 = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+    if (match2) {
+        return `${match2[1]}-${match2[2]}-${match2[3]} ${match2[4]}:${match2[5]}`;
+    }
+    return dateTimeStr;
 }
 
 /**

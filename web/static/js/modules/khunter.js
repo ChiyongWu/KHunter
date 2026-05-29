@@ -35,21 +35,58 @@ async function fetchLatestKlineDate() {
 }
 
 /**
+ * 加载择时策略列表（从后端API动态获取）
+ */
+async function loadTimingStrategies() {
+    try {
+        const response = await fetch('/api/timing-strategies');
+        const result = await response.json();
+        
+        if (result.success && result.strategies) {
+            // 更新所有择时策略选择器
+            const timingSelects = document.querySelectorAll('select[id="timing-strategy"]');
+            timingSelects.forEach(select => {
+                const selectedValue = select.value;
+                select.innerHTML = result.strategies.map(strategy => 
+                    `<option value="${strategy.name}" ${strategy.name === selectedValue ? 'selected' : ''}>${strategy.display_name || strategy.name}</option>`
+                ).join('');
+            });
+            
+            // 更新回测配置页面的择时策略选择器
+            const backtestSelect = document.getElementById('backtest-timing-strategy');
+            if (backtestSelect) {
+                const selectedValue = backtestSelect.value || 'turtle';
+                backtestSelect.innerHTML = result.strategies.map(strategy => 
+                    `<option value="${strategy.name}" ${strategy.name === selectedValue ? 'selected' : ''}>${strategy.display_name || strategy.name}</option>`
+                ).join('');
+            }
+            
+            console.log('择时策略列表加载完成:', result.strategies);
+        }
+    } catch (error) {
+        console.error('加载择时策略失败:', error);
+    }
+}
+
+/**
  * 页面初始化
  */
-function initPage() {
+async function initPage() {
     // 1. 获取最后一根K线日期作为默认日期
-    fetchLatestKlineDate();
+    await fetchLatestKlineDate();
     
-    // 2. 设置默认跟踪天数
+    // 2. 动态加载择时策略列表
+    await loadTimingStrategies();
+    
+    // 3. 设置默认跟踪天数
     document.getElementById('tracking-days').value = 5;
     
-    // 3. 绑定事件监听器
+    // 4. 绑定事件监听器
     document.getElementById('calculate-btn').addEventListener('click', calculate);
     document.getElementById('save-btn').addEventListener('click', saveResults);
     document.getElementById('generate-plan-btn').addEventListener('click', generateTradingPlan);
     
-    // 4. 绑定模态窗口关闭事件
+    // 5. 绑定模态窗口关闭事件
     document.getElementById('stock-detail-modal').addEventListener('click', function(e) {
         if (e.target === this) {
             closeStockDetailModal();
@@ -62,7 +99,7 @@ function initPage() {
         }
     });
     
-    // 5. 绑定交易计划模态窗口关闭事件
+    // 6. 绑定交易计划模态窗口关闭事件
     document.getElementById('plan-modal').addEventListener('click', function(e) {
         if (e.target === this) {
             closePlanModal();
@@ -73,7 +110,7 @@ function initPage() {
     document.getElementById('cancel-plan').addEventListener('click', closePlanModal);
     document.getElementById('confirm-plan').addEventListener('click', exportTradingPlan);
     
-    // 6. 绑定表格行点击事件（事件委托）
+    // 7. 绑定表格行点击事件（事件委托）
     document.getElementById('results-tbody').addEventListener('click', handleTableClick);
 }
 

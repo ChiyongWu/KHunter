@@ -18,6 +18,8 @@ strategy_names:
   WBottomStrategy: W底策略
   ImmortalGuidanceStrategy: 仙人指路策略
   MA20MA60Strategy: 520560策略
+  Strategy2560Selection: 2560战法选股策略
+  TrendStartStrategy: 趋势起点策略
 
 # 反向映射（中文名称到英文类名）
 # 自动生成，不需要手动维护
@@ -36,3 +38,5 @@ reverse_mapping:
   W底策略: WBottomStrategy
   仙人指路策略: ImmortalGuidanceStrategy
   520560策略: MA20MA60Strategy
+  2560战法选股策略: Strategy2560Selection
+  趋势起点策略: TrendStartStrategy

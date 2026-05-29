@@ -402,9 +402,18 @@ class SectorScorer:
         """
         # 构建缓存键
         cache_key = f"sector_daily_{trade_date}"
-        # 检查缓存
+        
+        # 检查是否是今天的日期，如果是今天且尚未收盘，跳过缓存（允许重试获取）
+        is_today = False
+        try:
+            today_str = datetime.now().strftime('%Y%m%d')
+            is_today = trade_date == today_str
+        except:
+            pass
+        
+        # 检查缓存（非今日数据使用缓存，今日数据允许重新获取）
         cached = self._cache.get(cache_key)
-        if cached is not None:
+        if cached is not None and not is_today:
             logger.debug(f"命中板块行情缓存: {cache_key}")
             return cached
 
@@ -423,8 +432,9 @@ class SectorScorer:
                 # 写入缓存
                 self._cache.set(cache_key, df)
                 return df
-            # 返回空数据
-            logger.warning(f"板块行情数据为空: {trade_date}")
+            
+            # 返回空数据 - 不输出日志，避免日志过多
+            
             return None
         except Exception as e:
             logger.error(f"获取板块行情失败: {trade_date}, {e}")
@@ -468,8 +478,8 @@ class SectorScorer:
                 # 写入缓存
                 self._cache.set(cache_key, df)
                 return df
-            # 返回空数据
-            logger.warning(f"板块资金流向数据为空: {trade_date}")
+            # 返回空数据，使用 debug 级别避免日志过多
+            logger.debug(f"板块资金流向数据为空: {trade_date}")
             return None
         except Exception as e:
             logger.error(f"获取板块资金流向失败: {trade_date}, {e}")

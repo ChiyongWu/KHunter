@@ -58,7 +58,6 @@ class RankingManager:
         """
         try:
             # 1. 查询正向策略的选股记录（排除M头和多死叉），选择没有评分或评分为0的记录，跳过-100分的记录
-            # 使用LIKE查询，处理策略名称中的空格和特殊字符
             sql = """
                 SELECT id, stock_code, stock_name, industry, sector, selection_price, score, strategy_name
                 FROM stock_selection_record 
@@ -72,177 +71,178 @@ class RankingManager:
             if not records:
                 # 如果没有需要评分的股票，返回现有的排名结果
                 logger.info(f"日期 {selection_date} 没有需要生成排名的股票（所有股票都已有评分），返回现有排名")
-                # 查询已有评分的股票，按评分降序排序
-                existing_sql = """
-                    SELECT id, stock_code, stock_name, industry, sector, selection_price, score, rank_position
-                    FROM stock_selection_record 
-                    WHERE selection_date = ? AND is_active = 1 
-                    AND strategy_name NOT LIKE '%M头%' 
-                    AND strategy_name NOT LIKE '%多死叉%'
-                    AND score > 0.0
-                    ORDER BY score DESC
-                """
-                existing_records = self.db_manager.query(existing_sql, (selection_date,))
-                
-                ranking_results = []
-                for record in existing_records:
-                    ranking_results.append({
-                        'id': record['id'],
-                        'stock_code': record['stock_code'],
-                        'stock_name': record['stock_name'],
-                        'industry': record['industry'],
-                        'sector': record['sector'],
-                        'selection_price': record['selection_price'],
-                        'score': record['score'],
-                        'rank_position': record['rank_position']
-                    })
-                
-                return ranking_results
+                return self._get_existing_ranking(selection_date)
             
-            # 2. 计算每只股票的评分
+            # 2. 批量获取有效股票代码（有策略名称的）
+            valid_records = [r for r in records if r.get('strategy_name')]
+            if not valid_records:
+                logger.info(f"日期 {selection_date} 没有有效股票（都缺少策略名称）")
+                return self._get_existing_ranking(selection_date)
+            
+            # 3. 批量查询股票的策略命中数（一次查询，避免N+1问题）
+            stock_codes = [r['stock_code'] for r in valid_records]
+            strategy_counts = self._batch_get_strategy_counts(stock_codes, selection_date)
+            
+            # 4. 使用批量评分方法并行计算
+            valid_stock_codes = [
+                r['stock_code'] for r in valid_records 
+                if strategy_counts.get(r['stock_code'], 0) > 0
+            ]
+            
+            if not valid_stock_codes:
+                logger.info(f"日期 {selection_date} 没有命中策略的股票")
+                return self._get_existing_ranking(selection_date)
+            
+            # 使用批量评分（合并后的方法支持单只和批量）
+            logger.info(f"开始批量评分 {len(valid_stock_codes)} 只股票")
+            score_results = self.score_calculator.calculate_score(valid_stock_codes, selection_date)
+            
+            # 保存评分详情到数据库（用于获取板块信息）
+            try:
+                from trading.stock_score_dao import StockScoreDAO
+                score_dao = StockScoreDAO()
+                saved_count = score_dao.save_batch_scores(score_results)
+                logger.info(f"批量保存评分详情成功: {saved_count}/{len(score_results)}")
+            except Exception as save_error:
+                logger.warning(f"批量保存评分详情失败: {save_error}")
+            
+            # 构建股票代码到评分的映射
+            score_map = {r.stock_code: r for r in score_results}
+            
+            # 5. 构建排名结果
             ranking_results = []
-            valid_records_count = 0
-            
-            for record in records:
-                record_id = record['id']
+            for record in valid_records:
                 stock_code = record['stock_code']
-                stock_name = record['stock_name']
-                industry = record['industry']
-                sector = record['sector']
-                selection_price = record['selection_price']
-                existing_score = record['score']
-                strategy_name = record['strategy_name']
-                
-                # 校验措施：确保股票有策略名称
-                if not strategy_name:
-                    logger.warning(f"股票 {stock_code}({stock_name}) 没有策略名称，跳过排名")
+                if strategy_counts.get(stock_code, 0) == 0:
                     continue
                 
-                # 校验措施：检查股票是否有命中的策略记录
-                count_sql = """
-                    SELECT COUNT(*) 
-                    FROM stock_selection_record 
-                    WHERE stock_code = ? AND selection_date = ? AND is_active = 1
-                """
-                count_result = self.db_manager.query(count_sql, (stock_code, selection_date))
-                strategy_count = count_result[0]['COUNT(*)'] if count_result else 0
-                if strategy_count == 0:
-                    logger.warning(f"股票 {stock_code}({stock_name}) 没有命中策略记录，跳过排名")
+                score_result = score_map.get(stock_code)
+                if not score_result:
                     continue
-                
-                # 计算评分
-                score = self._calculate_score(stock_code, selection_date)
-                logger.debug(f"计算评分成功: {stock_code} = {score}")
                 
                 ranking_results.append({
-                    'id': record_id,
+                    'id': record['id'],
                     'stock_code': stock_code,
-                    'stock_name': stock_name,
-                    'industry': industry,
-                    'sector': sector,
-                    'selection_price': selection_price,
-                    'score': score
+                    'stock_name': record['stock_name'],
+                    'industry': record['industry'],
+                    'sector': record['sector'],
+                    'selection_price': record['selection_price'],
+                    'score': score_result.total_score
                 })
-                
-                valid_records_count += 1
             
-            # 3. 按评分降序排序
+            # 6. 按评分降序排序
             ranking_results.sort(key=lambda x: x['score'], reverse=True)
             
-            # 4. 更新排名位置和板块信息（使用事务）
-            for i, result in enumerate(ranking_results, 1):
-                result['rank_position'] = i
-                
-                # 从stock_score_detail表获取得分最高的板块信息
-                sector = self._get_best_sector(result['stock_code'], selection_date)
-                result['sector'] = sector
-                
-                # 更新数据库中的排名、评分和板块
-                update_sql = """
-                    UPDATE stock_selection_record 
-                    SET score = ?, rank_position = ?, sector = ? 
-                    WHERE id = ?
-                """
-                try:
-                    cursor = self.db_manager.execute_with_retry(update_sql, (result['score'], i, sector, result['id']))
-                    logger.debug(f"更新排名成功: ID={result['id']}, 股票={result['stock_code']}, 评分={result['score']}, 排名={i}, 板块={sector}, 影响行数={cursor.rowcount}")
-                except Exception as e:
-                    logger.error(f"更新排名失败: {result['id']} - {e}")
+            # 7. 批量更新数据库（使用事务和批量更新）
+            self._batch_update_ranking(ranking_results, selection_date)
             
-            # 手动提交事务，确保所有更新持久化到数据库
-            try:
-                conn = self.db_manager.connect()
-                conn.commit()
-                logger.debug("排名更新事务提交成功")
-            except Exception as e:
-                logger.error(f"事务提交失败: {e}")
+            # 8. 返回最终排名结果
+            return self._get_existing_ranking(selection_date)
             
-            # 5. 对当日所有股票重新按分数生成排名
-            try:
-                # 查询当日所有有评分的股票
-                all_stocks_sql = """
-                    SELECT id, stock_code, stock_name, industry, sector, selection_price, score
-                    FROM stock_selection_record 
-                    WHERE selection_date = ? AND is_active = 1 
-                    AND strategy_name NOT LIKE '%M头%' 
-                    AND strategy_name NOT LIKE '%多死叉%'
-                    AND score > 0.0
-                    ORDER BY score DESC
-                """
-                all_stocks = self.db_manager.query(all_stocks_sql, (selection_date,))
-                
-                # 重新分配排名并更新
-                for i, stock in enumerate(all_stocks, 1):
-                    update_rank_sql = """
-                        UPDATE stock_selection_record 
-                        SET rank_position = ? 
-                        WHERE id = ?
-                    """
-                    try:
-                        self.db_manager.execute_with_retry(update_rank_sql, (i, stock['id']))
-                    except Exception as e:
-                        logger.error(f"更新排名失败: {stock['id']} - {e}")
-                
-                # 再次提交事务
-                conn = self.db_manager.connect()
-                conn.commit()
-                logger.info(f"已为日期 {selection_date} 重新生成完整排名，共 {len(all_stocks)} 只股票")
-                
-                # 重新查询更新后的排名结果
-                final_sql = """
-                    SELECT id, stock_code, stock_name, industry, sector, selection_price, score, rank_position
-                    FROM stock_selection_record 
-                    WHERE selection_date = ? AND is_active = 1 
-                    AND strategy_name NOT LIKE '%M头%' 
-                    AND strategy_name NOT LIKE '%多死叉%'
-                    AND score > 0.0
-                    ORDER BY rank_position ASC
-                """
-                final_records = self.db_manager.query(final_sql, (selection_date,))
-                
-                final_results = []
-                for record in final_records:
-                    final_results.append({
-                        'id': record['id'],
-                        'stock_code': record['stock_code'],
-                        'stock_name': record['stock_name'],
-                        'industry': record['industry'],
-                        'sector': record['sector'],
-                        'selection_price': record['selection_price'],
-                        'score': record['score'],
-                        'rank_position': record['rank_position']
-                    })
-                
-                logger.info(f"已为日期 {selection_date} 生成/更新排名，共 {valid_records_count} 条有效记录，跳过 {len(records) - valid_records_count} 条无效记录，最终排名 {len(final_results)} 只股票")
-                return final_results
-            except Exception as e:
-                logger.error(f"重新生成排名失败: {str(e)}")
-                # 如果重新生成失败，返回原始结果
-                return ranking_results
-        
         except Exception as e:
             logger.error(f"生成排名失败: {str(e)}")
             return []
+    
+    def _get_existing_ranking(self, selection_date: str) -> List[Dict]:
+        """获取已有的排名结果"""
+        existing_sql = """
+            SELECT id, stock_code, stock_name, industry, sector, selection_price, score, rank_position
+            FROM stock_selection_record 
+            WHERE selection_date = ? AND is_active = 1 
+            AND strategy_name NOT LIKE '%M头%' 
+            AND strategy_name NOT LIKE '%多死叉%'
+            AND score > 0.0
+            ORDER BY rank_position ASC
+        """
+        existing_records = self.db_manager.query(existing_sql, (selection_date,))
+        
+        return [{
+            'id': record['id'],
+            'stock_code': record['stock_code'],
+            'stock_name': record['stock_name'],
+            'industry': record['industry'],
+            'sector': record['sector'],
+            'selection_price': record['selection_price'],
+            'score': record['score'],
+            'rank_position': record['rank_position']
+        } for record in existing_records]
+    
+    def _batch_get_strategy_counts(self, stock_codes: List[str], selection_date: str) -> Dict[str, int]:
+        """批量查询股票的策略命中数"""
+        if not stock_codes:
+            return {}
+        
+        # 使用IN查询批量获取
+        placeholders = ','.join('?' * len(stock_codes))
+        sql = f"""
+            SELECT stock_code, COUNT(*) as count 
+            FROM stock_selection_record 
+            WHERE stock_code IN ({placeholders}) AND selection_date = ? AND is_active = 1
+            GROUP BY stock_code
+        """
+        
+        try:
+            results = self.db_manager.query(sql, tuple(stock_codes) + (selection_date,))
+            return {r['stock_code']: r['count'] for r in results}
+        except Exception as e:
+            logger.error(f"批量查询策略计数失败: {e}")
+            return {}
+    
+    def _batch_update_ranking(self, ranking_results: List[Dict], selection_date: str):
+        """批量更新排名到数据库"""
+        if not ranking_results:
+            return
+        
+        conn = None
+        try:
+            conn = self.db_manager.connect()
+            cursor = conn.cursor()
+            
+            # 批量更新评分和排名
+            update_sql = """
+                UPDATE stock_selection_record 
+                SET score = ?, rank_position = ?, sector = ? 
+                WHERE id = ?
+            """
+            
+            for i, result in enumerate(ranking_results, 1):
+                sector = self._get_best_sector(result['stock_code'], selection_date)
+                result['sector'] = sector
+                result['rank_position'] = i
+                
+                cursor.execute(update_sql, (result['score'], i, sector, result['id']))
+            
+            # 重新生成完整排名（包含已有评分的股票）
+            all_stocks_sql = """
+                SELECT id, stock_code, score 
+                FROM stock_selection_record 
+                WHERE selection_date = ? AND is_active = 1 
+                AND strategy_name NOT LIKE '%M头%' 
+                AND strategy_name NOT LIKE '%多死叉%'
+                AND score > 0.0
+                ORDER BY score DESC
+            """
+            cursor.execute(all_stocks_sql, (selection_date,))
+            all_stocks = cursor.fetchall()
+            
+            update_rank_sql = """
+                UPDATE stock_selection_record 
+                SET rank_position = ? 
+                WHERE id = ?
+            """
+            for i, stock in enumerate(all_stocks, 1):
+                cursor.execute(update_rank_sql, (i, stock['id']))
+            
+            conn.commit()
+            logger.info(f"批量更新排名成功，共 {len(ranking_results)} 只新股票，总排名 {len(all_stocks)} 只")
+            
+        except Exception as e:
+            logger.error(f"批量更新排名失败: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
     
     def _calculate_score(self, stock_code: str, selection_date: str) -> float:
         """计算股票综合评分

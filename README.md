@@ -1,12 +1,15 @@
-# KHunter - 专注技术形态识别的量化选股工具
+# KHunter - 开箱即用的A股量化交易系统
 
-**一个完整的A股量化选股解决方案**，集数据获取、策略分析、选股执行、五维评分、选股择时、策略回测等于一体。支持多种（可扩展）选股策略，可灵活组合使用，帮助投资者快速发现投资机会。
+![KHunter Logo](web/static/images/logo.svg)
+
+KHunter 是一套**开箱即用的A股量化交易系统**，集数据管理、策略选股、择时交易、风险控制、回测验证于一体，为个人投资者提供从数据到交易的全流程量化解决方案。
 
 
 ## ✨ 核心优势
 
-### 🎯 多维度选股
-- **11种选股策略** - 覆盖底部反转、趋势加速、形态突破等多个维度
+### 🎯 多策略选股和择时
+- **13种选股策略** - 覆盖底部反转、趋势加速、形态突破等多个维度
+- **5种择时策略** - 辅助判断买卖时机，新增顺势宝策略
 - **策略灵活组合** - 支持多策略组合，精准捕捉投资机会
 
 ### 📊 完整的数据支持
@@ -18,6 +21,12 @@
 - **Web管理系统** - 实时查看股票数据、执行选股、分析结果
 - **K线图可视化** - 为每只入选股票生成K线图，直观展示技术形态
 - **策略参数配置** - 在线修改策略参数
+
+![系统界面](image/imp.jpeg)
+
+### 🔒 风险控制
+- **VaR风险控制** - 基于VaR的风险评估和仓位管理
+- **自动风险过滤** - 自动排除ST股、退市股、市值过低股票、近期涨幅过高等高风险标的
 
 ## 📈 股票评分系统
 
@@ -40,11 +49,8 @@ KHunter采用**五维度综合评分模型**，从多个角度全面评估股票
 3. **筛选过滤** - 按评分等级、支撑位等条件筛选
 4. **狩猎场展示** - 查看符合条件的优质股票
 5. **追踪管理** - 对狩猎场股票进行追踪和管理
-```
-### 🔒 风险过滤
-- **自动风险过滤** - 自动排除ST股、退市股、市值过低股票、近期涨幅过高等高风险标的
 
-### � 策略回测功能
+### 📈 策略回测功能
 - **回测配置** - 配置回测参数，包括策略选择、回测时间范围、资金管理等
 - **回测执行** - 执行策略回测，模拟真实交易环境
 - **结果分析** - 展示回测结果，包括收益率、胜率、最大回撤等指标
@@ -87,8 +93,7 @@ python main.py web
 - **狩猎场** - 查看多维度评分的股票筛选结果
 - **数据管理** - 查看数据更新状态，执行数据初始化和更新
 - **看板功能** - 展示金股、热门行业和板块分布
-- **行业分析** - 展示指定行业的股票列表和表现
-- **板块分析** - 展示指定板块的股票列表和表现
+- **策略运行器** - 策略自动化执行（需配置文件）
 
 初次使用必须执行的功能：
 初始化数据，数据更新
@@ -100,9 +105,9 @@ python main.py web
 可以对排名靠前的股票，狩猎场股票进行跟踪，便于调整策略参数，迭代优化策略，有一定开发基础的朋友可以自己扩展策略
 可以对策略进行历史数据回测，便于进一步优化策略
 
-*****注意，由于免费数据源的稳定性问题，经过测试，策略选股功能可以稳定使用，但是由于选股排名和狩猎场等功能依赖于除k线以外的如资金面，基本面，板块，事件等数据，可能存在数据无法稳定获取的情况，对功能有一定影响。一方面开发者积极探索稳定数据源，另一方面可以通过注册tushare获取api token解决数据稳定性问题，带来的困扰请理解。
+**注意**：由于免费数据源的稳定性问题，经过测试，策略选股功能可以稳定使用，但是由于选股排名和狩猎场等功能依赖于除k线以外的如资金面，基本面，板块，事件等数据，可能存在数据无法稳定获取的情况，对功能有一定影响。一方面开发者积极探索稳定数据源，另一方面可以通过注册tushare获取api token解决数据稳定性问题，完整功能需要6000积分，带来的困扰请理解。
 
-## 📊 11种选股策略
+## 📊 13种选股策略
 
 | # | 策略名称 | 核心逻辑 | 适用场景 |
 |----|---------|--------|--------|
@@ -115,13 +120,24 @@ python main.py web
 | 7 | **阻力位突破策略** | 股价突破关键阻力位 | 突破选股 |
 | 8 | **强势洗盘弱转强** | 强势股洗盘后转强 | 趋势反转 |
 | 9 | **趋势加速拐点** | 上升趋势中的加速拐点 | 趋势加速 |
-| 10 | **趋势共振反转策略** | 多指标共振的趋势反转 | 趋势反转 |
+| 10 | **仙人指路策略** | 长上影线突破形态 | 突破选股 |
 | 11 | **W底策略** | W底双底反转形态 | 双底反转 |
+| 12 | **趋势起点策略** | 趋势启动初期识别 | 趋势启动 |
+| 13 | **2560战法** | 基于特定K线形态的选股策略 | 形态突破 |
+
+## ⏰ 5种择时策略
+
+| # | 策略名称 | 核心逻辑 | 适用场景 |
+|----|---------|--------|--------|
+| 1 | **布林带策略** | 基于布林带上下轨判断买卖时机 | 震荡行情 |
+| 2 | **RSI策略** | 基于相对强弱指数判断超买超卖 | 短线交易 |
+| 3 | **支撑位策略** | 基于支撑位和压力位判断买卖 | 波段操作 |
+| 4 | **海龟策略** | 基于ATR的突破和仓位管理 | 趋势交易 |
+| 5 | **顺势宝策略** | MACD金叉 + 布林带上穿中轨 | 趋势跟随 |
 
 ### 策略参数配置
 
 可以前端功能调整策略参数。每个策略都有独立的参数配置，支持在线修改。
-
 
 
 ## 🛠️ 技术栈
@@ -138,8 +154,14 @@ python main.py web
 ```
 ├── main.py                      # 主程序入口
 ├── web_server.py                # Web服务器
-├── stock_analyzer.py            # 股票分析器
-├── technical.py                 # 技术指标计算
+├── stock_analyzer/              # 股票分析器模块
+│   ├── data_fetcher.py          # 数据获取
+│   ├── technical_analyzer.py    # 技术分析
+│   ├── fundamental_analyzer.py  # 基本面分析
+│   ├── sector_analyzer.py       # 行业分析
+│   ├── fund_flow_analyzer.py    # 资金流分析
+│   ├── event_analyzer.py        # 事件分析
+│   └── report_generator.py      # 报告生成
 ├── strategy/                    # 策略模块
 │   ├── __init__.py              # 初始化文件
 │   ├── base_strategy.py         # 策略基类
@@ -152,22 +174,19 @@ python main.py web
 │   ├── resistance_breakout.py   # 阻力位突破策略
 │   ├── strong_wash_weak_to_strong.py  # 强势洗盘弱转强
 │   ├── trend_acceleration_inflection.py  # 趋势加速拐点
-│   ├── trend_resonance_reversal.py  # 趋势共振反转策略
+│   ├── immortal_guidance_strategy.py  # 仙人指路策略
 │   ├── w_bottom_strategy.py     # W底策略
+│   ├── trend_start_strategy.py  # 趋势起点策略
+│   ├── strategy_2560_selection.py  # 2560战法
 │   ├── parallel_strategy_executor.py  # 并行策略执行器
 │   ├── strategy_registry.py     # 策略注册表
 │   └── ...                      # 其他策略相关文件
-├── utils/                       # 工具模块
-│   ├── akshare_fetcher.py       # 数据获取
-│   ├── csv_manager.py           # CSV数据管理
-│   ├── technical.py             # 技术指标
-│   ├── kline_chart.py           # K线图生成
-│   └── ...
-├── trading/                     # 回测和评分模块
+├── trading/                     # 交易和评分模块
 │   ├── __init__.py              # 初始化文件
 │   ├── backtest_engine.py       # 回测引擎
 │   ├── backtest_dao.py          # 回测数据访问
-│   ├── routes.py                # 回测API路由
+│   ├── backtest_batch_queue.py  # 批量回测队列
+│   ├── routes.py                # API路由
 │   ├── khunter_api.py           # 狩猎场API
 │   ├── khunter_dao.py           # 狩猎场数据访问
 │   ├── khunter_data_processor.py  # 狩猎场数据处理
@@ -176,21 +195,35 @@ python main.py web
 │   ├── stock_score_calculator.py  # 股票评分计算
 │   ├── stock_score_dao.py       # 股票评分数据访问
 │   ├── stock_score_api.py       # 股票评分API
-│   ├── vectorbt_backtest_engine.py  # VectorBT回测引擎
+│   ├── strategy_execution_plan.py  # 策略执行计划
+│   ├── strategy_runner.py       # 策略运行器
+│   ├── macd_bollinger_strategy.py  # 顺势宝策略
+│   └── ...
+├── utils/                       # 工具模块
+│   ├── akshare_fetcher.py       # AKShare数据获取
+│   ├── csv_manager.py           # CSV数据管理
+│   ├── technical.py             # 技术指标
+│   ├── kline_chart.py           # K线图生成
+│   ├── log_config.py            # 日志配置与自动清理
+│   ├── risk_manager.py          # 风险管理
+│   ├── risk_controller.py       # 风险控制器
+│   ├── var_calculator.py        # VaR计算器
+│   ├── risk_config_loader.py    # 风险配置加载器
 │   └── ...
 ├── config/                      # 配置文件
 │   ├── config.yaml              # 主配置
 │   ├── strategy_params.yaml     # 策略参数
 │   ├── strategy_order.yaml      # 策略顺序
 │   ├── strategy_weights.json    # 策略权重
+│   ├── risk_config.yaml         # 风险配置
 │   └── ...
 ├── web/                         # Web前端
 │   ├── templates/               # HTML模板
 │   └── static/                  # 静态资源
-├── data/                        # 数据库
-│ 
-├── doc/                         # 文档
-
+├── data/                        # 数据库脚本
+│   ├── DataSql.sql              # 数据库结构脚本
+│   └── InitData.sql             # 初始化数据脚本
+└── doc/                         # 文档
 ```
 
 ## ⚙️ 配置说明
@@ -201,6 +234,7 @@ python main.py web
 - **策略参数配置** (`config/strategy_params.yaml`) - 各策略的参数配置
 - **策略顺序配置** (`config/strategy_order.yaml`) - 策略执行顺序
 - **策略权重配置** (`config/strategy_weights.json`) - 策略权重设置
+- **风险配置** (`config/risk_config.yaml`) - 风险控制参数配置
 
 详细配置说明请参考各配置文件中的注释。
 
@@ -213,7 +247,7 @@ python main.py web
 3. **100%有当天数据** - 跳过更新，直接使用
 4. **否则** - 执行增量更新
 
-这样既能保证数据的及时性，又能避免不必要的网络请求。
+这样既能保证数据的及时性，又能避免不必要的网络请求。为保证数据完整准确，建议16：00后执行更新。
 
 ## 🔧 扩展新策略
 
@@ -264,4 +298,9 @@ pandas - 数据处理库
 Flask - Web框架
 
 GitHub: https://github.com/ling-0729/khunter
-文档: 详见 doc/ 目录
+
+## 📫 联系与交流
+
+如需获取项目更新、技术文档详细介绍、和作者深度交流，请访问飞书文档：
+
+👉 [KHunter - 项目与技术交流入口](https://my.feishu.cn/wiki/NSOrwyfRNi6OhVkRiNucoL30nAh?from=from_copylink)

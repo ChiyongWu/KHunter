@@ -107,39 +107,54 @@ class DBManager:
         
         # 获取当前线程ID，用于线程本地连接池
         thread_id = threading.get_ident()
-        
-        # 如果当前线程没有连接，创建新连接
-        if thread_id not in self._connection_pool:
-            try:
-                # 创建SQLite连接，timeout设置为30秒等待锁释放
-                conn = sqlite3.connect(
-                    str(self.db_path),
-                    timeout=30.0,
-                    check_same_thread=False
-                )
-                # 启用外键约束，保证数据完整性
-                conn.execute('PRAGMA foreign_keys = ON')
-                # 启用 WAL 模式，提高并发读写性能
-                conn.execute('PRAGMA journal_mode = WAL')
-                # 设置 busy_timeout 为 30 秒，等待锁释放
-                conn.execute('PRAGMA busy_timeout = 30000')
-                # 降低同步级别，提高写入速度（WAL模式下安全）
-                conn.execute('PRAGMA synchronous = NORMAL')
-                # 增加缓存大小，减少磁盘 I/O
-                conn.execute('PRAGMA cache_size = 10000')
-                # 使用内存存储临时表，提高性能
-                conn.execute('PRAGMA temp_store = MEMORY')
-                # 设置行工厂，使查询结果可以按列名访问
-                conn.row_factory = sqlite3.Row
-                # 保存到线程本地连接池
-                self._connection_pool[thread_id] = conn
-                logger.debug(f"数据库连接成功(线程{thread_id}): {self.db_path}")
-            except sqlite3.Error as e:
-                logger.error(f"数据库连接失败: {str(e)}")
-                raise
+
+        # 如果当前线程有连接，检查是否有效
+        if thread_id in self._connection_pool:
+            conn = self._connection_pool[thread_id]
+            if self._is_connection_valid(conn):
+                return conn
+            else:
+                del self._connection_pool[thread_id]
+
+        # 如果当前线程没有连接或连接无效，创建新连接
+        try:
+            # 创建SQLite连接，timeout设置为30秒等待锁释放
+            conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=30.0,
+                check_same_thread=False
+            )
+            # 启用外键约束，保证数据完整性
+            conn.execute('PRAGMA foreign_keys = ON')
+            # 启用 WAL 模式，提高并发读写性能
+            conn.execute('PRAGMA journal_mode = WAL')
+            # 设置 busy_timeout 为 30 秒，等待锁释放
+            conn.execute('PRAGMA busy_timeout = 30000')
+            # 降低同步级别，提高写入速度（WAL模式下安全）
+            conn.execute('PRAGMA synchronous = NORMAL')
+            # 增加缓存大小，减少磁盘 I/O
+            conn.execute('PRAGMA cache_size = 10000')
+            # 使用内存存储临时表，提高性能
+            conn.execute('PRAGMA temp_store = MEMORY')
+            # 设置行工厂，使查询结果可以按列名访问
+            conn.row_factory = sqlite3.Row
+            # 保存到线程本地连接池
+            self._connection_pool[thread_id] = conn
+            logger.debug(f"数据库连接成功(线程{thread_id}): {self.db_path}")
+        except sqlite3.Error as e:
+            logger.error(f"数据库连接失败: {str(e)}")
+            raise
         
         return self._connection_pool[thread_id]
-    
+
+    def _is_connection_valid(self, conn: sqlite3.Connection) -> bool:
+        """检查连接是否有效（未关闭）"""
+        try:
+            conn.execute('SELECT 1')
+            return True
+        except Exception:
+            return False
+
     def close(self):
         """
         关闭数据库连接
@@ -636,18 +651,19 @@ class DBManager:
     def read_stock(self, stock_code: str, start_date: str = None, end_date: str = None, limit: int = None, order: str = 'desc') -> 'pd.DataFrame':
         """
         读取股票K线数据（替代 CSVManager.read_stock）
-        
+
         Args:
             stock_code: 股票代码，例如000001
             start_date: 开始日期，格式为YYYY-MM-DD，None表示无限制
             end_date: 结束日期，格式为YYYY-MM-DD，None表示无限制
             limit: 限制返回的行数，None表示无限制
             order: 排序方式，'asc'升序(默认)或'desc'降序，默认返回最新数据
-        
+
         Returns:
             pd.DataFrame: 股票数据，包含date, open, high, low, close, volume等列，date为索引
         """
         import pandas as pd
+
         try:
             # 从数据库查询股票数据
             sql = """
@@ -656,15 +672,19 @@ class DBManager:
                 WHERE code = ?
             """
             params = [stock_code]
-            
-            # 添加日期范围条件
+
+            # 添加日期范围条件（数据库中日期格式为 YYYY-MM-DD）
             if start_date:
+                # 确保日期格式正确（YYYY-MM-DD）
+                start_date_formatted = start_date if '-' in start_date else f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
                 sql += " AND date >= ?"
-                params.append(start_date)
-            
+                params.append(start_date_formatted)
+
             if end_date:
+                # 确保日期格式正确（YYYY-MM-DD）
+                end_date_formatted = end_date if '-' in end_date else f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
                 sql += " AND date <= ?"
-                params.append(end_date)
+                params.append(end_date_formatted)
             
             # 按日期排列，limit默认返回最新数据
             if order == 'desc':

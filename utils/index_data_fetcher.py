@@ -1,5 +1,5 @@
 """
-指数数据获取模块 - 获取中证1000指数历史数据并计算收益率
+指数数据获取模块 - 获取指数历史数据并计算收益率
 """
 import tushare as ts
 import pandas as pd
@@ -10,13 +10,23 @@ from typing import Optional, Tuple
 from datetime import datetime, timedelta
 from io import StringIO
 from utils.cache_manager import CacheManager
+from utils.risk_config_loader import RiskConfigLoader
 
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 指数代码与名称映射
+INDEX_NAME_MAP = {
+    '000852': '中证1000',
+    '000905': '中证2000',
+    '000001': '上证指数',
+    '000300': '沪深300',
+    '000906': '中证500',
+}
+
 
 class IndexDataFetcher:
-    """指数数据获取器 - 获取中证1000指数历史数据"""
+    """指数数据获取器 - 获取指数历史数据"""
     
     def __init__(self, cache_dir: str = 'data/risk_cache'):
         """
@@ -29,9 +39,18 @@ class IndexDataFetcher:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_manager = CacheManager(str(self.cache_dir))
         
-        # 中证1000指数代码
-        self.index_code = '000852'
-        self.index_name = '中证1000'
+        # 从配置文件读取指数代码
+        try:
+            config_loader = RiskConfigLoader()
+            config = config_loader.load_config()
+            index_code_full = config.get('risk', {}).get('index_code', '000852.SH')
+            # 提取纯数字代码（去掉.SH后缀）
+            self.index_code = index_code_full.split('.')[0]
+            self.index_name = INDEX_NAME_MAP.get(self.index_code, f'指数({self.index_code})')
+        except Exception as e:
+            logger.warning(f"加载指数配置失败，使用默认值: {e}")
+            self.index_code = '000852'
+            self.index_name = '中证1000'
         
         logger.info(f"IndexDataFetcher 初始化完成，指数: {self.index_name}({self.index_code})")
     
@@ -65,8 +84,8 @@ class IndexDataFetcher:
                 return pd.read_json(StringIO(cached_data))
         
         try:
-            # 使用tushare获取中证1000指数数据
-            logger.info(f"获取中证1000指数数据: {start_date} ~ {end_date}")
+            # 使用tushare获取指数数据
+            logger.info(f"获取{self.index_name}指数数据: {start_date} ~ {end_date}")
             
             # 初始化tushare
             pro = ts.pro_api()
@@ -77,7 +96,7 @@ class IndexDataFetcher:
                                 end_date=end_date)
             
             if df is None or df.empty:
-                logger.error(f"获取中证1000指数数据失败: 数据为空")
+                logger.error(f"获取{self.index_name}指数数据失败: 数据为空")
                 return None
             
             # 重命名列

@@ -194,6 +194,204 @@ class DataCollectionService:
         except Exception as e:
             logger.warning(f"检查数据是否已初始化失败: {str(e)}")
             return False
+
+    def check_data_completeness(self) -> Dict[str, Any]:
+        """
+        检查数据完整性
+        
+        Returns:
+            dict: 各数据表的完整性信息
+        """
+        result = {
+            'success': True,
+            'data': {
+                'basic': {'table': 'stock_basic', 'count': 0, 'complete': False},
+                'kline': {'table': 'stock_kline', 'count': 0, 'complete': False}
+            },
+            'lastUpdate': None
+        }
+        
+        try:
+            # 检查 stock_basic 表
+            r = self.db_manager.query_one("SELECT COUNT(*) as count FROM stock_basic")
+            basic_count = r['count'] if r else 0
+            result['data']['basic']['count'] = basic_count
+            result['data']['basic']['complete'] = basic_count > 0
+            
+            # 检查 stock_kline 表
+            r = self.db_manager.query_one("SELECT COUNT(*) as count FROM stock_kline")
+            kline_count = r['count'] if r else 0
+            result['data']['kline']['count'] = kline_count
+            result['data']['kline']['complete'] = kline_count > 0
+            
+            # 获取最后更新时间
+            r = self.db_manager.query_one(
+                "SELECT MAX(date) as last_date FROM stock_kline"
+            )
+            result['lastUpdate'] = r['last_date'] if r and r.get('last_date') else None
+            
+            # 获取股票数量
+            r = self.db_manager.query_one("SELECT COUNT(DISTINCT code) as count FROM stock_kline")
+            stock_count = r['count'] if r else 0
+            result['data']['kline']['stockCount'] = stock_count
+            
+        except Exception as e:
+            result['success'] = False
+            logger.error(f"检查数据完整性失败: {e}")
+        
+        return result
+    
+    def get_data_status(self) -> Dict[str, Any]:
+        """
+        获取数据状态摘要
+        
+        Returns:
+            dict: 数据状态信息
+        """
+        completeness = self.check_data_completeness()
+        
+        return {
+            'initialized': completeness['data']['basic']['complete'],
+            'basicCount': completeness['data']['basic']['count'],
+            'klineCount': completeness['data']['kline']['count'],
+            'klineStockCount': completeness['data'].get('kline', {}).get('stockCount', 0),
+            'lastUpdate': completeness.get('lastUpdate')
+        }
+    
+    def start_reinit(self, stock_count: int = None, kline_days: int = None) -> Dict[str, Any]:
+        """
+        强制重新初始化（删除现有数据，重新初始化）
+        
+        Args:
+            stock_count: 初始化股票数量（默认2000）
+            kline_days: K线历史天数（默认250）
+        
+        Returns:
+            dict: 任务信息
+        """
+        if stock_count is None:
+            stock_count = 2000
+        if kline_days is None:
+            kline_days = 250
+            
+        if self.init_status['running']:
+            return {
+                'success': False,
+                'message': '已有初始化任务正在运行'
+            }
+        
+        task_id = f"REINIT_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        thread = threading.Thread(
+            target=self._run_reinit,
+            args=(task_id, stock_count, kline_days),
+            daemon=True
+        )
+        thread.start()
+        
+        return {
+            'success': True,
+            'message': '重新初始化任务已启动',
+            'taskId': task_id
+        }
+    
+    def _run_reinit(self, task_id: str, stock_count: int, kline_days: int):
+        """
+        执行强制重新初始化（在后台线程中运行）
+        
+        Args:
+            task_id: 任务ID
+            stock_count: 股票数量（忽略，使用全量）
+            kline_days: K线天数（转换为年数，3年约750天）
+        """
+        with self.init_lock:
+            if self.init_status['running']:
+                logger.warning(f"重新初始化任务 {task_id} 已在运行")
+                return
+            
+            try:
+                self.init_status['running'] = True
+                self.init_status['paused'] = False
+                self.init_status['status'] = 'running'
+                self.init_status['progress'] = 0
+                self.init_status['start_time'] = datetime.now().isoformat()
+                self.init_status['logs'] = []
+                self.init_status['tasks'] = []
+                
+                years = 3
+                self._add_init_log(f"⚠ 重新初始化任务 {task_id} 已启动")
+                self._add_init_log(f"  - 全量初始化，K线年数: {years}")
+                
+                try:
+                    from web_server import emit_init_progress
+                    emit_init_progress()
+                except ImportError:
+                    pass
+                
+                # 步骤1: 删除现有数据
+                self._add_init_log("⟳ 正在删除现有数据...")
+                self._delete_all_data()
+                self._add_init_log("✓ 已删除现有数据")
+                self._update_progress(10)
+                
+                # 步骤2: 使用 DataInitializer 全量初始化
+                self._add_init_log("⟳ 正在获取股票列表...")
+                data_initializer = DataInitializer(
+                    self.db_manager,
+                    self.stock_data_fetcher,
+                    None,
+                    None
+                )
+                all_stocks = self.stock_data_fetcher.get_all_stock_codes()
+                stock_codes = list(all_stocks.keys())
+                self._add_init_log(f"  获取到 {len(stock_codes)} 只股票")
+                
+                # 步骤3: 初始化基础数据
+                self._add_init_log("⟳ 正在初始化基础数据...")
+                data_initializer._init_basic_data(stock_codes, all_stocks)
+                self._add_init_log("✓ 基础数据初始化完成")
+                self._update_progress(30)
+                
+                # 步骤4: 初始化K线数据（3年）
+                self._add_init_log("⟳ 正在初始化K线数据（3年）...")
+                data_initializer._init_kline_history_data(stock_codes, years=years)
+                self._add_init_log("✓ K线数据初始化完成")
+                self._update_progress(100)
+                
+                self.init_status['status'] = 'completed'
+                self.init_status['end_time'] = datetime.now().isoformat()
+                self._add_init_log("✓ 重新初始化全部完成")
+                
+            except Exception as e:
+                self.init_status['status'] = 'failed'
+                self.init_status['end_time'] = datetime.now().isoformat()
+                self._add_init_log(f"✗ 重新初始化失败: {str(e)}")
+                logger.error(f"重新初始化失败: {e}")
+    
+    def _delete_all_data(self):
+        """删除所有数据表内容"""
+        try:
+            self.db_manager.execute("DELETE FROM stock_kline")
+            self.db_manager.execute("DELETE FROM stock_basic")
+            logger.info("已清空 stock_kline 和 stock_basic 表")
+        except Exception as e:
+            logger.error(f"删除数据失败: {e}")
+            raise
+    
+    def _update_progress(self, progress: int):
+        """更新进度"""
+        self.init_status['progress'] = progress
+        try:
+            from web_server import emit_init_progress
+            emit_init_progress()
+        except ImportError:
+            pass
+    
+    def _add_init_log(self, message: str):
+        """添加初始化日志"""
+        log_entry = f"{datetime.now().strftime('%H:%M:%S')} - {message}"
+        self.init_status['logs'].append(log_entry)
+        logger.info(message)
     
     def start_initialization(self, init_type: str = 'full', options: Optional[Dict] = None):
         """
@@ -744,12 +942,12 @@ class DataCollectionService:
                     stock_data_fetcher = StockDataFetcher()
                     kline_updater = KlineUpdater(self.db_manager, stock_data_fetcher)
                     
-                    # 执行K线数据更新
+                    # 执行K线数据更新（使用优化后的批次大小500）
                     kline_result = kline_updater.update_kline_data(
                         stock_codes=stock_codes,
                         last_update_date=last_update_date,
                         target_date=target_date,
-                        batch_size=100
+                        batch_size=500  # 优化：从100增加到500
                     )
                     
                     # 更新统计信息
@@ -891,6 +1089,36 @@ class DataCollectionService:
             except Exception as e:
                 self._add_update_log(f"⚠ 市场温度计算失败: {str(e)}")
                 logger.warning(f"市场温度计算失败: {str(e)}")
+            
+            # 【第10步】计算并保存风控状态
+            self._add_update_log("【第10步】计算并保存风控状态...")
+            try:
+                from utils.risk_controller import RiskController
+                
+                # 获取风控控制器
+                controller = RiskController()
+                
+                # 计算风控状态（不使用缓存，确保获取最新数据）
+                risk_status = controller.get_risk_status(
+                    date=target_date,
+                    force_refresh=True
+                )
+                
+                if risk_status:
+                    # 更新统计信息
+                    self._add_update_log(
+                        f"✓ 风控状态计算完成: VaR(1d)={risk_status.var_1d*100:.2f}% - "
+                        f"风险等级={risk_status.risk_level.value} - "
+                        f"仓位上限={risk_status.position_limit*100:.0f}%"
+                    )
+                    logger.info(f"风控状态已保存: {target_date} - VaR={risk_status.var_1d*100:.2f}%")
+                else:
+                    self._add_update_log(f"⚠ 风控状态计算失败: 返回空值")
+                    logger.warning(f"风控状态计算失败: {target_date} - 返回空值")
+            
+            except Exception as e:
+                self._add_update_log(f"⚠ 风控状态计算失败: {str(e)}")
+                logger.warning(f"风控状态计算失败: {str(e)}")
             
             # 检查是否有数据被成功更新
             total_added = self.update_status['totalStats']['kline_added'] + self.update_status['totalStats']['fund_flow_added']
@@ -1059,7 +1287,7 @@ class DataCollectionService:
         获取表数据统计
         
         Returns:
-            dict: 表数据统计信息
+            dict: 表数据统计信息，包含前端需要的 success 和 failed 字段
         """
         stats = {}
         
@@ -1091,9 +1319,17 @@ class DataCollectionService:
                         stats[table] = 0
                 
                 conn.close()
+            
+            # 前端期望的 success 和 failed 字段
+            # success: 成功初始化的股票数量（stock_basic 表行数）
+            # failed: 失败数量（股票总数 - 成功数量，或默认0）
+            stats['success'] = stats.get('stock_basic', 0)
+            stats['failed'] = self.init_status.get('failed', 0)
         
         except Exception as e:
             logger.error(f"获取表数据统计失败: {str(e)}")
+            stats['success'] = 0
+            stats['failed'] = 0
         
         return stats
     

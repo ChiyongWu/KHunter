@@ -46,6 +46,29 @@ DEFAULT_STOCK_LIST = {
 }
 
 
+class _TushareRateLimiter:
+    """Tushare API 速率限制器"""
+
+    def __init__(self, max_calls: int = 100, period: float = 60.0):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+
+    def wait_if_needed(self):
+        import time
+        now = time.time()
+        self.calls = [t for t in self.calls if now - t < self.period]
+        if len(self.calls) >= self.max_calls:
+            sleep_time = self.period - (now - self.calls[0])
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+                self.calls = [t for t in self.calls if time.time() - t < self.period]
+        self.calls.append(time.time())
+
+
+_tushare_limiter = _TushareRateLimiter()
+
+
 class StockDataFetcher:
     """股票基础数据采集器"""
     
@@ -764,68 +787,68 @@ class StockDataFetcher:
     def fetch_stock_update(self, stock_code: str, days: int = 10) -> Optional[pd.DataFrame]:
         """
         抓取近期数据用于增量更新
-        优先使用 Tushare 数据源，失败时降级到腾讯财经
-        
+        优先使用腾讯财经数据源（支持前复权），失败时降级到 Tushare
+
         参数：
             stock_code: 股票代码
             days: 获取最近多少天的数据
-        
+
         返回：
-            增量数据DataFrame
+            增量数据DataFrame（前复权数据）
         """
         try:
-            import tushare as ts
-            import json
-            
-            # 第一步：尝试使用 Tushare 数据源
-            logger.debug(f"尝试使用 Tushare 获取 {stock_code} 的更新数据...")
+            # 第一步：优先使用腾讯财经（支持前复权）
+            logger.debug(f"使用腾讯财经获取 {stock_code} 的更新数据（前复权）...")
             try:
-                # 读取 Tushare 配置
+                df = self._fetch_stock_history_http(stock_code, years=1)
+                if df is not None and not df.empty:
+                    df = df[df['date'] >= datetime.now() - timedelta(days=days)]
+                    if len(df) > 0:
+                        df = df.sort_values('date', ascending=False)
+                        logger.debug(f"腾讯财经获取 {len(df)} 条更新数据（前复权）")
+                        return df
+            except Exception as e:
+                logger.debug(f"腾讯财经获取失败: {e}")
+
+            # 第二步：降级到 Tushare（使用 pro.bar 获取前复权）
+            logger.debug(f"降级到 Tushare 获取 {stock_code} 的更新数据...")
+            try:
+                import tushare as ts
+                import json
+
                 tushare_config_path = 'config/tushare_config.json'
                 with open(tushare_config_path, 'r', encoding='utf-8') as f:
                     tushare_config = json.load(f)
                 token = tushare_config.get('token') or tushare_config.get('api_key')
-                
+
                 if token:
                     pro = ts.pro_api(token)
-                    
-                    # 转换为 Tushare 格式的股票代码
                     ts_code = stock_code + '.SH' if stock_code.startswith('6') else stock_code + '.SZ'
-                    
-                    # 计算日期范围
                     end_date = datetime.now().strftime('%Y%m%d')
                     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
-                    
-                    # 获取日K线数据
-                    df = pro.daily(
+
+                    # 使用 pro.bar 接口获取前复权数据
+                    # asset='E' 股票, freq='D' 日线, adj='qfq' 前复权
+                    df = pro.bar(
                         ts_code=ts_code,
                         start_date=start_date,
-                        end_date=end_date
+                        end_date=end_date,
+                        asset='E',
+                        freq='D',
+                        adj='qfq'
                     )
-                    
+
                     if df is not None and len(df) > 0:
-                        # 转换为标准格式
                         df['date'] = pd.to_datetime(df['trade_date'])
-                        # Tushare的vol列单位是"手"，统一重命名为volume
-                        # 与数据库字段名和腾讯财经返回格式保持一致
                         df = df.rename(columns={'vol': 'volume'})
                         df = df.sort_values('date', ascending=False)
-                        logger.debug(f"Tushare 获取 {len(df)} 条更新数据")
+                        logger.debug(f"Tushare 获取 {len(df)} 条更新数据（前复权）")
                         return df
             except Exception as e:
                 logger.debug(f"Tushare 获取失败: {e}")
-            
-            # 第二步：降级到腾讯财经
-            logger.debug(f"降级到腾讯财经获取 {stock_code} 的更新数据...")
-            df = self._fetch_stock_history_http(stock_code, years=1)
-            if df is not None and not df.empty:
-                # 只保留最近days天的数据
-                df = df[df['date'] >= datetime.now() - timedelta(days=days)]
-                logger.debug(f"腾讯财经获取 {len(df)} 条更新数据")
-                return df
-            
+
             return None
-        
+
         except Exception as e:
             logger.error(f"获取更新数据失败: {e}")
             return None
@@ -989,3 +1012,117 @@ class StockDataFetcher:
             'failed': failed_count,
             'market_caps': market_caps
         }
+
+    def check_exdividend_by_factor(self, stock_codes: list, trade_date: str) -> dict:
+        """
+        通过复权因子检测是否发生除权
+
+        参数：
+            stock_codes: 股票代码列表，如 ['000001', '600519']
+            trade_date: 交易日期 (格式：YYYYMMDD，如 20260513)
+
+        返回：
+            {
+                'exdividend_stocks': [stock_code, ...],  # 发生除权的股票列表
+                'factor_changes': {stock_code: (prev_factor, curr_factor), ...},
+                'message': str
+            }
+
+        说明：
+            - 调用 Tushare pro.adj_factor 接口获取复权因子
+            - 对比前后两日因子，变化则判定为除权
+            - 支持批量查询（逗号分隔，最多50只）
+        """
+        try:
+            import tushare as ts
+            import json
+
+            tushare_config_path = 'config/tushare_config.json'
+            with open(tushare_config_path, 'r', encoding='utf-8') as f:
+                tushare_config = json.load(f)
+            token = tushare_config.get('token') or tushare_config.get('api_key')
+
+            if not token:
+                logger.warning("未配置 Tushare token，无法检测除权")
+                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '未配置 Tushare token'}
+
+            pro = ts.pro_api(token)
+
+            # 计算前一个交易日
+            prev_date = self._get_previous_trading_date(trade_date)
+            if not prev_date:
+                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '无法获取前一交易日'}
+
+            # 转换股票代码格式
+            ts_codes = []
+            for code in stock_codes:
+                if code.startswith('6') or code.startswith('88'):
+                    ts_codes.append(code + '.SH')
+                else:
+                    ts_codes.append(code + '.SZ')
+
+            # 批量获取前后两日复权因子
+            ts_codes_str = ','.join(ts_codes)
+            df = pro.adj_factor(
+                ts_code=ts_codes_str,
+                start_date=prev_date,
+                end_date=trade_date
+            )
+
+            if df is None or df.empty:
+                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '未获取到复权因子数据'}
+
+            # 按股票分组，检测因子变化
+            exdividend_stocks = []
+            factor_changes = {}
+
+            for ts_code in ts_codes:
+                stock_df = df[df['ts_code'] == ts_code]
+                if len(stock_df) < 2:
+                    continue
+
+                # 按日期排序
+                stock_df = stock_df.sort_values('trade_date', ascending=False)
+                curr_factor = stock_df.iloc[0]['adj_factor']
+                prev_factor = stock_df.iloc[1]['adj_factor']
+
+                # 对比因子是否变化（浮点数比较，使用相对误差）
+                if abs(curr_factor - prev_factor) > 0.0001 * prev_factor:
+                    code = ts_code.split('.')[0]
+                    exdividend_stocks.append(code)
+                    factor_changes[code] = (prev_factor, curr_factor)
+                    logger.info(f"【除权检测】{code} 发生除权，复权因子 {prev_factor} -> {curr_factor}")
+
+            if exdividend_stocks:
+                message = f"检测到 {len(exdividend_stocks)} 只股票发生除权: {exdividend_stocks}"
+            else:
+                message = "未检测到除权"
+
+            return {
+                'exdividend_stocks': exdividend_stocks,
+                'factor_changes': factor_changes,
+                'message': message
+            }
+
+        except Exception as e:
+            logger.error(f"除权检测失败: {e}")
+            return {'exdividend_stocks': [], 'factor_changes': {}, 'message': str(e)}
+
+    def _get_previous_trading_date(self, trade_date: str) -> str:
+        """
+        获取指定日期的前一个交易日
+
+        参数：
+            trade_date: 交易日期 (格式：YYYYMMDD)
+
+        返回：
+            前一个交易日的日期字符串 (YYYYMMDD)，失败返回 None
+        """
+        try:
+            from datetime import datetime, timedelta
+            dt = datetime.strptime(trade_date, '%Y%m%d')
+            prev_dt = dt - timedelta(days=1)
+            return prev_dt.strftime('%Y%m%d')
+        except Exception as e:
+            logger.debug(f"计算前一交易日失败: {e}")
+            return None

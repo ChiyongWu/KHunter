@@ -25,53 +25,57 @@ logger = logging.getLogger(__name__)
 
 class KlineUpdater:
     """K线数据增量更新器"""
-    
+
     def __init__(self, db_manager, stock_data_fetcher):
         """
         初始化K线更新器
-        
+
         参数：
             db_manager: 数据库管理器
             stock_data_fetcher: 股票数据采集器
         """
         self.db_manager = db_manager
         self.stock_data_fetcher = stock_data_fetcher
-        
-        # 统计信息
+
+        from utils.kline_fetcher import KlineFetcher
+        self.kline_fetcher = KlineFetcher(db_manager, stock_data_fetcher)
+
         self.stats = {
-            'added': 0,      # 新增记录数
-            'updated': 0,    # 更新记录数
-            'failed': 0      # 失败记录数
+            'added': 0,
+            'updated': 0,
+            'failed': 0,
+            'rebuilt': 0
         }
-        
-        # 进度信息
+
         self.progress = {
             'current': 0,
             'total': 0,
             'percentage': 0
         }
-    
-    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 100) -> Dict:
+
+    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 500) -> Dict:
         """
         增量更新K线数据
-        
+
         流程：
-        1. 计算需要获取的天数 (从 last_update_date 到 target_date)
-        2. 分批获取数据（所有股票使用相同的天数范围）
-        3. 立即保存到数据库
-        
+        1. 计算需要获取的天数
+        2. 分批获取数据
+        3. 检测除权：如有除权触发历史重建
+        4. 保存到数据库
+
         参数：
             stock_codes: 股票代码列表
             last_update_date: 上次更新日期 (YYYY-MM-DD)
             target_date: 目标更新日期 (YYYY-MM-DD)
             batch_size: 每批处理的股票数
-        
+
         返回：
             {
                 'success': bool,
                 'added': int,
                 'updated': int,
                 'failed': int,
+                'rebuilt': int,
                 'message': str,
                 'total_time': float
             }
@@ -79,6 +83,16 @@ class KlineUpdater:
         start_time = datetime.now()
         
         try:
+            # 打印数据源信息
+            logger.info("=" * 60)
+            logger.info("K线数据更新任务启动")
+            logger.info("=" * 60)
+            logger.info(f"数据源策略: 优先使用腾讯财经(前复权)，降级到Tushare(前复权)")
+            logger.info(f"待更新股票数量: {len(stock_codes)}")
+            logger.info(f"上次更新日期: {last_update_date}")
+            logger.info(f"目标更新日期: {target_date}")
+            logger.info("=" * 60)
+            
             logger.info(f"开始更新K线数据: {len(stock_codes)} 只股票")
             
             # 第1步：计算需要获取的天数
@@ -98,28 +112,35 @@ class KlineUpdater:
             
             logger.info(f"需要获取 {days_to_fetch} 天的K线数据")
             
-            # 第2步：分批处理
-            logger.info(f"第2步: 分批处理 {len(stock_codes)} 只股票...")
+            # 第2步：分批并发处理
+            logger.info(f"第2步: 分批并发处理 {len(stock_codes)} 只股票 (批次大小: {batch_size}, 并发数: 20)...")
             self.progress['total'] = len(stock_codes)
             
             for batch_idx in range(0, len(stock_codes), batch_size):
                 # 获取该批股票
                 batch_codes = stock_codes[batch_idx:batch_idx + batch_size]
+                batch_num = batch_idx // batch_size + 1
+                total_batches = (len(stock_codes) + batch_size - 1) // batch_size
                 
                 # 更新进度
                 self.progress['current'] = min(batch_idx + batch_size, len(stock_codes))
                 self.progress['percentage'] = int((self.progress['current'] / self.progress['total']) * 100)
                 
-                logger.info(f"处理进度: [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
+                logger.info(f"批次 {batch_num}/{total_batches}: 处理 {len(batch_codes)} 只股票 [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
                 
-                # 获取并保存该批数据
+                # 获取并保存该批数据（使用并发）
                 try:
-                    batch_result = self._fetch_and_save_batch(batch_codes, days_to_fetch)
+                    batch_start_time = time.time()
+                    batch_result = self._fetch_and_save_batch_concurrent(batch_codes, days_to_fetch)
+                    batch_elapsed = time.time() - batch_start_time
+                    
                     self.stats['added'] += batch_result['added']
                     self.stats['updated'] += batch_result['updated']
                     self.stats['failed'] += batch_result['failed']
+                    
+                    logger.info(f"批次 {batch_num} 完成: 新增 {batch_result['added']} 条, 失败 {batch_result['failed']} 只, 耗时 {batch_elapsed:.1f}秒")
                 except Exception as e:
-                    logger.warning(f"处理批次失败: {str(e)}")
+                    logger.warning(f"批次 {batch_num} 处理失败: {str(e)}")
                     self.stats['failed'] += len(batch_codes)
             
             # 第3步：返回结果
@@ -181,14 +202,14 @@ class KlineUpdater:
             # 默认获取30天
             return 30
     
-    def _fetch_and_save_batch(self, batch_codes: List[str], days: int) -> Dict:
+    def _fetch_and_save_batch_concurrent(self, batch_codes: List[str], days: int) -> Dict:
         """
-        获取一批股票的K线数据并立即保存
+        【优化版】使用并发获取一批股票的K线数据并批量保存
         
-        流程：
-        1. 获取该批股票的K线数据（带重试机制）
-        2. 立即保存到数据库（UPSERT）
-        3. 返回统计信息
+        优化点：
+        1. 使用线程池并发获取数据（20个并发线程）
+        2. 批量提交数据库事务（减少事务开销）
+        3. 失败重试不阻塞其他股票
         
         参数：
             batch_codes: 股票代码列表
@@ -200,49 +221,41 @@ class KlineUpdater:
         added = 0
         updated = 0
         failed = 0
-        failed_stocks = []  # 记录失败的股票
-        processed_count = 0  # 已处理股票数
-        log_interval = 100  # 每100只股票打一次日志
         
         try:
-            logger.info(f"获取 {len(batch_codes)} 只股票的K线数据...")
+            # 使用 KlineFetcher 的并发方法批量获取数据
+            logger.debug(f"并发获取 {len(batch_codes)} 只股票的K线数据 (max_workers=10)...")
+            kline_data = self.kline_fetcher._fetch_kline_batch(
+                batch_codes,
+                days=days,
+                use_concurrent=True,  # 启用并发
+                max_workers=10        # 降低并发数避免API限流
+            )
             
-            # 对每只股票获取K线数据
-            for stock_code in batch_codes:
-                try:
-                    # 获取K线数据（带重试）
-                    df_kline = self._fetch_with_retry(stock_code, days, max_retries=2)
-                    
-                    if df_kline is not None and len(df_kline) > 0:
-                        # 保存到数据库（按100条记录一批保存）
-                        batch_added, batch_updated = self._save_kline_records_batch(stock_code, df_kline, batch_size=100)
-                        added += batch_added
-                        updated += batch_updated
-                    else:
-                        # 获取数据为空
-                        failed += 1
-                        failed_stocks.append(stock_code)
-                        logger.debug(f"获取 {stock_code} K线数据为空或无数据")
+            # 批量保存到数据库（整个批次一次性提交事务）
+            if kline_data:
+                logger.debug(f"批量保存 {len(kline_data)} 只股票的K线数据...")
+                with self.db_manager.transaction():
+                    for stock_code, df_kline in kline_data.items():
+                        if df_kline is not None and len(df_kline) > 0:
+                            try:
+                                batch_added, batch_updated = self._save_kline_records_batch(
+                                    stock_code, df_kline, batch_size=100
+                                )
+                                added += batch_added
+                                updated += batch_updated
+                            except Exception as e:
+                                logger.error(f"保存 {stock_code} 数据失败: {str(e)}")
+                                failed += 1
+                        else:
+                            failed += 1
                 
-                except Exception as e:
-                    # 获取数据异常
-                    failed += 1
-                    failed_stocks.append(stock_code)
-                    logger.error(f"处理 {stock_code} K线数据异常: {type(e).__name__}: {str(e)}")
-                
-                # 更新已处理计数
-                processed_count += 1
-                
-                # 每100只股票打一次日志
-                if processed_count % log_interval == 0:
-                    logger.info(f"已处理 {processed_count}/{len(batch_codes)} 只股票，新增 {added} 条记录")
-            
-            # 记录失败的股票列表
-            if failed_stocks:
-                logger.warning(f"失败的股票: {', '.join(failed_stocks[:10])}" + 
-                             (f" 等 {len(failed_stocks)} 只" if len(failed_stocks) > 10 else ""))
-            
-            logger.info(f"批次处理完成: 已处理 {processed_count} 只股票，新增 {added} 条, 更新 {updated} 条, 失败 {failed} 条")
+                # 统计获取失败的股票
+                failed += len(batch_codes) - len(kline_data)
+            else:
+                # 全部获取失败
+                failed = len(batch_codes)
+                logger.warning(f"批次 {len(batch_codes)} 只股票全部获取失败")
             
             return {
                 'added': added,
@@ -251,12 +264,29 @@ class KlineUpdater:
             }
         
         except Exception as e:
-            logger.error(f"批次处理失败: {str(e)}")
+            logger.error(f"并发批次处理失败: {str(e)}")
             return {
                 'added': added,
                 'updated': updated,
                 'failed': failed + len(batch_codes)
             }
+    
+    def _fetch_and_save_batch(self, batch_codes: List[str], days: int) -> Dict:
+        """
+        【旧版串行方法 - 已弃用】获取一批股票的K线数据并立即保存
+        
+        注意：此方法已被 _fetch_and_save_batch_concurrent 替代
+        保留此方法仅用于兼容性，不建议使用
+        
+        参数：
+            batch_codes: 股票代码列表
+            days: 获取最近多少天的数据
+        
+        返回：
+            {'added': int, 'updated': int, 'failed': int}
+        """
+        logger.warning("使用了已弃用的串行方法 _fetch_and_save_batch，建议使用 _fetch_and_save_batch_concurrent")
+        return self._fetch_and_save_batch_concurrent(batch_codes, days)
     
     def _fetch_with_retry(self, stock_code: str, days: int, max_retries: int = 2) -> Optional[pd.DataFrame]:
         """
@@ -289,8 +319,8 @@ class KlineUpdater:
             except Exception as e:
                 # 发生异常，尝试重试
                 if attempt < max_retries - 1:
-                    # 等待后重试
-                    wait_time = 0.5 * (attempt + 1)  # 递增等待时间
+                    # 等待后重试（增加等待时间避免限流）
+                    wait_time = 2.0 * (attempt + 1)  # 递增等待时间：2秒、4秒
                     logger.debug(f"{stock_code} 获取失败，{wait_time}秒后重试: {str(e)}")
                     time.sleep(wait_time)
                 else:
@@ -375,7 +405,111 @@ class KlineUpdater:
     def get_progress(self) -> Dict:
         """获取更新进度"""
         return self.progress.copy()
-    
+
     def get_stats(self) -> Dict:
         """获取统计信息"""
         return self.stats.copy()
+
+    def check_exdividend_and_rebuild(self, stock_codes: List[str], trade_date: str) -> Dict:
+        """
+        检测除权并在检测到除权时重建历史数据
+
+        流程：
+        1. 调用 stock_data_fetcher.check_exdividend_by_factor 检测除权
+        2. 对每只发生除权的股票，重建完整历史数据
+        3. 返回检测和重建结果
+
+        参数：
+            stock_codes: 股票代码列表
+            trade_date: 交易日期 (YYYYMMDD)
+
+        返回：
+            {
+                'exdividend_detected': bool,
+                'exdividend_stocks': [stock_code, ...],
+                'rebuilt_stocks': [stock_code, ...],
+                'message': str
+            }
+        """
+        result = {
+            'exdividend_detected': False,
+            'exdividend_stocks': [],
+            'rebuilt_stocks': [],
+            'message': ''
+        }
+
+        try:
+            logger.info(f"【除权检测】开始检测 {len(stock_codes)} 只股票的除权情况...")
+
+            check_result = self.stock_data_fetcher.check_exdividend_by_factor(stock_codes, trade_date)
+
+            if not check_result['exdividend_stocks']:
+                logger.info("【除权检测】未检测到除权")
+                result['message'] = '未检测到除权'
+                return result
+
+            result['exdividend_detected'] = True
+            result['exdividend_stocks'] = check_result['exdividend_stocks']
+            logger.warning(f"【除权检测】检测到 {len(check_result['exdividend_stocks'])} 只股票发生除权: {check_result['exdividend_stocks']}")
+
+            for stock_code in check_result['exdividend_stocks']:
+                logger.info(f"【历史重建】开始重建 {stock_code} 的历史数据...")
+                rebuild_success = self._rebuild_stock_history(stock_code)
+                if rebuild_success:
+                    result['rebuilt_stocks'].append(stock_code)
+                    self.stats['rebuilt'] += 1
+                    logger.info(f"【历史重建】{stock_code} 历史数据重建成功")
+                else:
+                    logger.error(f"【历史重建】{stock_code} 历史数据重建失败")
+
+            if result['rebuilt_stocks']:
+                result['message'] = f"检测到除权，已重建 {len(result['rebuilt_stocks'])} 只股票: {result['rebuilt_stocks']}"
+            else:
+                result['message'] = f"检测到除权但重建失败: {check_result['exdividend_stocks']}"
+
+            return result
+
+        except Exception as e:
+            logger.error(f"【除权检测】除权检测和重建失败: {str(e)}")
+            result['message'] = f"除权检测失败: {str(e)}"
+            return result
+
+    def _rebuild_stock_history(self, stock_code: str, years: int = 6) -> bool:
+        """
+        重建单只股票完整历史数据
+
+        流程：
+        1. 删除该股票现有历史数据
+        2. 重新获取多年历史数据（腾讯财经前复权）
+        3. 保存新数据到数据库
+
+        参数：
+            stock_code: 股票代码
+            years: 重建历史数据的年数
+
+        返回：
+            True 成功，False 失败
+        """
+        try:
+            logger.info(f"【历史重建】{stock_code} 删除旧数据...")
+            conn = self.db_manager.connect()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM stock_kline WHERE code = ?", (stock_code,))
+            conn.commit()
+            conn.close()
+            logger.info(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
+
+            logger.info(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
+            df_history = self.stock_data_fetcher.fetch_stock_history(stock_code, years=years)
+
+            if df_history is None or df_history.empty:
+                logger.error(f"【历史重建】{stock_code} 获取历史数据失败")
+                return False
+
+            added, updated = self._save_kline_records_batch(stock_code, df_history)
+            logger.info(f"【历史重建】{stock_code} 保存新数据: 新增 {added} 条, 更新 {updated} 条")
+            return True
+
+        except Exception as e:
+            logger.error(f"【历史重建】{stock_code} 重建失败: {str(e)}")
+            return False

@@ -291,35 +291,39 @@ class TurtleStrategy(TimingStrategy):
             # 首次加仓：以入场价为基准
             # 后续加仓：以上次加仓价为基准
             # 修改：加仓也需要阳线条件，与买入一致
+            # 新增：只有持仓盈利超过2%时才允许加仓
             if add_count < max_additions:
-                last_add_price = position.get('last_add_price', entry_price)
-                add_threshold = last_add_price + self.add_atr * latest['atr']
+                # 检查持仓盈利状态：盈利必须超过2%
+                profit_ratio = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                if profit_ratio > 0.02:  # 盈利超过2%
+                    last_add_price = position.get('last_add_price', entry_price)
+                    add_threshold = last_add_price + self.add_atr * latest['atr']
 
-                if latest['high'] >= add_threshold:
-                    # 检查阳线条件：加仓也需要阳线且涨幅>0，与买入规则一致
-                    prev_close = prev_day_close(df, len(df) - 1) if len(df) >= 2 else latest['close']
-                    is_bullish = latest['close'] > latest['open']
-                    is_rising = latest['close'] > prev_close
-                    is_above_ma20 = pd.notna(latest['ma20']) and latest['close'] > latest['ma20']
+                    if latest['high'] >= add_threshold:
+                        # 检查阳线条件：加仓也需要阳线且涨幅>0，与买入规则一致
+                        prev_close = prev_day_close(df, len(df) - 1) if len(df) >= 2 else latest['close']
+                        is_bullish = latest['close'] > latest['open']
+                        is_rising = latest['close'] > prev_close
+                        is_above_ma20 = pd.notna(latest['ma20']) and latest['close'] > latest['ma20']
 
-                    # 检查上影线
-                    upper_shadow = latest['high'] - max(latest['open'], latest['close'])
-                    upper_shadow_ratio = upper_shadow / max(latest['open'], latest['close']) if max(latest['open'], latest['close']) > 0 else 0
-                    upper_shadow_ok = upper_shadow_ratio <= 0.04
+                        # 检查上影线
+                        upper_shadow = latest['high'] - max(latest['open'], latest['close'])
+                        upper_shadow_ratio = upper_shadow / max(latest['open'], latest['close']) if max(latest['open'], latest['close']) > 0 else 0
+                        upper_shadow_ok = upper_shadow_ratio <= 0.04
 
-                    # 阳线 + 涨幅>0 + 上影线<4% + 均线过滤
-                    if is_bullish and is_rising and upper_shadow_ok and is_above_ma20:
-                        result.is_buy = True
-                        result.signal_strength = 0.8
-                        result.message = f"加仓#{add_count + 1}，突破{add_threshold:.2f}"
-                        result.trade_type = 'add'
-                        result.add_count = add_count + 1
-                        result.indicators['last_add_price'] = latest['close']
-                        base_amount = position.get('base_position_amount', self.base_position_amount)
-                        add_amount = base_amount * 0.5
-                        buy_price = latest['open']
-                        add_quantity = int(add_amount / buy_price) // 100 * 100
-                        result.buy_quantity = max(add_quantity, 100)
+                        # 阳线 + 涨幅>0 + 上影线<4% + 均线过滤
+                        if is_bullish and is_rising and upper_shadow_ok and is_above_ma20:
+                            result.is_buy = True
+                            result.signal_strength = 0.8
+                            result.message = f"加仓#{add_count + 1}，突破{add_threshold:.2f}"
+                            result.trade_type = 'add'
+                            result.add_count = add_count + 1
+                            result.indicators['last_add_price'] = latest['close']
+                            base_amount = position.get('base_position_amount', self.base_position_amount)
+                            add_amount = base_amount * 0.5
+                            buy_price = latest['open']
+                            add_quantity = int(add_amount / buy_price) // 100 * 100
+                            result.buy_quantity = max(add_quantity, 100)
             
             # 减仓逻辑：已移除
             # 说明：止损统一由卖出条件（_check_sell_signal）处理

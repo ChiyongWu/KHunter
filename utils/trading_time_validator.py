@@ -66,12 +66,69 @@ class TradingTimeValidator:
             # 收盘后（15:00-23:59），更新到当天数据
             target_date = now.strftime("%Y-%m-%d")
         
+        # 检查目标日期是否为交易日
+        if not self._is_trading_day(target_date):
+            # 如果目标日期不是交易日，找到最近的一个交易日
+            target_date = self._get_last_trading_day(target_date)
+            if not target_date:
+                return False, "无法确定有效的目标更新日期", ""
+            logger.info(f"当前日期非交易日，调整目标更新日期为: {target_date}")
+        
         # 检查是否已在目标日期更新过
         is_updated, error_msg = self._check_if_updated(target_date)
         if is_updated:
             return False, error_msg, target_date
         
         return True, "", target_date
+    
+    def _is_trading_day(self, date_str: str) -> bool:
+        """
+        判断指定日期是否为交易日
+        
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+        
+        Returns:
+            bool: 是否为交易日
+        """
+        try:
+            from utils.trade_date_utils import is_trading_day
+            return is_trading_day(date_str)
+        except Exception as e:
+            logger.warning(f"调用 is_trading_day 失败，使用简单判断: {str(e)}")
+            # 回退到简单的周末判断
+            try:
+                date = datetime.strptime(date_str, '%Y-%m-%d')
+                # 周末不是交易日
+                if date.weekday() >= 5:
+                    return False
+                return True
+            except Exception as ex:
+                logger.error(f"日期解析失败: {str(ex)}")
+                return True  # 默认认为是交易日
+    
+    def _get_last_trading_day(self, date_str: str) -> str:
+        """
+        获取指定日期之前最近的一个交易日
+        
+        Args:
+            date_str: 日期字符串，格式 YYYY-MM-DD
+        
+        Returns:
+            str: 最近的交易日日期（YYYY-MM-DD格式），如果找不到则返回空字符串
+        """
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d')
+            # 最多向前查找7天
+            for i in range(1, 8):
+                prev_date = date - timedelta(days=i)
+                prev_date_str = prev_date.strftime('%Y-%m-%d')
+                if self._is_trading_day(prev_date_str):
+                    return prev_date_str
+            return ""
+        except Exception as e:
+            logger.error(f"获取最近交易日失败: {str(e)}")
+            return ""
     
     def _check_if_updated(self, target_date: str) -> Tuple[bool, str]:
         """
@@ -233,12 +290,15 @@ class TradingTimeValidator:
     
     def get_last_update_date(self) -> str:
         """
-        获取上次成功更新的日期
+        获取上次成功更新的日期（以实际数据为准）
         
         优先级：
-        1. 从 update_log 表中获取最后一次成功更新的日期
-        2. 如果 update_log 表中没有记录，则从 stock_kline 表中获取最后一根 K 线的日期
+        1. 从 stock_kline 表中获取最后一根 K 线的日期（优先使用实际数据日期）
+        2. 如果 stock_kline 表中没有记录，则从 update_log 表中获取最后一次成功更新的日期
         3. 如果都没有，则返回空字符串
+        
+        注意：优先使用 stock_kline 表是为了避免 update_log 记录了更新但实际数据未更新的情况
+        例如：更新任务执行了，但API没有返回新数据，此时 update_log 日期会大于实际数据日期
         
         返回值:
             上次更新日期（YYYY-MM-DD格式），如果没有则返回空字符串
@@ -246,7 +306,24 @@ class TradingTimeValidator:
         try:
             cursor = self.db_manager.connect().cursor()
             
-            # 第1步：尝试从 update_log 表中获取
+            # 第1步：优先从 stock_kline 表中获取最后一根 K 线的日期
+            cursor.execute(
+                "SELECT MAX(date) FROM stock_kline"
+            )
+            result = cursor.fetchone()
+            
+            if result and result[0]:
+                kline_date = result[0]
+                logger.debug(f"从 stock_kline 表中获取最后 K 线日期: {kline_date}")
+                
+                # 转换日期格式：如果是 YYYYMMDD 格式，转换为 YYYY-MM-DD
+                if len(kline_date) == 8 and kline_date.isdigit():
+                    kline_date = f"{kline_date[:4]}-{kline_date[4:6]}-{kline_date[6:8]}"
+                
+                return kline_date
+            
+            # 第2步：如果 stock_kline 表中没有记录，则从 update_log 表中获取
+            logger.debug("stock_kline 表中没有数据，尝试从 update_log 表中获取...")
             cursor.execute(
                 "SELECT update_date FROM update_log WHERE status = 'completed' ORDER BY update_date DESC LIMIT 1"
             )
@@ -254,17 +331,6 @@ class TradingTimeValidator:
             
             if result:
                 logger.debug(f"从 update_log 表中获取最后更新日期: {result[0]}")
-                return result[0]
-            
-            # 第2步：如果 update_log 表中没有记录，则从 stock_kline 表中获取最后一根 K 线的日期
-            logger.debug("update_log 表中没有完成的记录，尝试从 stock_kline 表中获取最后 K 线日期...")
-            cursor.execute(
-                "SELECT MAX(date) FROM stock_kline"
-            )
-            result = cursor.fetchone()
-            
-            if result and result[0]:
-                logger.debug(f"从 stock_kline 表中获取最后 K 线日期: {result[0]}")
                 return result[0]
             
             # 第3步：都没有记录

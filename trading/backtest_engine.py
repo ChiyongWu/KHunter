@@ -556,25 +556,28 @@ class BacktestEngine:
                             strategy_name=strategy_name
                         )
                         kelly_amount = kelly_result['amount']
-                        # 实际买入金额取凯利公式金额和可用资金的较小值，向下取整到100的倍数
                         position_amount = min(kelly_amount, current_capital)
-                        reserve_fee = position_amount % 100  # 预留费用（不足100的部分）
-                        position_amount = position_amount // 100 * 100  # 向下取整到100的倍数
+                        reserve_fee = position_amount % 100
+                        position_amount = position_amount // 100 * 100
                         quantity = KellyCalculator.calculate_buy_quantity(
                             position_amount=position_amount,
-                            price=buy_price
+                            price=buy_price,
+                            stock_code=stock_code
                         )
-                        # 记录凯利公式参数到日志
+                        from utils.stock_utils import get_min_trade_unit
+                        min_unit = get_min_trade_unit(stock_code)
+                        if quantity < min_unit:
+                            logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 买入数量不足{min_unit}股")
+                            remaining_candidates.append(candidate)
+                            continue
+
                         logger.info(f"【凯利公式计算】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"策略={strategy_name}, 胜率={kelly_result['win_rate']:.2f}, 盈亏比={kelly_result['profit_loss_ratio']:.2f}, "
                                    f"凯利比例={kelly_result['kelly_ratio']:.4f}, 总资产={total_assets:.2f}, "
                                    f"可用资金={current_capital:.2f}, 持仓市值={total_assets - current_capital:.2f}, "
-                                   f"凯利金额={kelly_amount:.2f}, 预留费用={reserve_fee:.2f}, 实际买入={position_amount:.2f}")
-                    
-                    if quantity <= 0:
-                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 计算买入数量为0")
-                        remaining_candidates.append(candidate)
-                        continue
+                                   f"凯利金额={kelly_amount:.2f}, 预留费用={reserve_fee:.2f}, 实际买入={position_amount:.2f}, 最小单位={min_unit}股")
+
+
                     
                     # 确保不超过可用资金
                     buy_amount = quantity * buy_price

@@ -260,9 +260,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         检查条件2：MACD底背离
         
         判断逻辑：
-        - 在最近20个交易日内，检查是否存在底背离
-        - 底背离定义：价格在下降 AND MACD没有继续下降
-        - 即：当前价格 < 前N天平均价格 AND 当前MACD > 前N天平均MACD
+        - 在最近N个交易日内，检查是否存在底背离
+        - 底背离定义：价格创近期新低，但MACD柱没有创同期新低
+        - 即：当前最低价是近期最低价 AND 当前MACD柱不是同期最低价
         
         参数：
             df: 回溯期间的数据（倒序）
@@ -277,39 +277,40 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         divergence_days = self.params['macd_divergence_days']
         recent_df = df.head(divergence_days)
         
-        if recent_df.empty or len(recent_df) < 2:
+        if recent_df.empty or len(recent_df) < 5:  # 至少需要5天数据
             return False
         
-        # 获取当前（最新）的数据
-        current_close = df.iloc[0]['close']
+        # 获取当前（最新）的数据 - 使用最低价判断是否创新低
+        current_low = df.iloc[0]['low']
         current_macd = df.iloc[0]['MACD']
         
         # 检查是否为NaN
-        if pd.isna(current_macd) or pd.isna(current_close):
+        if pd.isna(current_macd) or pd.isna(current_low):
             return False
         
-        # 计算前N天的平均价格和平均MACD
-        # 排除当前一天，使用前N天的数据
-        prev_n_days = recent_df.iloc[1:divergence_days]
+        # 获取近期数据（排除当前一天，使用前N天的数据）
+        recent_data = recent_df.iloc[1:]
         
-        if prev_n_days.empty:
+        if recent_data.empty:
             return False
         
-        avg_price = prev_n_days['close'].mean()
-        avg_macd = prev_n_days['MACD'].mean()
+        # 计算近期最低价和最低MACD柱
+        recent_lowest_price = recent_data['low'].min()
+        recent_lowest_macd = recent_data['MACD'].min()
         
         # 检查是否为NaN
-        if pd.isna(avg_price) or pd.isna(avg_macd):
+        if pd.isna(recent_lowest_price) or pd.isna(recent_lowest_macd):
             return False
         
-        # 判断底背离：价格在下降 AND MACD没有继续下降
-        # 价格在下降：当前价格 < 前N天平均价格
-        price_declining = current_close < avg_price
+        # 底背离判断：
+        # 1. 当前最低价 <= 近期最低价（价格创近期新低或接近新低）
+        # 2. 当前MACD柱 > 近期最低MACD柱（MACD柱没有创同期新低）
         
-        # MACD没有继续下降：当前MACD > 前N天平均MACD
-        macd_not_declining = current_macd > avg_macd
+        price_at_low = current_low <= recent_lowest_price * 1.02  # 允许2%的误差
+        macd_not_at_low = current_macd > recent_lowest_macd
         
-        return price_declining and macd_not_declining
+        # 底背离条件：价格创近期新低，且MACD柱没有创同期新低
+        return price_at_low and macd_not_at_low
     
     def _check_volume_surge(self, df):
         """

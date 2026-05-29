@@ -88,11 +88,14 @@ export async function confirmStrategySelection() {
     // 获取用户选择的日期（使用更精确的选择器避免与span冲突）
     const selectionDateInput = document.querySelector('#strategy-selection-modal #selection-date');
     let selectionDate = null;
-    
-    if (selectionDateInput.value) {
+
+    console.log('选股日期输入框值:', selectionDateInput ? selectionDateInput.value : '未找到元素');
+
+    if (selectionDateInput && selectionDateInput.value) {
         selectionDate = selectionDateInput.value;
     }
-    
+
+    console.log('最终选股日期:', selectionDate);
     closeStrategyModal();
     executeSelectionWithStrategies(strategies, logic, selectionDate);
 }
@@ -197,8 +200,8 @@ export async function executeSelectionWithStrategies(strategies, logic = 'or', s
             lastSelectionTime = result.time;
             lastSelectionDate = result.selection_date || result.time.split(' ')[0];  // 缓存选股日期
             
-            // 显示选股日期
-            const selectionDateEl = document.getElementById('selection-date');
+            // 显示选股日期（使用display元素，避免与弹窗中的input元素冲突）
+            const selectionDateEl = document.getElementById('selection-date-display');
             if (selectionDateEl) {
                 selectionDateEl.textContent = `选股日期: ${lastSelectionDate}`;
             }
@@ -686,7 +689,8 @@ export function renderSelectionResults(results, time, filterStats, strategyDispl
                             'MHeadStrategy': 'M头策略',
                             'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
                             'LimitUpPullbackStrategy': '涨停回马枪策略',
-                            'LimitUpSidewaysStrategy': '涨停横盘策略'
+                            'LimitUpSidewaysStrategy': '涨停横盘策略',
+                            'TrendStartStrategy': '趋势起点策略'
                         };
                         if (strategyNameMap[strategyName]) {
                             strategyDisplayName = strategyNameMap[strategyName];

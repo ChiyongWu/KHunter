@@ -688,6 +688,51 @@ def delete_backtest_config(config_id):
         }), 500
 
 
+@trading_bp.route('/backtest/results/<int:result_id>', methods=['DELETE'])
+def delete_backtest_result(result_id):
+    """
+    删除回测结果接口
+    
+    参数:
+        result_id: 回测结果ID (路径参数)
+    
+    返回:
+        {
+            "success": true/false,
+            "message": "成功或错误信息",
+            "data": {
+                "result_id": 1
+            }
+        }
+    """
+    try:
+        # 调用DAO删除回测结果（级联删除关联的收益曲线和交易记录）
+        success = backtest_dao.delete_result(result_id)
+        
+        if not success:
+            return jsonify({
+                'success': False,
+                'message': '删除回测结果失败',
+                'data': None
+            }), 400
+        
+        return jsonify({
+            'success': True,
+            'message': '删除回测结果成功',
+            'data': {
+                'result_id': result_id
+            }
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"删除回测结果失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'删除回测结果失败: {str(e)}',
+            'data': None
+        }), 500
+
+
 @trading_bp.route('/backtest/run', methods=['POST'])
 def run_backtest():
     """
@@ -823,10 +868,10 @@ def run_backtest():
         if 'capital_history' in result and result['capital_history']:
             final_capital = result['capital_history'][-1]
         
-        # 使用中文策略名称保存到数据库
+        # 使用中文策略名称保存到数据库，每次都创建新记录
         save_result = {
             'strategy_name': strategy_name,  # 保存中文策略名称
-            'support_level_method': support_level_method,
+            'support_level_method': timing_strategy,  # 保存择时策略
             'backtest_name': f"{strategy_name}_{start_date}_{end_date}",
             'start_date': start_date,
             'end_date': end_date,
@@ -846,31 +891,10 @@ def run_backtest():
             'final_capital': final_capital
         }
         
-        # 检查是否已存在相同参数的回测结果
-        # 检查条件：策略名称、开始日期、结束日期相同
-        # 使用中文策略名称查询
-        existing_result = backtest_dao.get_result_by_strategy_and_dates(
-            strategy_name, start_date, end_date
-        )
-        
-        if existing_result:
-            # 如果存在，则更新该记录而不是创建新记录
-            result_id = existing_result['id']
-            logger.info(f"发现已存在的回测结果，result_id: {result_id}，准备更新")
-            
-            # 更新回测结果主记录
-            backtest_dao.update_result(result_id, save_result)
-            logger.info(f"更新回测结果完成，result_id: {result_id}")
-            
-            # 清除旧的交易记录和收益曲线数据，避免重复保存
-            logger.info(f"清除旧的交易记录和收益曲线数据，result_id: {result_id}")
-            backtest_dao.delete_trades(result_id)
-            backtest_dao.delete_equity_curve(result_id)
-        else:
-            # 如果不存在，则创建新记录
-            logger.info(f"开始保存回测结果，数据: {save_result}")
-            result_id = backtest_dao.save_result(save_result)
-            logger.info(f"保存回测结果完成，result_id: {result_id}")
+        # 每次都创建新记录，不覆盖已有的回测结果
+        logger.info(f"开始保存回测结果，数据: {save_result}")
+        result_id = backtest_dao.save_result(save_result)
+        logger.info(f"保存回测结果完成，result_id: {result_id}")
         
         # 保存交易记录
         if 'trades' in result:
@@ -1000,6 +1024,9 @@ def run_backtest():
         }), 500
 
 
+
+
+
 @trading_bp.route('/backtest/results', methods=['GET'])
 def get_backtest_results():
     """
@@ -1040,8 +1067,14 @@ def get_backtest_results():
         }
     """
     try:
-        # 调用DAO获取所有结果
-        results = backtest_dao.get_all_results()
+        # 获取查询参数
+        strategy_name = request.args.get('strategy')
+        created_date = request.args.get('created_date')
+        created_start = request.args.get('created_start')
+        created_end = request.args.get('created_end')
+        
+        # 调用DAO获取所有结果（支持按策略名称和创建时间筛选）
+        results = backtest_dao.get_all_results(strategy_name, created_date, created_start, created_end)
         
         # 处理结果中的Infinity值，将其转换为null
         def handle_infinity(value):
@@ -1061,7 +1094,7 @@ def get_backtest_results():
             processed_result['winning_trades'] = processed_result.get('win_trades', 0)
             processed_result['losing_trades'] = processed_result.get('loss_trades', 0)
             processed_result['profit_loss_ratio'] = processed_result.get('profit_loss_ratio', 0)
-            processed_result['avg_hold_days'] = processed_result.get('hold_period', 0)
+            processed_result['avg_hold_days'] = processed_result.get('avg_hold_days', 0)
             processed_result['volatility'] = processed_result.get('volatility', 0)
             processed_result['sortino_ratio'] = processed_result.get('sortino_ratio', 0)
             
@@ -1173,7 +1206,7 @@ def get_backtest_result(result_id):
         processed_result['winning_trades'] = processed_result.get('win_trades', 0)
         processed_result['losing_trades'] = processed_result.get('loss_trades', 0)
         processed_result['profit_loss_ratio'] = processed_result.get('profit_loss_ratio', 0)
-        processed_result['avg_hold_days'] = processed_result.get('hold_period', 0)
+        processed_result['avg_hold_days'] = processed_result.get('avg_hold_days', 0)
         processed_result['volatility'] = processed_result.get('volatility', 0)
         processed_result['sortino_ratio'] = processed_result.get('sortino_ratio', 0)
         
@@ -2600,122 +2633,6 @@ def delete_execution_plan(plan_id):
         return jsonify({
             'success': False,
             'message': f'删除执行方案失败: {str(e)}',
-            'data': None
-        }), 500
-
-
-@trading_bp.route('/execution/plans/<plan_id>/run', methods=['POST'])
-def run_execution_plan(plan_id):
-    """
-    运行执行方案接口
-    
-    参数:
-        plan_id: 方案ID (路径参数)
-    
-    请求体:
-        {
-            "initial_cash": 300000,
-            "max_stocks": 8,
-            "score_threshold": 60,
-            "n_entry": 20,
-            "n_exit": 10,
-            "atr_period": 20,
-            "entry_atr": 0.02,
-            "add_atr": 0.5,
-            "exit_atr": 2.0,
-            "base_position_amount": 20000,
-            "turtle_preset": "default"
-        }
-    
-    返回:
-        {
-            "success": true/false,
-            "message": "成功或错误信息",
-            "data": {
-                "run_date": "2024-01-01",
-                "plan_id": "plan_id",
-                "plan_name": "方案名称",
-                "is_first_run": false,
-                "pool_count": 10,
-                "total_signals": 5,
-                "buy_signals": 3,
-                "sell_signals": 2,
-                "final_portfolio": {
-                    "position_count": 5
-                },
-                "combination_results": [
-                    {
-                        "combination_id": "combo_id",
-                        "selection_strategy": "选股策略",
-                        "timing_strategy": "择时策略",
-                        "selected_count": 5,
-                        "pool_count_after": 10
-                    }
-                ]
-            }
-        }
-    """
-    try:
-        from trading.strategy_execution_plan import ExecutionPlan
-        from trading.strategy_runner import StrategyRunner
-        
-        # 加载方案
-        plan = ExecutionPlan.load(plan_id)
-        
-        if not plan:
-            return jsonify({
-                'success': False,
-                'message': '方案不存在',
-                'data': None
-            }), 404
-        
-        # 获取请求配置
-        data = request.get_json() or {}
-        
-        config = {
-            'initial_cash': data.get('initial_cash', 300000),
-            'max_stocks': data.get('max_stocks', 8),
-            'score_threshold': data.get('score_threshold', 60),
-            'n_entry': data.get('n_entry'),
-            'n_exit': data.get('n_exit'),
-            'atr_period': data.get('atr_period'),
-            'entry_atr': data.get('entry_atr'),
-            'add_atr': data.get('add_atr'),
-            'exit_atr': data.get('exit_atr'),
-            'base_position_amount': data.get('base_position_amount'),
-            'turtle_preset': data.get('turtle_preset')
-        }
-        
-        # 创建策略运行器并执行方案
-        runner = StrategyRunner()
-        result = runner.run_plan(plan, config)
-        
-        if result['status'] == 'success':
-            return jsonify({
-                'success': True,
-                'message': result.get('message', '方案执行成功'),
-                'data': result.get('data', {})
-            }), 200
-        else:
-            return jsonify({
-                'success': False,
-                'message': result.get('message', '方案执行失败'),
-                'data': None
-            }), 500
-    
-    except FileNotFoundError:
-        return jsonify({
-            'success': False,
-            'message': '方案不存在',
-            'data': None
-        }), 404
-    except Exception as e:
-        logger.error(f"运行执行方案失败: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({
-            'success': False,
-            'message': f'运行执行方案失败: {str(e)}',
             'data': None
         }), 500
 

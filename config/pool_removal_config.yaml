@@ -22,7 +22,7 @@ removal_strategies:
   # 阻力突破策略
   ResistanceBreakoutStrategy:
     display_name: "阻力位突破策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池5天后验证趋势"
 
@@ -64,42 +64,42 @@ removal_strategies:
   # 趋势加速拐点策略
   TrendAccelerationInflectionStrategy:
     display_name: "趋势加速拐点"
-    min_hold_days: 30
+    min_hold_days: 5
     is_enabled: true
     remark: "加入股票池7天后验证趋势"
 
   # 涨停横盘策略
   LimitUpSidewaysStrategy:
     display_name: "涨停横盘策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池5天后验证趋势"
 
   # 晨星策略
   MorningStarStrategy:
     display_name: "启明星策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池10天后验证趋势"
 
   # 涨停回马枪策略
   LimitUpPullbackStrategy:
     display_name: "涨停回马枪策略"
-    min_hold_days: 30
+    min_hold_days: 20
     is_enabled: true
     remark: "加入股票池5天后验证趋势"
 
   # 2560战法选股策略
   Strategy2560Selection:
     display_name: "2560战法选股策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池7天后验证趋势"
 
   # 趋势起点策略
   TrendStartStrategy:
     display_name: "趋势起点策略"
-    min_hold_days: 30
+    min_hold_days: 15
     is_enabled: true
     remark: "加入股票池7天后验证趋势"
 

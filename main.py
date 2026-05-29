@@ -13,9 +13,16 @@ import sys
 import os
 import argparse
 import platform
+import logging
 from pathlib import Path
 from datetime import datetime, time as dt_time
 import time
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent

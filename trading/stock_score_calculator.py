@@ -12,9 +12,7 @@
   4. 否则按权重加权计算综合得分
   5. 判断评分等级，返回 StockScore 对象
 
-权重配置：
-  技术面: 0.25, 资金面: 0.30, 基本面: 0.15,
-  板块强度: 0.15, 事件驱动: 0.15
+
 """
 
 import logging
@@ -68,16 +66,44 @@ class StockScoreCalculator:
         # 记录初始化完成日志
         logger.info("评分计算引擎初始化完成，五个维度评分器已就绪")
 
-    def calculate_score(self, stock_code: str, score_date: str) -> StockScore:
+    def calculate_score(self, stock_code, score_date: str):
         """
-        计算单只股票的综合评分
+        计算股票综合评分（支持单只或批量）
 
         流程：
           1. 调用各维度评分器获取得分和详情
           2. 检查是否有维度触发一票否决
           3. 触发否决则综合得分 = -100，否则加权计算
           4. 设置评分等级和详情信息
-          5. 返回 StockScore 对象
+          5. 返回 StockScore 对象或列表
+
+        参数:
+            stock_code: 股票代码（6位数字）或股票代码列表
+            score_date: 评分日期，格式 YYYY-MM-DD 或 YYYYMMDD
+        返回:
+            StockScore: 单只股票的综合评分结果对象
+            或 list[StockScore]: 批量股票的综合评分结果列表
+        """
+        # 如果传入的是列表，则进行批量计算
+        if isinstance(stock_code, list):
+            logger.info(f"开始批量计算综合评分: {len(stock_code)} 只股票, 日期: {score_date}")
+            results = []
+            for code in stock_code:
+                try:
+                    score = self._calculate_single_score(code, score_date)
+                    results.append(score)
+                except Exception as e:
+                    logger.error(f"计算股票 {code} 评分失败: {e}")
+            logger.info(f"批量评分完成: 成功 {len(results)} 只")
+            return results
+        
+        # 单只股票计算
+        logger.info(f"开始计算综合评分: {stock_code}, 日期: {score_date}")
+        return self._calculate_single_score(stock_code, score_date)
+    
+    def _calculate_single_score(self, stock_code: str, score_date: str) -> StockScore:
+        """
+        计算单只股票的综合评分（内部方法）
 
         参数:
             stock_code: 股票代码（6位数字）
@@ -85,7 +111,6 @@ class StockScoreCalculator:
         返回:
             StockScore: 综合评分结果对象
         """
-        logger.info(f"开始计算综合评分: {stock_code}, 日期: {score_date}")
 
         # 获取股票名称
         stock_name = ""

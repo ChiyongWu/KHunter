@@ -75,6 +75,11 @@
       "description": "正向信号，2560战法形态识别"
     },
     {
+      "name": "2560战法",
+      "weight": 50,
+      "description": "正向信号，2560战法（简写）"
+    },
+    {
       "name": "趋势起点策略",
       "weight": 50,
       "description": "正向信号，趋势启动信号"

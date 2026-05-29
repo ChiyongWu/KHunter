@@ -621,7 +621,7 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     strategy_name TEXT NOT NULL,
     -- strategy_name: 策略名称，类型TEXT，必填，例如多方炮策略
     support_level_method TEXT NOT NULL,
-    -- support_level_method: 支撑位置计算方法，类型TEXT，必填，默认ma20，可选值open/resistance/close_95/close/ma20
+    -- support_level_method: 择时策略/支撑位置计算方法，类型TEXT，必填，默认turtle，可选值turtle/support/rsi/bollinger/open/resistance/close_95/close/ma20
     backtest_name TEXT NOT NULL,
     -- backtest_name: 回测名称，类型TEXT，必填
     start_date TEXT NOT NULL,
@@ -652,6 +652,12 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     -- max_drawdown: 最大回撤，类型REAL，默认0，单位百分比
     sharpe_ratio REAL DEFAULT 0,
     -- sharpe_ratio: 夏普比率，类型REAL，默认0
+    volatility REAL DEFAULT 0,
+    -- volatility: 波动率，类型REAL，默认0，单位百分比
+    sortino_ratio REAL DEFAULT 0,
+    -- sortino_ratio: 索提诺比率，类型REAL，默认0
+    avg_hold_days REAL DEFAULT 0,
+    -- avg_hold_days: 平均持有天数，类型REAL，默认0
     initial_capital REAL DEFAULT 300000,
     -- initial_capital: 初始资金，类型REAL，默认300000，单位元
     final_capital REAL DEFAULT 0,
@@ -856,3 +862,41 @@ CREATE TABLE IF NOT EXISTS market_temperature (
 -- 为 market_temperature 表创建索引
 CREATE INDEX IF NOT EXISTS idx_market_temp_date ON market_temperature(trade_date);
 -- idx_market_temp_date: 交易日期索引，用于快速查询特定日期的温度数据
+
+-- ============================================
+-- 27. 风控状态记录表
+-- ============================================
+-- 说明：存储每日风控状态计算结果，基于中证1000指数的VaR计算
+CREATE TABLE IF NOT EXISTS risk_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 主键ID，自增主键
+    date TEXT NOT NULL UNIQUE,
+    -- date: 日期，类型TEXT，必填，唯一，格式YYYY-MM-DD，例如2026-05-14
+    var_1d REAL NOT NULL,
+    -- var_1d: 单日VaR值，类型REAL，必填，负数表示亏损，例如-0.043表示-4.3%
+    var_5d REAL NOT NULL,
+    -- var_5d: 5日VaR值，类型REAL，必填，负数表示亏损，例如-0.096表示-9.6%
+    es_1d REAL,
+    -- es_1d: 单日ES值（期望损失），类型REAL，可选，负数表示亏损
+    risk_level TEXT NOT NULL,
+    -- risk_level: 风险等级，类型TEXT，必填，可选值正常/注意/危险/崩溃
+    position_limit REAL NOT NULL,
+    -- position_limit: 仓位上限，类型REAL，必填，范围0-1，例如0.7表示70%仓位
+    stop_loss_multiplier REAL NOT NULL,
+    -- stop_loss_multiplier: 止损倍数，类型REAL，必填，例如1.5表示1.5倍
+    score_extra INTEGER NOT NULL,
+    -- score_extra: 狩猎场额外分数门槛，类型INTEGER，必填，例如5表示加5分
+    strategy_enabled INTEGER NOT NULL DEFAULT 1,
+    -- strategy_enabled: 策略是否启用，类型INTEGER，必填，默认1，1表示启用，0表示禁用
+    liquidate INTEGER NOT NULL DEFAULT 0,
+    -- liquidate: 是否强制清仓，类型INTEGER，必填，默认0，1表示清仓，0表示不清仓
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- created_at: 创建时间，类型TEXT，必填，默认当前时间，格式YYYY-MM-DD HH:MM:SS
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    -- updated_at: 更新时间，类型TEXT，必填，默认当前时间，格式YYYY-MM-DD HH:MM:SS
+);
+
+-- 为 risk_status 表创建索引
+CREATE INDEX IF NOT EXISTS idx_risk_status_date ON risk_status(date);
+-- idx_risk_status_date: 日期索引，用于快速查询特定日期的风控状态
+

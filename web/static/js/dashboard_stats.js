@@ -231,20 +231,143 @@ async function loadTemperatureHistory(days = 30) {
 }
 
 /**
+ * 获取action状态对应的图标和样式
+ * @param {string} action - action文本
+ * @returns {Object} 包含icon、颜色和边框样式
+ */
+function getActionStyle(action) {
+    if (!action || action === '-' || action.includes('正常') || action.includes('无风控')) {
+        return { 
+            icon: '✓', 
+            className: 'action-normal',
+            bgColor: '#f0fdf4',
+            textColor: '#16a34a',
+            border: '1px solid #bbf7d0',
+            iconBgColor: '#16a34a',
+            iconTextColor: '#ffffff'
+        };
+    } else if (action.includes('50%')) {
+        return { 
+            icon: '⚠', 
+            className: 'action-warning',
+            bgColor: '#fffbeb',
+            textColor: '#d97706',
+            border: '1px solid #fde68a',
+            iconBgColor: '#d97706',
+            iconTextColor: '#ffffff'
+        };
+    } else if (action.includes('20%')) {
+        return { 
+            icon: '!', 
+            className: 'action-danger',
+            bgColor: '#fff7ed',
+            textColor: '#ea580c',
+            border: '1px solid #fdba74',
+            iconBgColor: '#ea580c',
+            iconTextColor: '#ffffff'
+        };
+    } else if (action.includes('0%')) {
+        return { 
+            icon: '✕', 
+            className: 'action-critical',
+            bgColor: '#fef2f2',
+            textColor: '#dc2626',
+            border: '1px solid #fecaca',
+            iconBgColor: '#dc2626',
+            iconTextColor: '#ffffff'
+        };
+    }
+    return { 
+        icon: 'i', 
+        className: 'action-normal',
+        bgColor: '#f3f4f6',
+        textColor: '#6b7280',
+        border: 'none',
+        iconBgColor: '#6b7280',
+        iconTextColor: '#ffffff'
+    };
+}
+
+/**
+ * 格式化action显示文本
+ * @param {string} action - action文本
+ * @returns {string} 格式化后的文本
+ */
+function formatActionText(action) {
+    if (!action || action === '-') {
+        return '暂无风控信息';
+    }
+    
+    // 解析SCENARIO格式：[SCENARIO_X] 描述，仓位限制X%
+    const match = action.match(/\[SCENARIO_(\d+)\]\s*(.+?)(，仓位限制(\d+)%)?/);
+    if (match) {
+        const scenarioNum = match[1];
+        const desc = match[2] || '';
+        const limit = match[4] || '';
+        
+        // 简化显示：场景X - 描述（仓位X%）
+        let result = `场景${scenarioNum}: ${desc}`;
+        if (limit) {
+            result += ` (${limit})`;
+        }
+        return result;
+    }
+    
+    return action;
+}
+
+/**
  * 更新首页温度卡片
  */
 function updateTemperatureCard(data) {
     const tempElement = document.getElementById('stat-temperature');
     const statusElement = document.getElementById('stat-temp-status');
+    const actionElement = document.getElementById('stat-temp-action');
+    const mainRowElement = document.querySelector('.temp-main-row');
+    
+    // 设置主行布局（温度和状态同行）
+    if (mainRowElement) {
+        mainRowElement.style.display = 'flex';
+        mainRowElement.style.flexDirection = 'row';
+        mainRowElement.style.alignItems = 'center';
+        mainRowElement.style.gap = '10px';
+    }
     
     if (tempElement) {
-        tempElement.textContent = `${data.temperature || 0}`;
+        tempElement.textContent = `${(data.temperature || 0).toFixed(1)}°`;
         tempElement.className = `temp-display ${getTemperatureClass(data.status)}`;
     }
     
     if (statusElement) {
         statusElement.textContent = data.status || '-';
         statusElement.className = `temp-badge ${getTemperatureClass(data.status)}`;
+    }
+    
+    // 更新action信息
+    if (actionElement) {
+        const actionStyle = getActionStyle(data.action);
+        let actionText = data.action || '暂无数据';
+        
+        // 去除[SCENARIO_X]前缀，只保留正文
+        actionText = actionText.replace(/\[SCENARIO_\d+\]\s*/g, '');
+        
+        // 简单布局：图标 + 文本
+        actionElement.innerHTML = `<span class="action-icon" style="background-color:${actionStyle.iconBgColor};color:${actionStyle.iconTextColor};">${actionStyle.icon}</span>${actionText}`;
+        
+        // 设置基础样式
+        actionElement.style.display = 'block';
+        actionElement.style.fontSize = '11px';
+        actionElement.style.lineHeight = '1.5';
+        actionElement.style.marginTop = '8px';
+        actionElement.style.padding = '6px 10px';
+        actionElement.style.borderRadius = '6px';
+        actionElement.style.border = actionStyle.border;
+        actionElement.style.backgroundColor = actionStyle.bgColor;
+        actionElement.style.color = actionStyle.textColor;
+        actionElement.style.boxSizing = 'border-box';
+        actionElement.style.whiteSpace = 'normal';
+        actionElement.style.wordWrap = 'break-word';
+        actionElement.style.overflow = 'visible';
     }
 }
 
@@ -430,6 +553,63 @@ async function refreshRiskData() {
  */
 async function refreshTemperatureData() {
     await loadMarketTemperature();
+}
+
+/**
+ * 重新计算当日温度（强制不使用缓存）
+ */
+async function recalculateTemperatureData() {
+    try {
+        // 获取当前日期
+        const today = new Date();
+        const tradeDate = today.toISOString().slice(0, 10).replace(/-/g, '');
+        
+        // 显示加载提示
+        const btn = document.querySelector('.btn-warning');
+        if (btn) {
+            btn.textContent = '计算中...';
+            btn.disabled = true;
+        }
+        
+        // 发送请求重新计算温度（不使用缓存）
+        const response = await fetch('/api/market-temperature/calculate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                trade_date: tradeDate,
+                use_cache: false 
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success && result.data) {
+            // 刷新显示
+            await loadMarketTemperature();
+            
+            // 显示成功提示
+            alert(`温度计算成功！\n日期: ${tradeDate}\n温度: ${result.data.temperature.toFixed(1)}°\n状态: ${result.data.status}\nAction: ${result.data.action}`);
+        } else {
+            alert(`温度计算失败：${result.message || '未知错误'}`);
+        }
+        
+        // 恢复按钮状态
+        if (btn) {
+            btn.textContent = '重新计算当日温度';
+            btn.disabled = false;
+        }
+        
+    } catch (error) {
+        console.error('重新计算温度失败:', error);
+        alert('重新计算温度失败：' + error.message);
+        
+        // 恢复按钮状态
+        const btn = document.querySelector('.btn-warning');
+        if (btn) {
+            btn.textContent = '重新计算当日温度';
+            btn.disabled = false;
+        }
+    }
 }
 
 /**

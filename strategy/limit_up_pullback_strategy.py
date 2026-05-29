@@ -37,6 +37,7 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'pullback_range_max': 0.15,         # 最大回调幅度（15%）
             'volume_shrinkage_ratio': 0.5,      # 成交量萎缩比例
             'support_ratio': 0.95,             # 支撑比例（不破涨停收盘价的95%）
+            'resistance_ratio': 1.05,           # 阻力比例（不超过涨停收盘价的105%）
         }
 
         # 合并用户参数 - params 中的值覆盖默认值
@@ -256,11 +257,18 @@ class LimitUpPullbackStrategy(BaseStrategy):
 
         # 支撑位：涨停收盘价的95%
         support_price = lu_close * support_ratio
+        # 阻力位：涨停收盘价的105%
+        resistance_price = lu_close * self.params['resistance_ratio']
 
         # 检查是否不破支撑位（收盘价不破支撑价）
         # 检查回调期间所有收盘价是否都不低于支撑价
         pullback_closes = pullback_df['close'].values
         if np.any(pullback_closes < support_price):
+            return None
+
+        # 检查是否超过阻力位（收盘价不超过阻力价）
+        # 回调期间所有收盘价应不超过涨停收盘价的105%
+        if np.any(pullback_closes > resistance_price):
             return None
 
         # 新增条件：回调期间，收盘价应低于涨停日收盘价
@@ -314,7 +322,8 @@ class LimitUpPullbackStrategy(BaseStrategy):
         pullback_range_min = self.params['pullback_range_min'] * 100
         pullback_range_max = self.params['pullback_range_max'] * 100
         support_ratio = self.params['support_ratio'] * 100
-        criteria.append(f"2. 回调企稳：涨停后{pullback_days_min}-{pullback_days_max}个交易日内出现回调，回调幅度{pullback_range_min:.0f}%-{pullback_range_max:.0f}%，回调期间收盘价不破涨停收盘价的{support_ratio:.0f}%")
+        resistance_ratio = self.params['resistance_ratio'] * 100
+        criteria.append(f"2. 回调企稳：涨停后{pullback_days_min}-{pullback_days_max}个交易日内出现回调，回调幅度{pullback_range_min:.0f}%-{pullback_range_max:.0f}%，回调期间收盘价不破涨停收盘价的{support_ratio:.0f}%且不超过{resistance_ratio:.0f}%")
 
         # 条件3：成交量萎缩
         volume_shrinkage_ratio = self.params['volume_shrinkage_ratio'] * 100

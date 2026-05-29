@@ -475,43 +475,42 @@ class FundFlowUpdater:
         try:
             # INSERT SQL 语句
             insert_sql = """
-            INSERT INTO stock_fund_flow 
+            INSERT OR REPLACE INTO stock_fund_flow 
             (stock_code, flow_date, period, main_net_flow, super_large_net_flow, 
              large_net_flow, medium_net_flow, small_net_flow, net_flow_rate)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # 使用事务保存数据
-            with self.db_manager.transaction():
-                for _, row in df_fund_flow.iterrows():
-                    try:
-                        # 将日期转换为字符串格式
-                        date_str = str(row.get('trade_date', '')).split(' ')[0]
-                        
-                        # 执行INSERT操作
-                        self.db_manager.execute_with_retry(insert_sql, (
-                            row.get('code', ''),
-                            date_str,
-                            '5d',  # 默认周期为5日
-                            float(row.get('main_net_flow', 0)),
-                            float(row.get('super_large_net_flow', 0)),
-                            float(row.get('large_net_flow', 0)),
-                            float(row.get('medium_net_flow', 0)),
-                            float(row.get('small_net_flow', 0)),
-                            float(row.get('net_flow_rate', 0))
-                        ))
-                        
-                        saved += 1
+            # 直接保存数据，不使用事务（由外层调用者管理事务）
+            for _, row in df_fund_flow.iterrows():
+                try:
+                    # 将日期转换为字符串格式
+                    date_str = str(row.get('trade_date', '')).split(' ')[0]
                     
-                    except Exception as e:
-                        logger.debug(f"保存个股资金流向数据失败: {str(e)}")
+                    # 执行 INSERT 操作
+                    self.db_manager.execute_with_retry(insert_sql, (
+                        row.get('code', ''),
+                        date_str,
+                        '5d',  # 默认周期为 5 日
+                        float(row.get('main_net_flow', 0)),
+                        float(row.get('super_large_net_flow', 0)),
+                        float(row.get('large_net_flow', 0)),
+                        float(row.get('medium_net_flow', 0)),
+                        float(row.get('small_net_flow', 0)),
+                        float(row.get('net_flow_rate', 0))
+                    ))
+                    
+                    saved += 1
+                
+                except Exception as e:
+                    logger.debug(f"保存个股资金流向数据失败：{str(e)}")
             
-            logger.debug(f"保存个股资金流向数据成功: {saved} 条记录")
+            logger.debug(f"保存个股资金流向数据成功：{saved} 条记录")
             
             return saved
         
         except Exception as e:
-            logger.error(f"保存个股资金流向数据失败: {str(e)}")
+            logger.error(f"保存个股资金流向数据失败：{str(e)}")
             return 0
     
     def _save_industry_fund_flow_records(self, df_fund_flow: pd.DataFrame) -> int:
@@ -529,41 +528,40 @@ class FundFlowUpdater:
         try:
             # INSERT SQL 语句
             insert_sql = """
-            INSERT INTO industry_fund_flow 
+            INSERT OR REPLACE INTO industry_fund_flow 
             (industry_name, trade_date, buy_vol, buy_amount, sell_vol, sell_amount, net_vol, net_amount)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # 使用事务保存数据
-            with self.db_manager.transaction():
-                for _, row in df_fund_flow.iterrows():
-                    try:
-                        # 将日期转换为字符串格式
-                        date_str = str(row['trade_date']).split(' ')[0]
-                        
-                        # 执行INSERT操作
-                        self.db_manager.execute_with_retry(insert_sql, (
-                            row['industry_name'],
-                            date_str,
-                            int(row.get('buy_vol', 0)),
-                            float(row.get('buy_amount', 0)),
-                            int(row.get('sell_vol', 0)),
-                            float(row.get('sell_amount', 0)),
-                            int(row.get('net_vol', 0)),
-                            float(row.get('net_amount', 0))
-                        ))
-                        
-                        saved += 1
+            # 直接保存数据，不使用事务（由外层调用者管理事务）
+            for _, row in df_fund_flow.iterrows():
+                try:
+                    # 将日期转换为字符串格式
+                    date_str = str(row['trade_date']).split(' ')[0]
                     
-                    except Exception as e:
-                        logger.debug(f"保存行业资金流向数据失败: {str(e)}")
+                    # 执行 INSERT 操作
+                    self.db_manager.execute_with_retry(insert_sql, (
+                        row['industry_name'],
+                        date_str,
+                        int(row.get('buy_vol', 0)),
+                        float(row.get('buy_amount', 0)),
+                        int(row.get('sell_vol', 0)),
+                        float(row.get('sell_amount', 0)),
+                        int(row.get('net_vol', 0)),
+                        float(row.get('net_amount', 0))
+                    ))
+                    
+                    saved += 1
+                
+                except Exception as e:
+                    logger.debug(f"保存行业资金流向数据失败：{str(e)}")
             
-            logger.debug(f"保存行业资金流向数据成功: {saved} 条记录")
+            logger.debug(f"保存行业资金流向数据成功：{saved} 条记录")
             
             return saved
         
         except Exception as e:
-            logger.error(f"保存行业资金流向数据失败: {str(e)}")
+            logger.error(f"保存行业资金流向数据失败：{str(e)}")
             return 0
     
     def _save_sector_fund_flow_records(self, df_fund_flow: pd.DataFrame) -> int:

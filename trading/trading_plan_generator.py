@@ -112,37 +112,37 @@ class TradingPlanGenerator:
 
     def _generate_temperature_suggestion(self, temp_data: Dict) -> str:
         """
-        生成温度建议文本（只包含仓位建议）
+        生成温度建议文本（基于连续温度风控规则）
 
         参数：
-            temp_data: 温度数据
+            temp_data: 温度数据，包含连续温度风控结果
 
         返回：
             str: 建议文本
         """
         temp = temp_data.get('temperature')
         position_ratio = temp_data.get('position_ratio', 1.0)
+        action = temp_data.get('action', '')
         
         if temp is None:
             return '市场温度数据获取失败，建议谨慎操作'
         
-        # 只生成仓位建议
+        # 转换为百分比
         position_pct = int(position_ratio * 100)
-        if temp >= 80:
-            return f'当前市场活跃({temp}°)，建议仓位{position_pct}%'
-        elif temp >= 65:
-            return f'当前市场正常({temp}°)，建议仓位{position_pct}%'
-        elif temp >= 50:
-            return f'当前市场偏冷({temp}°)，建议仓位{position_pct}%'
-        elif temp >= 30:
-            return f'当前市场寒冷({temp}°)，建议仓位{position_pct}%'
-        elif temp >= 15:
-            return f'当前市场冰封({temp}°)，建议仓位{position_pct}%'
-        else:
-            return f'当前市场极端({temp}°)，建议暂停买入'
-            suggestions.append('耐心等待市场回暖')
         
-        return '；'.join(suggestions)
+        # 根据连续温度风控结果生成提示
+        if position_ratio == 0.0:
+            # 0%仓位限制 - 极端风险/冰封风险
+            return f'【风控提示】{action}，禁止买入，建议观望'
+        elif position_ratio == 0.2:
+            # 20%仓位限制 - 严寒风险
+            return f'【风控提示】{action}，建议仓位不超过{position_pct}%'
+        elif position_ratio == 0.5:
+            # 50%仓位限制 - 寒冷/偏冷风险
+            return f'【风控提示】{action}，建议仓位不超过{position_pct}%'
+        else:
+            # 无限制(100%) - 市场正常
+            return f'当前市场温度({temp}°)，{action}，建议仓位{position_pct}%'
 
     def _get_temp_constraints(self, temperature_info: Dict) -> tuple:
         """

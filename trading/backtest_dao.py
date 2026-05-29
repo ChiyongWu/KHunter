@@ -238,6 +238,9 @@ class BacktestDAO:
                 'profit_loss_ratio': result.get('profit_loss_ratio', 0),
                 'max_drawdown': result.get('max_drawdown', 0),
                 'sharpe_ratio': result.get('sharpe_ratio', 0),
+                'volatility': result.get('volatility', 0),
+                'sortino_ratio': result.get('sortino_ratio', 0),
+                'avg_hold_days': result.get('avg_hold_days', 0),
                 'initial_capital': result.get('initial_capital', 1000000),
                 'final_capital': result.get('final_capital', 1000000),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -358,18 +361,43 @@ class BacktestDAO:
         """
         return self.get_result(result_id)
     
-    def get_all_results(self) -> List[Dict]:
+    def get_all_results(self, strategy_name=None, created_date=None, created_start=None, created_end=None) -> List[Dict]:
         """
-        获取所有回测结果
+        获取所有回测结果（支持按策略名称和创建时间筛选）
         
+        Args:
+            strategy_name: 策略名称（可选）
+            created_date: 创建日期（精确匹配，格式：YYYY-MM-DD）
+            created_start: 创建时间起始（格式：YYYY-MM-DD）
+            created_end: 创建时间结束（格式：YYYY-MM-DD）
+            
         Returns:
             回测结果列表
         """
         try:
-            sql = """
-                SELECT * FROM backtest_result ORDER BY id DESC
-            """
-            results = self.db.query(sql)
+            sql = "SELECT * FROM backtest_result"
+            params = []
+            
+            if strategy_name or created_date or created_start or created_end:
+                sql += " WHERE "
+                conditions = []
+                if strategy_name:
+                    conditions.append("strategy_name = ?")
+                    params.append(strategy_name)
+                if created_date:
+                    conditions.append("DATE(created_at) = ?")
+                    params.append(created_date)
+                if created_start:
+                    conditions.append("DATE(created_at) >= ?")
+                    params.append(created_start)
+                if created_end:
+                    conditions.append("DATE(created_at) <= ?")
+                    params.append(created_end)
+                sql += " AND ".join(conditions)
+            
+            sql += " ORDER BY created_at DESC"
+            
+            results = self.db.query(sql, params)
             return [dict(result) for result in results]
             
         except Exception as e:
@@ -427,6 +455,22 @@ class BacktestDAO:
             logger.error(f"根据策略和日期获取回测结果失败: {str(e)}")
             return None
     
+    def get_all_strategies(self) -> List[str]:
+        """
+        获取回测历史中出现过的所有策略名称
+        
+        Returns:
+            策略名称列表（去重）
+        """
+        try:
+            sql = "SELECT DISTINCT strategy_name FROM backtest_result ORDER BY strategy_name"
+            results = self.db.query(sql)
+            return [result['strategy_name'] for result in results if result['strategy_name']]
+            
+        except Exception as e:
+            logger.error(f"获取策略列表失败: {str(e)}")
+            return []
+    
     def update_result(self, result_id: int, result: Dict) -> bool:
         """
         更新现有的回测结果记录
@@ -458,6 +502,9 @@ class BacktestDAO:
                     profit_loss_ratio = ?,
                     max_drawdown = ?,
                     sharpe_ratio = ?,
+                    volatility = ?,
+                    sortino_ratio = ?,
+                    avg_hold_days = ?,
                     initial_capital = ?,
                     final_capital = ?,
                     created_at = ?
@@ -481,6 +528,9 @@ class BacktestDAO:
                 result.get('profit_loss_ratio', 0),
                 result.get('max_drawdown', 0),
                 result.get('sharpe_ratio', 0),
+                result.get('volatility', 0),
+                result.get('sortino_ratio', 0),
+                result.get('avg_hold_days', 0),
                 result.get('initial_capital', 1000000),
                 result.get('final_capital', 1000000),
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -538,6 +588,35 @@ class BacktestDAO:
             
         except Exception as e:
             logger.error(f"删除交易记录失败: {str(e)}")
+            return False
+
+    def delete_result(self, result_id: int) -> bool:
+        """
+        删除回测结果（级联删除关联的收益曲线和交易记录）
+        
+        Args:
+            result_id: 回测结果ID
+            
+        Returns:
+            是否删除成功
+        """
+        try:
+            # 先删除关联的收益曲线数据
+            self.delete_equity_curve(result_id)
+            
+            # 再删除关联的交易记录
+            self.delete_trades(result_id)
+            
+            # 最后删除回测结果
+            sql = "DELETE FROM backtest_result WHERE id = ?"
+            self.db.execute(sql, (result_id,))
+            self.db.connect().commit()
+            
+            logger.info(f"删除回测结果成功，result_id: {result_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"删除回测结果失败: {str(e)}")
             return False
     
     def save_trade(self, trade: Dict) -> int:

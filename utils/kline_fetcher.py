@@ -42,7 +42,8 @@ class KlineFetcher:
         返回：
             dict: {stock_code: DataFrame, ...}
         """
-        logger.info(f"批量获取K线数据: {len(stock_codes)} 只股票，每只获取 {days} 天数据...")
+        # 简化日志：只输出股票数量
+        logger.debug(f"批量获取K线数据: {len(stock_codes)} 只股票，每只获取 {days} 天数据...")
         
         if use_concurrent:
             return self._fetch_kline_concurrent(stock_codes, days, max_workers)
@@ -51,7 +52,10 @@ class KlineFetcher:
     
     def _fetch_kline_sequential(self, stock_codes: list, days: int = 30) -> dict:
         """
-        顺序获取K线数据（串行方式）
+        顺序获取K线数据（支持前复权）
+        
+        使用 stock_data_fetcher.fetch_stock_update() 单只获取，
+        返回前复权数据（adj='qfq'）。
         
         参数：
             stock_codes: 股票代码列表
@@ -60,7 +64,7 @@ class KlineFetcher:
         返回：
             dict: {stock_code: DataFrame, ...}
         """
-        logger.info(f"使用顺序方式获取K线数据: {len(stock_codes)} 只股票...")
+        logger.info(f"使用顺序方式获取K线数据（前复权）: {len(stock_codes)} 只股票...")
         
         results = {}
         success_count = 0
@@ -68,7 +72,7 @@ class KlineFetcher:
         
         for idx, code in enumerate(stock_codes, 1):
             try:
-                # 调用 stock_data_fetcher 获取K线数据
+                # 单只获取前复权数据
                 df_kline = self.stock_data_fetcher.fetch_stock_update(code, days=days)
                 
                 if df_kline is not None and len(df_kline) > 0:
@@ -100,11 +104,13 @@ class KlineFetcher:
         返回：
             dict: {stock_code: DataFrame, ...}
         """
-        logger.info(f"使用并发方式获取K线数据: {len(stock_codes)} 只股票，并发线程数: {max_workers}...")
+        # 简化日志：只在开始时输出
+        logger.debug(f"并发获取K线数据: {len(stock_codes)} 只股票，并发线程数: {max_workers}...")
         
         results = {}
         success_count = 0
         failed_count = 0
+        failed_reasons = {}  # 记录失败原因
         start_time = time.time()
         total_count = len(stock_codes)
         
@@ -117,7 +123,6 @@ class KlineFetcher:
             }
             
             # 处理完成的任务
-            completed_count = 0
             for future in as_completed(future_to_code):
                 code = future_to_code[future]
                 try:
@@ -128,22 +133,28 @@ class KlineFetcher:
                         success_count += 1
                     else:
                         failed_count += 1
+                        failed_reasons[code] = "返回空数据"
                 
                 except Exception as e:
-                    logger.debug(f"获取 {code} K线数据失败: {e}")
+                    # 改为warning级别，确保生产环境能看到失败原因
+                    error_msg = str(e)[:100]
+                    logger.warning(f"获取 {code} K线数据失败: {error_msg}")
                     failed_count += 1
-                
-                # 定期输出进度（每100只股票输出一次）
-                completed_count += 1
-                if completed_count % 100 == 0:
-                    elapsed = time.time() - start_time
-                    progress_pct = (completed_count / total_count) * 100
-                    estimated_total = elapsed * total_count / completed_count
-                    estimated_remaining = estimated_total - elapsed
-                    logger.info(f"并发获取进度: {completed_count}/{total_count} ({progress_pct:.1f}%), 成功: {success_count}, 失败: {failed_count}, 耗时: {elapsed:.1f}秒, 预计剩余: {estimated_remaining:.1f}秒")
+                    failed_reasons[code] = error_msg
         
         elapsed = time.time() - start_time
-        logger.info(f"并发获取完成: {success_count} 只成功, {failed_count} 只失败, 总耗时: {elapsed:.1f}秒")
+        # 只在完成时输出一次汇总日志
+        logger.debug(f"并发获取完成: {success_count}/{total_count} 成功, {failed_count} 失败, 耗时 {elapsed:.1f}秒")
+        
+        # 如果有失败，输出失败统计
+        if failed_count > 0:
+            # 统计失败原因分布
+            reason_counts = {}
+            for reason in failed_reasons.values():
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            
+            logger.warning(f"失败原因统计: {reason_counts}")
+        
         return results
     
     # ==================== 数据库操作 ====================
@@ -158,7 +169,7 @@ class KlineFetcher:
         返回：
             (updated_count, failed_count)
         """
-        logger.info(f"批量更新K线数据到数据库: {len(kline_data)} 只股票...")
+        logger.debug(f"批量更新K线数据到数据库: {len(kline_data)} 只股票...")
         
         # UPSERT SQL 语句
         upsert_sql = """
@@ -209,7 +220,7 @@ class KlineFetcher:
         except Exception as e:
             logger.error(f"批量更新K线数据失败: {e}")
         
-        logger.info(f"批量更新完成: {updated_count} 只成功, {failed_count} 只失败, {record_count} 条记录")
+        logger.debug(f"批量更新完成: {updated_count} 只成功, {failed_count} 只失败, {record_count} 条记录")
         return updated_count, failed_count
     
     def _get_latest_kline_date(self, stock_code: str) -> Optional[str]:

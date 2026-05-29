@@ -12,6 +12,37 @@ let lastSelectionTime = null;
 // 模块变量
 let modules = {};
 
+// 检查策略配置文件是否存在
+async function checkStrategyConfig() {
+    try {
+        const response = await fetch('/api/strategy/has-config');
+        const result = await response.json();
+        
+        if (result.success) {
+            const hasConfig = result.has_config;
+            
+            // 如果没有配置文件，隐藏策略执行器菜单和页面
+            if (!hasConfig) {
+                const strategyRunnerMenu = document.querySelector('.nav-item[data-page="strategy-runner"]');
+                const strategyRunnerPage = document.getElementById('strategy-runner-page');
+                
+                if (strategyRunnerMenu) {
+                    strategyRunnerMenu.style.display = 'none';
+                    console.log('未检测到配置文件，已隐藏策略执行器菜单');
+                }
+                if (strategyRunnerPage) {
+                    strategyRunnerPage.style.display = 'none';
+                }
+            }
+            
+            return hasConfig;
+        }
+    } catch (error) {
+        console.error('检查策略配置文件失败:', error);
+    }
+    return false;
+}
+
 // 动态加载模块
 async function loadModules() {
     try {
@@ -31,6 +62,7 @@ async function loadModules() {
         const marketTempModule = await import('./modules/market_temperature.js');
         const moneyFlowModule = await import('./modules/money_flow.js');
         const strategyRunnerModule = await import('./modules/strategy-runner.js');
+        const riskModule = await import('./modules/risk.js');
         
         // 存储模块
         modules = {
@@ -48,7 +80,8 @@ async function loadModules() {
             backtestExecutor: backtestExecutorModule,
             marketTemp: marketTempModule,
             moneyFlow: moneyFlowModule,
-            strategyRunner: strategyRunnerModule
+            strategyRunner: strategyRunnerModule,
+            risk: riskModule
         };
         
         // 初始化
@@ -61,6 +94,9 @@ async function loadModules() {
 
 // 初始化应用
 async function initializeApp() {
+    // 检查配置文件状态，决定是否显示策略执行器菜单
+    await checkStrategyConfig();
+    
     // 初始化WebSocket连接
     modules.websocket.initWebSocket();
     
@@ -71,6 +107,9 @@ async function initializeApp() {
     modules.navigation.switchPage(currentPage);
     
     modules.stocks.loadStats();
+    modules.stocks.loadMyGoldenStocks();
+    modules.stocks.loadHotIndustries();
+    modules.stocks.loadHotAreas();
     modules.analysis.setupStockAnalysis();
     modules.ranking.setupRankingEvents();
     
@@ -80,22 +119,10 @@ async function initializeApp() {
     // 初始化资金流向选股页面
     modules.moneyFlow.initMoneyFlowPage();
     
-    // // 初始化执行管理器（需要在批量回测模块之后初始化）
-    // try {
-    //     // 从 backtestBatch 模块获取任务管理器和UI管理器实例
-    //     const { backtestTaskManager, backtestUIManager } = modules.backtestBatch;
-    //     modules.backtestExecutor.initBacktestExecutor(backtestTaskManager, backtestUIManager);
-    // } catch (error) {
-    //     console.warn('执行管理器初始化失败:', error);
-    // }
+    // 初始化风控模块
+    modules.risk.initRiskModule();
     
-    // 加载首页数据
-    modules.stocks.loadMyGoldenStocks();
-    modules.stocks.loadHotIndustries();
-    modules.stocks.loadHotAreas();
-    
-    // 初始化策略执行器模块
-    modules.strategyRunner.default.initStrategyRunnerModule();
+    // 注：策略执行器模块在 navigation.js 中懒加载（用户切换到策略运行器页面时才初始化）
     
     // 暴露全局函数（供HTML调用）
     window.switchPage = modules.navigation.switchPage;
@@ -128,6 +155,7 @@ async function initializeApp() {
     window.searchBacktestHistory = modules.backtest.searchBacktestHistory;
     window.viewBacktestResult = modules.backtest.viewBacktestResult;
     window.exportBacktestResult = modules.backtest.exportBacktestResult;
+    window.deleteBacktestResult = modules.backtest.deleteBacktestResult;
     window.closeBacktestModal = modules.backtest.closeBacktestModal;
     
     // 绑定按钮事件

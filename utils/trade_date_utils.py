@@ -17,9 +17,8 @@ def is_trading_day(date_str: str) -> bool:
     """
     判断指定日期是否为交易日
 
-    简单实现：
-    1. 排除周六和周日
-    2. 后续可扩展为使用 Tushare 或其他数据源获取真实交易日
+    优先使用 Tushare 获取真实交易日历，包含节假日判断。
+    如果 Tushare 不可用，则回退到简单的周末排除逻辑。
 
     参数:
         date_str: 日期字符串，支持 YYYY-MM-DD 或 YYYYMMDD 格式
@@ -29,20 +28,50 @@ def is_trading_day(date_str: str) -> bool:
     try:
         # 统一日期格式
         if '-' in date_str:
+            date_str_fmt = date_str.replace('-', '')
+        else:
+            date_str_fmt = date_str
+            date = datetime.strptime(date_str, '%Y%m%d')
+        
+        # 先尝试使用 Tushare 获取真实交易日历
+        try:
+            import tushare as ts
+            from pathlib import Path
+            # 尝试从配置文件加载 token
+            config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
+            if config_path.exists():
+                import json
+                with open(config_path, 'r') as f:
+                    tushare_config = json.load(f)
+                if 'api_key' in tushare_config:
+                    ts.set_token(tushare_config['api_key'])
+            pro = ts.pro_api()
+            df = pro.trade_cal(
+                start_date=date_str_fmt,
+                end_date=date_str_fmt,
+                is_open='1'
+            )
+            if df is not None and not df.empty:
+                logger.debug(f"Tushare 确认 {date_str} 是交易日")
+                return True
+            else:
+                logger.debug(f"Tushare 确认 {date_str} 不是交易日")
+                return False
+        except Exception as e:
+            logger.debug(f"Tushare 交易日查询失败，使用周末判断: {e}")
+        
+        # 回退：排除周六(5)和周日(6)
+        if '-' in date_str:
             date = datetime.strptime(date_str, '%Y-%m-%d')
         else:
             date = datetime.strptime(date_str, '%Y%m%d')
         
-        # 排除周六(5)和周日(6)
         weekday = date.weekday()
         if weekday >= 5:
             logger.debug(f"日期 {date_str} 是周末，不是交易日")
             return False
         
-        # 后续可扩展：排除法定节假日
-        # TODO: 从数据源获取法定节假日列表并排除
-        
-        logger.debug(f"日期 {date_str} 是交易日")
+        logger.debug(f"日期 {date_str} 是交易日（基于周末判断）")
         return True
     except Exception as e:
         logger.error(f"判断交易日时出错: {e}")
@@ -51,7 +80,9 @@ def is_trading_day(date_str: str) -> bool:
 
 def get_trading_days(start_date: str, end_date: str) -> List[str]:
     """
-    获取指定日期范围内的交易日列表
+    获取指定日期范围内的交易日列表（批量优化版）
+
+    一次性获取整个区间的交易日历，避免逐日调用 API。
 
     参数:
         start_date: 开始日期，支持 YYYY-MM-DD 或 YYYYMMDD 格式
@@ -62,25 +93,65 @@ def get_trading_days(start_date: str, end_date: str) -> List[str]:
     try:
         # 统一日期格式
         if '-' in start_date:
-            start = datetime.strptime(start_date, '%Y-%m-%d')
+            start_str = start_date.replace('-', '')
         else:
-            start = datetime.strptime(start_date, '%Y%m%d')
-        
+            start_str = start_date
+
         if '-' in end_date:
-            end = datetime.strptime(end_date, '%Y-%m-%d')
+            end_str = end_date.replace('-', '')
         else:
-            end = datetime.strptime(end_date, '%Y%m%d')
-        
-        # 生成日期范围
+            end_str = end_date
+
+        # 尝试使用 Tushare 批量获取交易日历
+        try:
+            import tushare as ts
+            from pathlib import Path
+            import json
+
+            # 尝试从配置文件加载 token
+            config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    tushare_config = json.load(f)
+                if 'api_key' in tushare_config:
+                    ts.set_token(tushare_config['api_key'])
+
+            pro = ts.pro_api()
+
+            # 一次性获取整个区间的交易日历
+            df = pro.trade_cal(
+                start_date=start_str,
+                end_date=end_str,
+                is_open='1'  # 只要交易日
+            )
+
+            if df is not None and not df.empty:
+                # 转换格式并返回
+                trading_days = [
+                    f"{row['cal_date'][:4]}-{row['cal_date'][4:6]}-{row['cal_date'][6:]}"
+                    for _, row in df.iterrows()
+                ]
+                logger.info(f"批量获取到 {len(trading_days)} 个交易日")
+                return trading_days
+
+        except Exception as e:
+            logger.warning(f"Tushare 批量获取失败: {e}，降级到简单排除")
+
+        # 降级方案：简单的周末排除（节假日可能不准确）
+        from datetime import datetime, timedelta
+        start = datetime.strptime(start_date.replace('-', ''), '%Y%m%d')
+        end = datetime.strptime(end_date.replace('-', ''), '%Y%m%d')
+
         trading_days = []
         current = start
         while current <= end:
-            if is_trading_day(current.strftime('%Y-%m-%d')):
+            if current.weekday() < 5:  # 周一到周五
                 trading_days.append(current.strftime('%Y-%m-%d'))
             current += timedelta(days=1)
-        
-        logger.info(f"获取到 {len(trading_days)} 个交易日")
+
+        logger.info(f"获取到 {len(trading_days)} 个交易日（降级模式）")
         return trading_days
+
     except Exception as e:
         logger.error(f"获取交易日列表时出错: {e}")
         return []
@@ -121,23 +192,26 @@ def get_previous_trading_day(date_str: str) -> str:
     获取指定日期的前一个交易日
 
     参数:
-        date_str: 日期字符串，支持 YYYY-MM-DD 格式
+        date_str: 日期字符串，支持 YYYY-MM-DD 或 YYYYMMDD 格式
     返回:
         str: 前一个交易日，格式为 YYYY-MM-DD
     """
     try:
-        # 解析日期
-        date = datetime.strptime(date_str, '%Y-%m-%d')
+        # 解析日期（支持两种格式）
+        if '-' in date_str:
+            date = datetime.strptime(date_str, '%Y-%m-%d')
+        else:
+            date = datetime.strptime(date_str, '%Y%m%d')
         
         # 向前查找前一个交易日
         current = date - timedelta(days=1)
         while True:
             current_str = current.strftime('%Y-%m-%d')
             if is_trading_day(current_str):
-                logger.debug(f"{date_str} 的前一个交易日是 {current_str}")
+                logger.debug("{} 的前一个交易日是 {}".format(date_str, current_str))
                 return current_str
             current -= timedelta(days=1)
     except Exception as e:
-        logger.error(f"获取前一个交易日时出错: {e}")
+        logger.error("获取前一个交易日时出错: {}".format(e))
         # 返回默认值
         return date_str

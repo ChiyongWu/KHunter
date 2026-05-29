@@ -133,12 +133,12 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
     def select_stocks(self, df, stock_name='', selection_date=None) -> list:
         """
-        执行仙人指路策略选股
+        执行仙人指路策略选股（外部已做日期切片，策略只管选股）
 
-        :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :param df: 股票数据DataFrame（倒序，最新在index=0，已按选股日期切片）
         :param stock_name: 股票名称
-        :param selection_date: 选股日期（YYYY-MM-DD格式），用于回溯检查和停牌过滤
-        :return: 选股结果列表（只包含确认成功的信号）
+        :param selection_date: 选股日期（YYYY-MM-DD格式）
+        :return: 选股结果列表
         """
         if not self._validate_data(df):
             return []
@@ -146,27 +146,18 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         if not self._validate_stock_name(stock_name):
             return []
 
-        # 停牌检查：根据用户选择的选股日期判断是否停牌
-        # 如果用户指定了选股日期，股票最新数据日期必须 >= 选股日期
-        # 如果用户未指定选股日期，使用数据库统一最新交易日
-        latest_date_str = str(df.iloc[0]['date']).split()[0]
-        if selection_date is None:
-            selection_date = self._get_latest_trading_date()
-        elif latest_date_str < selection_date:
-            return []
-
-        if not self._quick_filter_with_lookback(df):
-            return []
-
-        result = self.calculate_indicators(df)
-
+        # 计算技术指标
+        result = self.calculate_indicators(df.copy())
         if len(result) < 30:
+            return []
+
+        # 快速过滤
+        if not self._quick_filter_with_lookback(result):
             return []
 
         try:
             lookback_days = self.params.get('lookback_days', 3)
-            selection_result = self._check_immortal_guidance_with_lookback(result, lookback_days)
-            return selection_result
+            return self._check_immortal_guidance_with_lookback(result, lookback_days)
         except Exception as e:
             return []
 
@@ -213,6 +204,9 @@ class ImmortalGuidanceStrategy(BaseStrategy):
             prev_idx = signal_day_idx + 1
 
             if prev_idx >= len(df):
+                break
+
+            if day_offset > 3:
                 break
 
             signal_day = df.iloc[signal_day_idx]
@@ -607,6 +601,20 @@ class ImmortalGuidanceStrategy(BaseStrategy):
         db = DBManager()
         return db.get_latest_trading_date()
 
+    def _truncate_to_date(self, df, cutoff_date) -> 'pd.DataFrame':
+        """
+        截断数据到指定日期（用于回测模式）
+
+        :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :param cutoff_date: 截止日期（YYYY-MM-DD格式）
+        :return: 截断后的DataFrame
+        """
+        import pandas as pd
+        df_copy = df.copy()
+        df_copy['date_str'] = df_copy['date'].apply(lambda x: str(x).split()[0])
+        truncated = df_copy[df_copy['date_str'] <= cutoff_date].drop('date_str', axis=1)
+        return truncated
+
     def _quick_filter_with_lookback(self, df) -> bool:
         """
         快速过滤（支持回溯）- 检查最近N天是否有潜在的仙人指路形态
@@ -632,6 +640,9 @@ class ImmortalGuidanceStrategy(BaseStrategy):
 
             if prev_idx >= len(df):
                 break
+
+            if day_offset > 3:
+                continue
 
             signal_day = df.iloc[signal_day_idx]
             prev_close = df.iloc[prev_idx]['close']
