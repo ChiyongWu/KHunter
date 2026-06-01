@@ -1,9 +1,10 @@
 """
 除权信息工具类，提供获取除权信息和复权因子的方法
 
-除权检测逻辑：
-1. 每日开盘前获取持仓股票的当日 adj_factor（复权因子）
-2. 与前一日因子对比，如果有变化（factor_diff != 1），则说明当日发生除权
+除权检测逻辑（与数据更新逻辑保持一致）：
+1. 使用 Tushare adj_factor 接口获取复权因子
+2. 检测时间段内所有日期的因子变化
+3. 使用相对误差阈值 0.01% 判断是否发生除权
 """
 
 import logging
@@ -19,12 +20,17 @@ logger = logging.getLogger(__name__)
 class ExdividendUtils:
     """
     除权信息工具类，提供获取除权信息和复权因子的方法
+    检测逻辑与 stock_data_fetcher.py 保持一致
     """
     
     @staticmethod
     def get_exdividend_info(stock_code: str, trade_date: str) -> Optional[dict]:
         """
         获取股票在指定日期的除权信息（通过复权因子变化判断）
+        
+        检测逻辑与数据更新中的 check_exdividend_by_factor 保持一致：
+        - 使用相对误差阈值 0.01% 判断
+        - abs(curr_factor - prev_factor) > 0.0001 * prev_factor
         
         Args:
             stock_code: 股票代码（格式：sh600000、600000.SH 或 600000）
@@ -64,13 +70,14 @@ class ExdividendUtils:
                 return None
             
             # ========== 3. 判断是否除权（因子变化超过阈值）==========
-            factor_diff = today_factor / prev_factor
-            
-            # 因子变化阈值（避免浮点精度问题）
-            threshold = 0.0001
-            if abs(factor_diff - 1.0) <= threshold:
+            # 使用与 stock_data_fetcher.py 一致的检测逻辑：
+            # 相对误差阈值 0.01%
+            if abs(today_factor - prev_factor) <= 0.0001 * prev_factor:
                 # 因子未变化，无除权
                 return None
+            
+            # 计算除权因子
+            factor_diff = today_factor / prev_factor
             
             # ========== 4. 返回除权信息 ==========
             return {
@@ -88,7 +95,7 @@ class ExdividendUtils:
     @staticmethod
     def _get_adj_factor(pro, ts_code: str, trade_date: str) -> Optional[float]:
         """
-        获取指定日期的复权因子（从Tushare获取）
+        获取指定日期的复权因子（从Tushare adj_factor接口获取）
         
         Args:
             pro: Tushare API实例
@@ -99,7 +106,17 @@ class ExdividendUtils:
             复权因子，获取失败返回None
         """
         try:
-            # 获取前复权数据（包含复权因子）
+            # 使用 Tushare adj_factor 接口（更直接获取复权因子）
+            df = pro.adj_factor(
+                ts_code=ts_code,
+                start_date=trade_date,
+                end_date=trade_date
+            )
+            
+            if df is not None and not df.empty:
+                return df.iloc[0]['adj_factor']
+            
+            # 如果 adj_factor 接口失败，尝试使用 pro_bar 获取
             df = pro.pro_bar(
                 ts_code=ts_code,
                 start_date=trade_date,
@@ -209,3 +226,21 @@ class ExdividendUtils:
                 return f"{stock_code}.SZ"
         
         return stock_code
+    
+    @staticmethod
+    def check_exdividend_batch(stock_codes: list, trade_date: str, start_date: str = None) -> dict:
+        """
+        批量检测股票除权情况（与 stock_data_fetcher.check_exdividend_by_factor 一致）
+        
+        Args:
+            stock_codes: 股票代码列表
+            trade_date: 结束日期（格式：YYYYMMDD）
+            start_date: 开始日期（格式：YYYYMMDD），不传则检测当日
+        
+        Returns:
+            检测结果字典
+        """
+        from utils.stock_data_fetcher import StockDataFetcher
+        
+        fetcher = StockDataFetcher()
+        return fetcher.check_exdividend_by_factor(stock_codes, trade_date, start_date)

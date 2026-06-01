@@ -3599,7 +3599,6 @@ class StrategyRunner:
             valid_files, expire_date = checker.check_config()
             
             if not valid_files:
-                # 无论什么原因导致没有有效配置文件，都阻止运行
                 days_remaining = checker.get_days_remaining()
                 if days_remaining <= 0:
                     return {
@@ -3614,10 +3613,8 @@ class StrategyRunner:
                         'days_remaining': -1
                     }
             
-            # 获取剩余天数
             days_remaining = checker.get_days_remaining()
             
-            # 检查是否即将到期（提前5天提醒）
             if days_remaining > 0 and days_remaining <= 5:
                 logger.warning(f"功能配置文件即将到期，剩余{days_remaining}天")
             

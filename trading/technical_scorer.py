@@ -432,7 +432,8 @@ class TechnicalScorer:
                             'MTopStrategy': 'M头策略',
                             'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
                             'LimitUpPullbackStrategy': '涨停回马枪策略',
-                            'LimitUpSidewaysStrategy': '涨停横盘策略'
+                            'LimitUpSidewaysStrategy': '涨停横盘策略',
+                            'GoldenTriangleStrategy': '金三角策略'
                         }
                         if strategy in class_name_map:
                             chinese_name = class_name_map[strategy]
@@ -546,7 +547,8 @@ class TechnicalScorer:
                             'MTopStrategy': 'M头策略',
                             'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
                             'LimitUpPullbackStrategy': '涨停回马枪策略',
-                            'LimitUpSidewaysStrategy': '涨停横盘策略'
+                            'LimitUpSidewaysStrategy': '涨停横盘策略',
+                            'GoldenTriangleStrategy': '金三角策略'
                         }
                         if name in class_name_map:
                             chinese_name = class_name_map[name]

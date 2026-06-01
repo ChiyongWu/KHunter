@@ -1013,24 +1013,26 @@ class StockDataFetcher:
             'market_caps': market_caps
         }
 
-    def check_exdividend_by_factor(self, stock_codes: list, trade_date: str) -> dict:
+    def check_exdividend_by_factor(self, stock_codes: list, trade_date: str, start_date: str = None) -> dict:
         """
         通过复权因子检测是否发生除权
 
         参数：
             stock_codes: 股票代码列表，如 ['000001', '600519']
             trade_date: 交易日期 (格式：YYYYMMDD，如 20260513)
+            start_date: 开始日期 (格式：YYYYMMDD)，如果提供则检测该日期到trade_date之间的除权
 
         返回：
             {
                 'exdividend_stocks': [stock_code, ...],  # 发生除权的股票列表
-                'factor_changes': {stock_code: (prev_factor, curr_factor), ...},
+                'factor_changes': {stock_code: [(date, prev_factor, curr_factor), ...], ...},
                 'message': str
             }
 
         说明：
             - 调用 Tushare pro.adj_factor 接口获取复权因子
             - 对比前后两日因子，变化则判定为除权
+            - 如果提供start_date，则检测该时间段内所有日期的变化
             - 支持批量查询（逗号分隔，最多50只）
         """
         try:
@@ -1048,10 +1050,14 @@ class StockDataFetcher:
 
             pro = ts.pro_api(token)
 
-            # 计算前一个交易日
-            prev_date = self._get_previous_trading_date(trade_date)
-            if not prev_date:
-                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '无法获取前一交易日'}
+            # 如果提供了start_date，则使用它；否则使用前一交易日
+            if start_date:
+                query_start_date = start_date
+                logger.info(f"【除权检测】检测时间段: {query_start_date} 至 {trade_date}")
+            else:
+                query_start_date = self._get_previous_trading_date(trade_date)
+                if not query_start_date:
+                    return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '无法获取前一交易日'}
 
             # 转换股票代码格式
             ts_codes = []
@@ -1061,11 +1067,11 @@ class StockDataFetcher:
                 else:
                     ts_codes.append(code + '.SZ')
 
-            # 批量获取前后两日复权因子
+            # 批量获取指定时间段内的复权因子
             ts_codes_str = ','.join(ts_codes)
             df = pro.adj_factor(
                 ts_code=ts_codes_str,
-                start_date=prev_date,
+                start_date=query_start_date,
                 end_date=trade_date
             )
 
@@ -1082,16 +1088,24 @@ class StockDataFetcher:
                     continue
 
                 # 按日期排序
-                stock_df = stock_df.sort_values('trade_date', ascending=False)
-                curr_factor = stock_df.iloc[0]['adj_factor']
-                prev_factor = stock_df.iloc[1]['adj_factor']
+                stock_df = stock_df.sort_values('trade_date', ascending=True).reset_index(drop=True)
 
-                # 对比因子是否变化（浮点数比较，使用相对误差）
-                if abs(curr_factor - prev_factor) > 0.0001 * prev_factor:
-                    code = ts_code.split('.')[0]
-                    exdividend_stocks.append(code)
-                    factor_changes[code] = (prev_factor, curr_factor)
-                    logger.info(f"【除权检测】{code} 发生除权，复权因子 {prev_factor} -> {curr_factor}")
+                # 检测整个时间段内的所有变化
+                stock_factor_changes = []
+                for i in range(1, len(stock_df)):
+                    prev_factor = stock_df.iloc[i-1]['adj_factor']
+                    curr_factor = stock_df.iloc[i]['adj_factor']
+                    change_date = stock_df.iloc[i]['trade_date']
+
+                    # 对比因子是否变化（浮点数比较，使用相对误差）
+                    if abs(curr_factor - prev_factor) > 0.0001 * prev_factor:
+                        code = ts_code.split('.')[0]
+                        stock_factor_changes.append((change_date, prev_factor, curr_factor))
+                        logger.info(f"【除权检测】{code} 在 {change_date} 发生除权，复权因子 {prev_factor:.6f} -> {curr_factor:.6f}")
+
+                if stock_factor_changes:
+                    exdividend_stocks.append(ts_code.split('.')[0])
+                    factor_changes[ts_code.split('.')[0]] = stock_factor_changes
 
             if exdividend_stocks:
                 message = f"检测到 {len(exdividend_stocks)} 只股票发生除权: {exdividend_stocks}"

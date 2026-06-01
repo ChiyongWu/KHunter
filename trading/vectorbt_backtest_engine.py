@@ -120,20 +120,17 @@ class VectorBTDataLoader:
             # 记录处理前的 NaN 数量
             nan_count_before = prices.isnull().sum().sum()
             
-            # 第一步：前向填充
+            # 第一步：前向填充（只使用历史数据）
             prices = prices.ffill()
             
-            # 第二步：后向填充
-            prices = prices.bfill()
-            
-            # 第三步：对于仍然为 NaN 的值，使用列的平均值填充
+            # 第二步：使用列中位数填充剩余 NaN（避免使用 bfill() 引入未来函数）
             for col in prices.columns:
                 if prices[col].isnull().any():
-                    mean_val = prices[col].mean()
-                    if pd.notna(mean_val) and mean_val > 0:
-                        prices[col].fillna(mean_val, inplace=True)
+                    median_val = prices[col].median()
+                    if pd.notna(median_val) and median_val > 0:
+                        prices[col].fillna(median_val, inplace=True)
             
-            # 第四步：最后用 0 填充剩余的 NaN
+            # 第三步：最后用 0 填充剩余的 NaN
             prices = prices.fillna(0)
             
             # 记录 NaN 处理统计

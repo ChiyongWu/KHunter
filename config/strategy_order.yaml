@@ -82,3 +82,8 @@ strategy_order:
     name: MA20MA60Strategy
     display_name: 520560策略
     description: 5日均线金叉20日均线+量能共振策略
+
+  - order: 31
+    name: GoldenTriangleStrategy
+    display_name: 金三角策略
+    description: 识别5日、10日、20日均线形成的金三角形态，捕捉趋势启动信号

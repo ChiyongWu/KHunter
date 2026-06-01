@@ -862,11 +862,10 @@ def run_selection():
             func_logger.info("开始加载股票数据...")
             # 从数据库获取所有股票代码
             stock_codes = db_manager.list_all_stocks()
-            func_logger.info(f"加载了 {len(stock_codes)} 只股票代码")
-            
+
             # 从数据库获取所有股票名称（不再使用 stock_names.json）
             stock_names = db_manager.get_all_stock_names()
-            func_logger.info(f"加载了 {len(stock_names)} 只股票名称")
+            func_logger.info(f"加载了 {len(stock_codes)} 只股票数据")
         except Exception as e:
             func_logger.error(f"加载股票数据失败: {str(e)}")
             return jsonify({'success': False, 'error': f'加载股票数据失败: {str(e)}'})

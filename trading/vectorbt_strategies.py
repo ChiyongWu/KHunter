@@ -76,6 +76,38 @@ class BaseStrategy(ABC):
         
         return True
 
+    def _safe_fill_nan(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        安全填充 NaN 值（不使用未来函数）
+        
+        填充策略：
+        1. 前向填充（使用历史数据）
+        2. 使用列中位数填充剩余 NaN
+        3. 最后用 0 填充
+        
+        Args:
+            df: 待填充的数据框
+            
+        Returns:
+            填充后的数据框
+        """
+        df_clean = df.copy()
+        
+        # 第一步：前向填充（只使用历史数据）
+        df_clean = df_clean.ffill()
+        
+        # 第二步：使用列中位数填充剩余 NaN（避免使用 bfill() 引入未来函数）
+        for col in df_clean.columns:
+            if df_clean[col].isnull().any():
+                median_val = df_clean[col].median()
+                if pd.notna(median_val) and median_val > 0:
+                    df_clean[col].fillna(median_val, inplace=True)
+        
+        # 第三步：最后用 0 填充剩余的 NaN
+        df_clean = df_clean.fillna(0)
+        
+        return df_clean
+
 
 class DualMAStrategy(BaseStrategy):
     """双均线策略"""
@@ -106,29 +138,9 @@ class DualMAStrategy(BaseStrategy):
         
         logger.info(f"{self.name}: fast_window={fast_window}, slow_window={slow_window}")
         
-        # 2. 处理 NaN 值 - 使用多步骤填充确保完整性
-        prices_clean = prices.copy()
-        
-        # 记录处理前的 NaN 统计
-        nan_count_before = prices_clean.isnull().sum().sum()
-        
-        # 第一步：前向填充
-        prices_clean = prices_clean.ffill()
-        
-        # 第二步：后向填充
-        prices_clean = prices_clean.bfill()
-        
-        # 第三步：对于仍然为 NaN 的值，使用列的平均值填充
-        for col in prices_clean.columns:
-            if prices_clean[col].isnull().any():
-                mean_val = prices_clean[col].mean()
-                if pd.notna(mean_val) and mean_val > 0:
-                    prices_clean[col].fillna(mean_val, inplace=True)
-        
-        # 第四步：最后用 0 填充剩余的 NaN
-        prices_clean = prices_clean.fillna(0)
-        
-        # 记录处理后的 NaN 统计
+        # 2. 处理 NaN 值 - 使用安全填充方法（避免未来函数）
+        nan_count_before = prices.isnull().sum().sum()
+        prices_clean = self._safe_fill_nan(prices)
         nan_count_after = prices_clean.isnull().sum().sum()
         logger.info(f"{self.name}: NaN 处理完成 - 处理前={nan_count_before}, 处理后={nan_count_after}")
         
@@ -204,8 +216,8 @@ class RSIStrategy(BaseStrategy):
         
         logger.info(f"{self.name}: window={rsi_window}, oversold={oversold}, overbought={overbought}")
         
-        # 2. 处理 NaN 值
-        prices_clean = prices.ffill().bfill().fillna(0)
+        # 2. 处理 NaN 值（避免未来函数）
+        prices_clean = self._safe_fill_nan(prices)
         
         # 3. 计算RSI
         rsi = vbt.RSI.run(prices_clean, window=rsi_window)
@@ -264,9 +276,9 @@ class SupportLevelStrategy(BaseStrategy):
         if not self._validate_prices(prices):
             return pd.DataFrame(), pd.DataFrame()
         
-        # 1. 处理 NaN 值
-        prices_clean = prices.ffill().bfill().fillna(0)
-        support_levels_clean = support_levels.ffill().bfill().fillna(0)
+        # 1. 处理 NaN 值（避免未来函数）
+        prices_clean = self._safe_fill_nan(prices)
+        support_levels_clean = self._safe_fill_nan(support_levels)
         
         # 2. 对齐数据
         prices_clean, support_levels_clean = prices_clean.align(support_levels_clean, join='inner')
@@ -321,9 +333,9 @@ class CombinedStrategy(BaseStrategy):
         if not self._validate_prices(prices):
             return pd.DataFrame(), pd.DataFrame()
         
-        # 1. 处理 NaN 值
-        prices_clean = prices.ffill().bfill().fillna(0)
-        scores_clean = scores.ffill().bfill().fillna(0)
+        # 1. 处理 NaN 值（避免未来函数）
+        prices_clean = self._safe_fill_nan(prices)
+        scores_clean = self._safe_fill_nan(scores)
         
         # 2. 对齐数据
         prices_clean, scores_clean = prices_clean.align(scores_clean, join='inner')
@@ -407,8 +419,8 @@ class DuoFangPaoStrategy(BaseStrategy):
         
         logger.info(f"{self.name}: first_rise={first_rise}, third_rise={third_rise}, volume_expand={volume_expand}")
         
-        # 2. 处理 NaN 值
-        prices_clean = prices.ffill().bfill().fillna(0)
+        # 2. 处理 NaN 值（避免未来函数）
+        prices_clean = self._safe_fill_nan(prices)
         
         # 3. 计算K线特征
         # 计算涨幅
@@ -464,8 +476,8 @@ class WBottomStrategy(BaseStrategy):
         
         logger.info(f"{self.name}: lookback={lookback}, neckline_ratio={neckline_ratio}")
         
-        # 2. 处理 NaN 值
-        prices_clean = prices.ffill().bfill().fillna(0)
+        # 2. 处理 NaN 值（避免未来函数）
+        prices_clean = self._safe_fill_nan(prices)
         
         # 3. 识别W底形态
         # 计算滚动最低值
@@ -524,29 +536,9 @@ class TrendAccelerationStrategy(BaseStrategy):
         
         logger.info(f"{self.name}: price_threshold={price_threshold}, volume_ratio={volume_ratio}")
         
-        # 2. 处理 NaN 值 - 使用多步骤填充确保完整性
-        prices_clean = prices.copy()
-        
-        # 记录处理前的 NaN 统计
-        nan_count_before = prices_clean.isnull().sum().sum()
-        
-        # 第一步：前向填充
-        prices_clean = prices_clean.ffill()
-        
-        # 第二步：后向填充
-        prices_clean = prices_clean.bfill()
-        
-        # 第三步：对于仍然为 NaN 的值，使用列的平均值填充
-        for col in prices_clean.columns:
-            if prices_clean[col].isnull().any():
-                mean_val = prices_clean[col].mean()
-                if pd.notna(mean_val) and mean_val > 0:
-                    prices_clean[col].fillna(mean_val, inplace=True)
-        
-        # 第四步：最后用 0 填充剩余的 NaN
-        prices_clean = prices_clean.fillna(0)
-        
-        # 记录处理后的 NaN 统计
+        # 2. 处理 NaN 值 - 使用安全填充方法（避免未来函数）
+        nan_count_before = prices.isnull().sum().sum()
+        prices_clean = self._safe_fill_nan(prices)
         nan_count_after = prices_clean.isnull().sum().sum()
         logger.info(f"{self.name}: NaN 处理完成 - 处理前={nan_count_before}, 处理后={nan_count_after}")
         

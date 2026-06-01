@@ -61,7 +61,7 @@ class KlineUpdater:
         1. 计算需要获取的天数
         2. 分批获取数据
         3. 检测除权：如有除权触发历史重建
-        4. 保存到数据库
+        4. 返回统计结果
 
         参数：
             stock_codes: 股票代码列表
@@ -143,17 +143,37 @@ class KlineUpdater:
                     logger.warning(f"批次 {batch_num} 处理失败: {str(e)}")
                     self.stats['failed'] += len(batch_codes)
             
-            # 第3步：返回结果
+            # 第3步：检测除权并重建历史数据
+            logger.info("=" * 60)
+            logger.info("第3步: 检测除权并重建历史数据...")
+            logger.info("=" * 60)
+            try:
+                # 将日期格式转换为 YYYYMMDD
+                target_date_str = target_date.replace('-', '')
+                last_update_date_str = last_update_date.replace('-', '')
+                exdividend_result = self.check_exdividend_and_rebuild(stock_codes, target_date_str, last_update_date_str)
+                
+                if exdividend_result['exdividend_detected']:
+                    logger.warning(f"【除权检测】{exdividend_result['message']}")
+                    self.stats['rebuilt'] = len(exdividend_result['rebuilt_stocks'])
+                else:
+                    logger.info(f"【除权检测】{exdividend_result['message']}")
+            except Exception as e:
+                logger.error(f"【除权检测】除权检测失败: {str(e)}")
+                logger.exception(e)  # 打印详细异常信息
+            
+            # 第4步：返回结果
             total_time = (datetime.now() - start_time).total_seconds()
             
-            logger.info(f"K线数据更新完成: 新增 {self.stats['added']} 条, 更新 {self.stats['updated']} 条, 失败 {self.stats['failed']} 条, 耗时 {total_time:.1f}秒")
+            logger.info(f"K线数据更新完成: 新增 {self.stats['added']} 条, 更新 {self.stats['updated']} 条, 失败 {self.stats['failed']} 条, 重建 {self.stats['rebuilt']} 只, 耗时 {total_time:.1f}秒")
             
             return {
                 'success': True,
                 'added': self.stats['added'],
                 'updated': self.stats['updated'],
                 'failed': self.stats['failed'],
-                'message': f"K线数据更新完成: 新增 {self.stats['added']} 条, 更新 {self.stats['updated']} 条",
+                'rebuilt': self.stats['rebuilt'],
+                'message': f"K线数据更新完成: 新增 {self.stats['added']} 条, 更新 {self.stats['updated']} 条, 重建 {self.stats['rebuilt']} 只",
                 'total_time': total_time
             }
         
@@ -166,6 +186,7 @@ class KlineUpdater:
                 'added': self.stats['added'],
                 'updated': self.stats['updated'],
                 'failed': self.stats['failed'],
+                'rebuilt': self.stats['rebuilt'],
                 'message': f"K线数据更新失败: {str(e)}",
                 'error': str(e),
                 'total_time': total_time
@@ -410,7 +431,7 @@ class KlineUpdater:
         """获取统计信息"""
         return self.stats.copy()
 
-    def check_exdividend_and_rebuild(self, stock_codes: List[str], trade_date: str) -> Dict:
+    def check_exdividend_and_rebuild(self, stock_codes: List[str], trade_date: str, start_date: str = None) -> Dict:
         """
         检测除权并在检测到除权时重建历史数据
 
@@ -422,6 +443,7 @@ class KlineUpdater:
         参数：
             stock_codes: 股票代码列表
             trade_date: 交易日期 (YYYYMMDD)
+            start_date: 开始日期 (YYYYMMDD)，检测该日期到trade_date之间的除权
 
         返回：
             {
@@ -441,7 +463,7 @@ class KlineUpdater:
         try:
             logger.info(f"【除权检测】开始检测 {len(stock_codes)} 只股票的除权情况...")
 
-            check_result = self.stock_data_fetcher.check_exdividend_by_factor(stock_codes, trade_date)
+            check_result = self.stock_data_fetcher.check_exdividend_by_factor(stock_codes, trade_date, start_date)
 
             if not check_result['exdividend_stocks']:
                 logger.info("【除权检测】未检测到除权")
