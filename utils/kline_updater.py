@@ -531,25 +531,25 @@ class KlineUpdater:
             True 成功，False 失败
         """
         try:
-            logger.debug(f"【历史重建】{stock_code} 删除旧数据...")
+            logger.info(f"【历史重建】{stock_code} 删除旧数据...")
             conn = self.db_manager.connect()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM stock_kline WHERE code = ?", (stock_code,))
             conn.commit()
             conn.close()
-            logger.debug(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
+            logger.info(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
 
-            logger.debug(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
+            logger.info(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
             df_history = self.stock_data_fetcher.fetch_stock_history(stock_code, years=years)
 
             if df_history is None or df_history.empty:
-                logger.debug(f"【历史重建】{stock_code} 获取历史数据失败")
+                logger.info(f"【历史重建】{stock_code} 获取历史数据失败")
                 return False
 
             added, updated = self._save_kline_records_batch(stock_code, df_history)
-            logger.debug(f"【历史重建】{stock_code} 保存新数据：新增 {added} 条，更新 {updated} 条")
+            logger.info(f"【历史重建】{stock_code} 保存新数据：新增 {added} 条，更新 {updated} 条")
             return True
 
         except Exception as e:
-            logger.debug(f"【历史重建】{stock_code} 重建失败：{str(e)}")
+            logger.error(f"【历史重建】{stock_code} 重建失败：{str(e)}")
             return False
