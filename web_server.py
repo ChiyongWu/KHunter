@@ -2713,8 +2713,10 @@ def rebuild_recent_exdividend():
         # 获取KlineUpdater实例
         from utils.kline_updater import KlineUpdater
         from utils.global_db import get_global_db
+        from utils.stock_data_fetcher import StockDataFetcher
         
-        kline_updater = KlineUpdater(get_global_db())
+        fetcher = StockDataFetcher()
+        kline_updater = KlineUpdater(get_global_db(), fetcher)
         
         # 获取当前日期
         from datetime import datetime, timedelta
@@ -2724,8 +2726,6 @@ def rebuild_recent_exdividend():
         start_date = (datetime.now() - timedelta(days=months * 30)).strftime('%Y%m%d')
         
         # 获取所有股票代码
-        from utils.stock_data_fetcher import StockDataFetcher
-        fetcher = StockDataFetcher()
         stock_codes = fetcher.get_all_stock_codes()
         
         # 调用现有的除权检测和重建方法
