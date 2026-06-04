@@ -495,7 +495,8 @@ class KlineUpdater:
                 else:
                     logger.warning(f"  >> {stock_code} (无详细因子数据)")
 
-            # 静默重建：不输出重建过程日志
+            # 重建检测到除权的股票历史数据
+            logger.info(f"【除权检测】开始重建 {len(check_result['exdividend_stocks'])} 只除权股票历史数据...")
             for stock_code in check_result['exdividend_stocks']:
                 rebuild_success = self._rebuild_stock_history(stock_code)
                 if rebuild_success:
