@@ -556,6 +556,50 @@
                         </div>
                     </div>
 
+                    <!-- 重建近期除权股票 -->
+                    <div id="exdividend-rebuild-card" class="card" style="margin-top: 20px;">
+                        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
+                            <h3>📌 重建近期除权股票历史数据</h3>
+                        </div>
+                        <div class="card-body" style="text-align: center; padding: 30px 20px;">
+                            <p style="font-size: 14px; color: #6b7280; margin: 0 0 20px 0;">检测并重建指定时间范围内发生除权的股票历史数据</p>
+                            
+                            <!-- 时间范围选择 -->
+                            <div style="display: flex; align-items: center; justify-content: center; gap: 15px; margin-bottom: 20px;">
+                                <label style="font-size: 13px; font-weight: 500; color: #374151;">时间范围：</label>
+                                <select id="exdividend-months" style="padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;">
+                                    <option value="1">最近1个月</option>
+                                    <option value="2" selected>最近2个月</option>
+                                    <option value="3">最近3个月</option>
+                                    <option value="6">最近6个月</option>
+                                </select>
+                            </div>
+                            
+                            <button class="btn btn-secondary" id="rebuild-exdividend-btn" onclick="startRebuildExdividend()" style="font-size: 14px; padding: 10px 24px;">
+                                🔄 检测并重建除权股票
+                            </button>
+                            
+                            <!-- 重建结果 -->
+                            <div id="exdividend-result" style="display: none; margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 8px;">
+                                <p id="exdividend-result-text" style="font-size: 14px; color: #1f2937; margin: 0;"></p>
+                                <div id="exdividend-result-stats" style="display: flex; justify-content: center; gap: 30px; margin-top: 15px;">
+                                    <div style="text-align: center;">
+                                        <div style="font-size: 20px; font-weight: 600; color: #f59e0b;">
+                                            <span id="exdividend-detected">0</span>
+                                        </div>
+                                        <div style="font-size: 11px; color: #6b7280;">检测到除权</div>
+                                    </div>
+                                    <div style="text-align: center;">
+                                        <div style="font-size: 20px; font-weight: 600; color: #10b981;">
+                                            <span id="exdividend-rebuilt">0</span>
+                                        </div>
+                                        <div style="font-size: 11px; color: #6b7280;">成功重建</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- 更新进行中：显示进度 -->
                     <div id="update-progress-state" class="card" style="display: none;">
                         <div class="card-body" style="text-align: center; padding: 60px 20px;">

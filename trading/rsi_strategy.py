@@ -24,7 +24,7 @@ class RSIStrategy(TimingStrategy):
         
         # 默认参数
         self.rsi_period = self.config.get('rsi_period', 14)  # RSI周期
-        self.oversold = self.config.get('oversold', 30)  # 超卖阈值
+        self.oversold = self.config.get('oversold', 40)  # 超卖阈值（狩猎场模式改为40，更敏感）
         self.overbought = self.config.get('overbought', 70)  # 超买阈值
         self.base_position_amount = self.config.get('base_position_amount', 50000)  # 底仓金额（元）
         self.position_ratio = self.config.get('position_ratio', 0.05)  # 仓位比例（占总资金）

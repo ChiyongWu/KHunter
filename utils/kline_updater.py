@@ -154,10 +154,13 @@ class KlineUpdater:
                 exdividend_result = self.check_exdividend_and_rebuild(stock_codes, target_date_str, last_update_date_str)
                 
                 if exdividend_result['exdividend_detected']:
-                    logger.warning(f"【除权检测】{exdividend_result['message']}")
+                    # 重建结果已在 check_exdividend_and_rebuild 中输出，这里只输出简要汇总
+                    rebuilt = exdividend_result.get('rebuilt_stocks', [])
+                    if rebuilt:
+                        logger.warning(f"【除权检测】已重建 {len(rebuilt)} 只股票历史数据")
                     self.stats['rebuilt'] = len(exdividend_result['rebuilt_stocks'])
                 else:
-                    logger.info(f"【除权检测】{exdividend_result['message']}")
+                    logger.info(f"【除权检测】{exdividend_result['message']} (时间段: {last_update_date_str} ~ {target_date_str})")
             except Exception as e:
                 logger.error(f"【除权检测】除权检测失败: {str(e)}")
                 logger.exception(e)  # 打印详细异常信息
@@ -449,6 +452,7 @@ class KlineUpdater:
             {
                 'exdividend_detected': bool,
                 'exdividend_stocks': [stock_code, ...],
+                'factor_changes': {stock_code: [(date, prev_factor, curr_factor), ...], ...},
                 'rebuilt_stocks': [stock_code, ...],
                 'message': str
             }
@@ -456,6 +460,7 @@ class KlineUpdater:
         result = {
             'exdividend_detected': False,
             'exdividend_stocks': [],
+            'factor_changes': {},
             'rebuilt_stocks': [],
             'message': ''
         }
@@ -472,17 +477,30 @@ class KlineUpdater:
 
             result['exdividend_detected'] = True
             result['exdividend_stocks'] = check_result['exdividend_stocks']
-            logger.warning(f"【除权检测】检测到 {len(check_result['exdividend_stocks'])} 只股票发生除权: {check_result['exdividend_stocks']}")
-
+            # 传递复权因子变化详情，供上游日志展示
+            result['factor_changes'] = check_result.get('factor_changes', {})
+            logger.warning(f"【除权检测】检测到 {len(check_result['exdividend_stocks'])} 只股票发生除权")
+            logger.warning(f"【除权检测】检测时间段：{start_date if start_date else '前一交易日'} ~ {trade_date}")
+            # 逐只股票打印详细除权信息
             for stock_code in check_result['exdividend_stocks']:
-                logger.info(f"【历史重建】开始重建 {stock_code} 的历史数据...")
+                changes = check_result.get('factor_changes', {}).get(stock_code, [])
+                if changes:
+                    for chg_date, prev_f, curr_f in changes:
+                        change_pct = abs(curr_f - prev_f) / prev_f * 100
+                        logger.warning(
+                            f"  >> {stock_code} 除权日={chg_date} "
+                            f"复权因子 {prev_f:.6f} -> {curr_f:.6f} "
+                            f"(变化 {change_pct:.2f}%)"
+                        )
+                else:
+                    logger.warning(f"  >> {stock_code} (无详细因子数据)")
+
+            # 静默重建：不输出重建过程日志
+            for stock_code in check_result['exdividend_stocks']:
                 rebuild_success = self._rebuild_stock_history(stock_code)
                 if rebuild_success:
                     result['rebuilt_stocks'].append(stock_code)
                     self.stats['rebuilt'] += 1
-                    logger.info(f"【历史重建】{stock_code} 历史数据重建成功")
-                else:
-                    logger.error(f"【历史重建】{stock_code} 历史数据重建失败")
 
             if result['rebuilt_stocks']:
                 result['message'] = f"检测到除权，已重建 {len(result['rebuilt_stocks'])} 只股票: {result['rebuilt_stocks']}"
@@ -513,25 +531,25 @@ class KlineUpdater:
             True 成功，False 失败
         """
         try:
-            logger.info(f"【历史重建】{stock_code} 删除旧数据...")
+            logger.debug(f"【历史重建】{stock_code} 删除旧数据...")
             conn = self.db_manager.connect()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM stock_kline WHERE code = ?", (stock_code,))
             conn.commit()
             conn.close()
-            logger.info(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
+            logger.debug(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
 
-            logger.info(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
+            logger.debug(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
             df_history = self.stock_data_fetcher.fetch_stock_history(stock_code, years=years)
 
             if df_history is None or df_history.empty:
-                logger.error(f"【历史重建】{stock_code} 获取历史数据失败")
+                logger.debug(f"【历史重建】{stock_code} 获取历史数据失败")
                 return False
 
             added, updated = self._save_kline_records_batch(stock_code, df_history)
-            logger.info(f"【历史重建】{stock_code} 保存新数据: 新增 {added} 条, 更新 {updated} 条")
+            logger.debug(f"【历史重建】{stock_code} 保存新数据：新增 {added} 条，更新 {updated} 条")
             return True
 
         except Exception as e:
-            logger.error(f"【历史重建】{stock_code} 重建失败: {str(e)}")
+            logger.debug(f"【历史重建】{stock_code} 重建失败：{str(e)}")
             return False

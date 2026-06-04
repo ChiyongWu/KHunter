@@ -25,6 +25,7 @@ class BollingerStrategy(TimingStrategy):
         # 默认参数
         self.period = self.config.get('period', 20)  # 布林带周期
         self.multiplier = self.config.get('multiplier', 2)  # 标准差倍数
+        self.buy_buffer = self.config.get('buy_buffer', 0.03)  # 买入缓冲（默认3%，价格接近下轨时触发）
         self.base_position_amount = self.config.get('base_position_amount', 50000)  # 底仓金额（元）
         self.position_ratio = self.config.get('position_ratio', 0.05)  # 仓位比例（占总资金）
         self.use_fixed_amount = self.config.get('use_fixed_amount', True)  # 是否使用固定金额（False则使用仓位比例）
@@ -91,8 +92,10 @@ class BollingerStrategy(TimingStrategy):
         if pd.notna(signal_bar['boll_upper']):
             result.resistance_level = signal_bar['boll_upper']
         
-        # 买入条件：价格触及或跌破下轨
-        if pd.notna(signal_bar['boll_lower']) and current_price <= signal_bar['boll_lower']:
+        # 买入条件：价格触及或跌破下轨（增加缓冲，更容易触发）
+        # 下轨目标价 = 下轨 * (1 + buy_buffer)，允许价格在下轨附近一定范围内触发
+        lower_target = signal_bar['boll_lower'] * (1 + self.buy_buffer) if pd.notna(signal_bar['boll_lower']) else None
+        if pd.notna(signal_bar['boll_lower']) and current_price <= lower_target:
             result.is_buy = True
             # 信号强度：(下轨 - 价格) / 下轨
             signal_strength = (signal_bar['boll_lower'] - current_price) / signal_bar['boll_lower']
