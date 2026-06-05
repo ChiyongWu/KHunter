@@ -258,9 +258,9 @@ class GoldenTriangleStrategy(BaseStrategy):
         if a_idx is None or b_idx is None:
             return None
 
-        # 验证时间顺序：a <= b <= c（由于数据倒序，索引越大表示时间越早）
-        # 所以条件应为：a_idx >= b_idx >= c_idx
-        if not (a_idx >= b_idx >= c_idx):
+        # 验证时间顺序：a <= c and b <= c（由于数据倒序，索引越大表示时间越早）
+        # 所以条件应为：a_idx >= c_idx and b_idx >= c_idx
+        if not (a_idx >= c_idx and b_idx >= c_idx):
             return None
 
         return (
