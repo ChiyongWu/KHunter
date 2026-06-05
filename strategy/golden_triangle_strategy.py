@@ -228,10 +228,10 @@ class GoldenTriangleStrategy(BaseStrategy):
         if is_b_today:
             b_idx = c_idx
 
-        # 如果A或B点还未找到，向前查找（从c_idx + 2开始，避免与C点检测的数据重叠）
+        # 如果A或B点还未找到，向前查找（从c_idx + 1开始）
         if a_idx is None or b_idx is None:
             search_end = min(c_idx + ac_interval + 2, len(df))
-            for i in range(c_idx + 2, search_end):
+            for i in range(c_idx + 1, search_end):
                 if i + 1 >= len(df):
                     continue
 
