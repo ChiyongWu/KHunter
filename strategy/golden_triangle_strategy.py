@@ -70,7 +70,7 @@ class GoldenTriangleStrategy(BaseStrategy):
             f"4. C点涨幅 >= {self.params['c_cross_min_gain']*100}%",
             f"5. C点量能比 >= {self.params['c_cross_min_volume_ratio']}",
             f"6. A-C间隔 <= {self.params['ac_interval']}天",
-            f"7. 均线多头排列：MA{self.params['short_period']} >= MA{self.params['mid_period']} >= MA{self.params['long_period']}",
+            f"7. 均线多头排列：MA{self.params['short_period']} >= MA{self.params['mid_period']} >= MA{self.params['long_period']} >= MA{self.params['super_long_period']}",
         ]
 
     def quick_filter(self, df):
@@ -146,7 +146,7 @@ class GoldenTriangleStrategy(BaseStrategy):
         sma_long = latest['sma_long']
         sma_super_long = latest['sma_super_long']
 
-        if not (sma_short >= sma_mid >= sma_long):
+        if not (sma_short >= sma_mid >= sma_long >= sma_super_long):
             return []
 
         triangle_type = 'golden_spider' if ac_interval_days == 0 else 'golden_triangle'
