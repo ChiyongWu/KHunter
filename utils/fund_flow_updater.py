@@ -584,29 +584,28 @@ class FundFlowUpdater:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # 使用事务保存数据
-            with self.db_manager.transaction():
-                for _, row in df_fund_flow.iterrows():
-                    try:
-                        # 将日期转换为字符串格式
-                        date_str = str(row['trade_date']).split(' ')[0]
-                        
-                        # 执行INSERT操作
-                        self.db_manager.execute_with_retry(insert_sql, (
-                            row['sector_name'],
-                            date_str,
-                            int(row.get('buy_vol', 0)),
-                            float(row.get('buy_amount', 0)),
-                            int(row.get('sell_vol', 0)),
-                            float(row.get('sell_amount', 0)),
-                            int(row.get('net_vol', 0)),
-                            float(row.get('net_amount', 0))
-                        ))
-                        
-                        saved += 1
+            # 直接保存数据，不使用事务（由外层调用者管理事务）
+            for _, row in df_fund_flow.iterrows():
+                try:
+                    # 将日期转换为字符串格式
+                    date_str = str(row['trade_date']).split(' ')[0]
                     
-                    except Exception as e:
-                        logger.debug(f"保存板块资金流向数据失败: {str(e)}")
+                    # 执行INSERT操作
+                    self.db_manager.execute_with_retry(insert_sql, (
+                        row['sector_name'],
+                        date_str,
+                        int(row.get('buy_vol', 0)),
+                        float(row.get('buy_amount', 0)),
+                        int(row.get('sell_vol', 0)),
+                        float(row.get('sell_amount', 0)),
+                        int(row.get('net_vol', 0)),
+                        float(row.get('net_amount', 0))
+                    ))
+                    
+                    saved += 1
+                
+                except Exception as e:
+                    logger.debug(f"保存板块资金流向数据失败: {str(e)}")
             
             logger.debug(f"保存板块资金流向数据成功: {saved} 条记录")
             

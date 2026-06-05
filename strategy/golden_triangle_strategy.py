@@ -28,14 +28,14 @@ class GoldenTriangleStrategy(BaseStrategy):
             'long_period': 20,
             'super_long_period': 60,
             'ac_interval': 3,
-            'c_cross_min_gain': 0.03,
-            'c_cross_min_volume_ratio': 1.3,
+            'c_cross_min_gain': 0.01,
+            'c_cross_min_volume_ratio': 1.1,
             'lookback_days': 30,
             'strategy_weight': 50,
         }
         if params:
             default_params.update(params)
-        super().__init__("GoldenTriangleStrategy", default_params)
+        super().__init__("金三角策略", default_params)
 
     def calculate_indicators(self, df) -> pd.DataFrame:
         """计算技术指标"""
@@ -57,7 +57,7 @@ class GoldenTriangleStrategy(BaseStrategy):
         result['prev_close'] = result['close'].shift(1)
         result['gain'] = (result['close'] - result['prev_close']) / result['prev_close']
 
-        result = result.ffill().bfill()
+        result = result.ffill()
         result = result.iloc[::-1].reset_index(drop=True)
         return result
 
@@ -70,20 +70,46 @@ class GoldenTriangleStrategy(BaseStrategy):
             f"4. C点涨幅 >= {self.params['c_cross_min_gain']*100}%",
             f"5. C点量能比 >= {self.params['c_cross_min_volume_ratio']}",
             f"6. A-C间隔 <= {self.params['ac_interval']}天",
-            f"7. 均线多头排列：MA{self.params['short_period']} >= MA{self.params['mid_period']} >= MA{self.params['long_period']} > MA{self.params['super_long_period']}",
+            f"7. 均线多头排列：MA{self.params['short_period']} >= MA{self.params['mid_period']} >= MA{self.params['long_period']}",
         ]
 
     def quick_filter(self, df):
-        """快速过滤：检查数据是否足够"""
+        """快速过滤：检查数据是否足够并进行涨幅过滤"""
         if df is None or df.empty:
             return False
-        if len(df) < max(int(self.params['super_long_period']), 60):
+        
+        # 数据量检查
+        min_length = max(int(self.params['super_long_period']), 60)
+        if len(df) < min_length:
             return False
+        
+        # 获取C点涨幅阈值作为快速过滤标准
+        min_gain = float(self.params.get('c_cross_min_gain', 0.01))
+        
+        # 今日涨幅过滤：必须满足最小涨幅要求
+        if len(df) >= 2:
+            # 检查日期顺序
+            if str(df['date'].iloc[0]) > str(df['date'].iloc[1]):
+                # 倒序排列
+                latest = df.iloc[0]
+                prev_close = df.iloc[1]['close']
+            else:
+                # 正序排列
+                latest = df.iloc[-1]
+                prev_close = df.iloc[-2]['close']
+            
+            if prev_close > 0:
+                today_gain = (latest['close'] - prev_close) / prev_close
+                # 涨幅 >= c_cross_min_gain（默认1%）
+                if today_gain < min_gain:
+                    return False
+        
         return True
 
     def select_stocks(self, df, stock_name='') -> list:
         """选股逻辑"""
-        if df.empty or len(df) < 60:
+        # 快速过滤：先排除明显不符合条件的股票
+        if not self.quick_filter(df):
             return []
 
         if stock_name and not self._validate_stock_name(stock_name):
@@ -100,8 +126,8 @@ class GoldenTriangleStrategy(BaseStrategy):
 
         a_date, b_date, c_date, a_idx, b_idx, c_idx = cross_points
 
-        ac_interval_days = (datetime.strptime(c_date, '%Y-%m-%d') -
-                           datetime.strptime(a_date, '%Y-%m-%d')).days
+        # 使用 index 差值计算交易日间隔（数据倒序排列，index越大日期越早）
+        ac_interval_days = a_idx - c_idx
         if ac_interval_days > int(self.params['ac_interval']):
             return []
 
@@ -120,7 +146,7 @@ class GoldenTriangleStrategy(BaseStrategy):
         sma_long = latest['sma_long']
         sma_super_long = latest['sma_super_long']
 
-        if not (sma_short >= sma_mid >= sma_long > sma_super_long):
+        if not (sma_short >= sma_mid >= sma_long):
             return []
 
         triangle_type = 'golden_spider' if ac_interval_days == 0 else 'golden_triangle'
@@ -158,53 +184,83 @@ class GoldenTriangleStrategy(BaseStrategy):
         - C点：MA10 >= MA20
         - A点（向前查找ac_interval天）：MA5 >= MA10
         - B点（向前查找ac_interval天）：MA5 >= MA20
+        
+        支持灵活的时间顺序：a <= b <= c
+        - A、B、C三点可以在同一天（金蜘蛛）
+        - 任意两个点可以在同一天
+        - 但必须满足时间顺序（A最早或等于B，B最早或等于C）
         """
         ac_interval = int(self.params['ac_interval'])
 
-        # 需要至少有前一天的数据来检查C点
+        # 需要至少有前一天的数据来检查金叉
         if latest_idx + 1 >= len(df):
             return None
 
-        curr = df.iloc[latest_idx]
-        prev = df.iloc[latest_idx + 1]
+        c_idx = latest_idx
+        curr = df.iloc[c_idx]
+        prev = df.iloc[c_idx + 1]
 
         sma_mid_curr = curr['sma_mid']
         sma_long_curr = curr['sma_long']
         sma_mid_prev = prev['sma_mid']
         sma_long_prev = prev['sma_long']
 
-        is_c_point = sma_mid_prev <= sma_long_prev and sma_mid_curr >= sma_long_curr
+        sma_short_curr = curr['sma_short']
+        sma_short_prev = prev['sma_short']
+
+        # 检查C点：MA10上穿MA20
+        is_c_point = sma_mid_prev < sma_long_prev and sma_mid_curr >= sma_long_curr
         if not is_c_point:
             return None
 
-        c_idx = latest_idx
+        # 检查当天是否满足A点和B点条件（用于支持ABC同一天或AB=C的情况）
+        is_a_today = sma_short_prev < sma_mid_prev and sma_short_curr >= sma_mid_curr
+        is_b_today = sma_short_prev < sma_long_prev and sma_short_curr >= sma_long_curr
 
+        # 初始化A、B点索引
         a_idx, b_idx = None, None
 
-        for i in range(latest_idx + 1, min(latest_idx + ac_interval + 1, len(df))):
-            if i + 1 >= len(df):
-                continue
+        # 如果当天满足A点条件，优先使用当天
+        if is_a_today:
+            a_idx = c_idx
+        
+        # 如果当天满足B点条件，优先使用当天
+        if is_b_today:
+            b_idx = c_idx
 
-            curr = df.iloc[i]
-            prev = df.iloc[i + 1]
-
-            sma_short_curr = curr['sma_short']
-            sma_mid_curr = curr['sma_mid']
-            sma_long_curr = curr['sma_long']
-
-            sma_short_prev = prev['sma_short']
-            sma_mid_prev = prev['sma_mid']
-            sma_long_prev = prev['sma_long']
-
-            if a_idx is None:
-                if sma_short_prev <= sma_mid_prev and sma_short_curr >= sma_mid_curr:
-                    a_idx = i
-
-            if b_idx is None:
-                if sma_short_prev <= sma_long_prev and sma_short_curr >= sma_long_curr:
-                    b_idx = i
-
+        # 如果A或B点还未找到，向前查找（从c_idx + 2开始，避免与C点检测的数据重叠）
         if a_idx is None or b_idx is None:
+            search_end = min(c_idx + ac_interval + 2, len(df))
+            for i in range(c_idx + 2, search_end):
+                if i + 1 >= len(df):
+                    continue
+
+                curr_i = df.iloc[i]
+                prev_i = df.iloc[i + 1]
+
+                sma_short_curr_i = curr_i['sma_short']
+                sma_mid_curr_i = curr_i['sma_mid']
+                sma_long_curr_i = curr_i['sma_long']
+
+                sma_short_prev_i = prev_i['sma_short']
+                sma_mid_prev_i = prev_i['sma_mid']
+                sma_long_prev_i = prev_i['sma_long']
+
+                if a_idx is None:
+                    if sma_short_prev_i < sma_mid_prev_i and sma_short_curr_i >= sma_mid_curr_i:
+                        a_idx = i
+
+                if b_idx is None:
+                    if sma_short_prev_i < sma_long_prev_i and sma_short_curr_i >= sma_long_curr_i:
+                        b_idx = i
+
+        # 检查是否找到A、B点
+        if a_idx is None or b_idx is None:
+            return None
+
+        # 验证时间顺序：a <= b <= c（由于数据倒序，索引越大表示时间越早）
+        # 所以条件应为：a_idx >= b_idx >= c_idx
+        if not (a_idx >= b_idx >= c_idx):
             return None
 
         return (
