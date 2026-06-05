@@ -201,6 +201,8 @@ class StrategyRunner:
         
         # 初始化标志，避免重复初始化
         self._initialized_dates = set()
+        # 除权处理日期记录，避免同一天重复处理除权
+        self._exdividend_processed_dates = set()
         # 加载回测评分器
         from trading.backtest_scorer import BacktestScoreCalculator
         self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
@@ -1406,21 +1408,42 @@ class StrategyRunner:
         if date is None:
             date = self.get_working_date()
         
-        logger.info(f"【数据初始化】开始检查并初始化 {date} 的数据")
+        # 获取当日日期（用于除权检测和持仓文件）
+        today = datetime.datetime.now().strftime('%Y-%m-%d')
         
-        # 检查是否已经初始化过
+        logger.info(f"【数据初始化】开始检查并初始化 {today} 的数据（信号日期: {date}）")
+        
+        # 检查是否已经初始化过（使用信号日期进行检查）
         if date in self._initialized_dates:
             logger.debug(f"【数据初始化】{date} 已经初始化过，跳过")
             return False
         
-        # 检查当日持仓文件是否已存在
-        portfolio_file = self.running_dir / f"portfolio_{date}.json"
+        # 检查当日持仓文件是否已存在（使用当日日期，而非前一交易日）
+        portfolio_file = self.running_dir / f"portfolio_{today}.json"
         signals_file = self.running_dir / f"signals_{date}.json"
-        trades_file = self.running_dir / f"trades_{date}.json"
+        trades_file = self.running_dir / f"trades_{today}.json"
         
-        # 如果当日数据文件已存在，说明已经初始化过
+        # ========== 如果当日持仓文件已存在，先加载数据再执行除权检测 ==========
         if portfolio_file.exists():
-            logger.info(f"【数据初始化】{date} 的持仓文件已存在，跳过初始化")
+            logger.info(f"【数据初始化】{today} 的持仓文件已存在，加载数据并检测除权")
+            prev_data = self._load_portfolio(str(portfolio_file))
+            self.portfolio = prev_data.get('positions', {})
+            self.current_total_capital = prev_data.get('cash', 300000)
+            self.initial_capital = prev_data.get('initial_capital', 300000)
+            
+            # 执行除权检测
+            # 根据盘中/盘后模式决定信号日期
+            now = datetime.datetime.now()
+            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                # 盘中模式：信号使用前一交易日
+                self._perform_exdividend_check(current_date=today, signal_date=date)
+            else:
+                # 盘后模式：所有都使用当日日期
+                self._perform_exdividend_check(current_date=today, signal_date=None)
+            
+            # 保存调整后的持仓
+            self._save_portfolio(self.portfolio, str(portfolio_file))
+            
             self._initialized_dates.add(date)
             return False
         
@@ -1499,6 +1522,25 @@ class StrategyRunner:
                 total_assets += pos.get('quantity', 0) * position_price
             self.current_total_assets = total_assets
             
+            # 设置当前持仓（用于后续除权检测）
+            self.portfolio = updated_positions
+            
+            # ========== 除权检测：继承数据时检查期间是否有除权 ==========
+            # 如果间隔多个交易日，需要检测期间的除权
+            if days_between > 0:
+                logger.info(f"【数据初始化】检测 {found_date} 到 {date} 期间的除权...")
+                # 从 date 开始，向后遍历到 found_date 的下一个交易日
+                # 例如：found_date=2026-05-30, date=2026-06-02, days_between=3
+                # 需要检测：2026-06-02, 2026-06-01, 2026-05-31
+                check_date = date
+                for _ in range(days_between):
+                    if self._check_portfolio_exdividend(check_date):
+                        logger.info(f"【数据初始化】检测到 {check_date} 的除权，已调整持仓")
+                    check_date = get_previous_trading_day(check_date)
+                
+                # 更新后的持仓
+                updated_positions = self.portfolio
+            
             self._save_portfolio(updated_positions, str(portfolio_file))
             logger.info(f"【数据初始化】成功从 {found_date} 继承持仓数据，共 {len(updated_positions)} 只股票，总资产: ¥{total_assets:.2f}")
         else:
@@ -1558,10 +1600,19 @@ class StrategyRunner:
             portfolio_file: 持仓文件路径
         """
         try:
+            # 确保资金信息已初始化
+            if not hasattr(self, 'current_total_capital'):
+                # 尝试从配置文件获取初始资金
+                self.current_total_capital = self.config.get('initial_capital', 300000)
+                logger.warning(f"【保存持仓】current_total_capital 未初始化，使用默认值: {self.current_total_capital}")
+            
+            if not hasattr(self, 'initial_capital'):
+                self.initial_capital = self.current_total_capital
+            
             data = {
                 'last_updated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'cash': self.current_total_capital if hasattr(self, 'current_total_capital') else 300000,
-                'initial_capital': self.initial_capital if hasattr(self, 'initial_capital') else 300000,
+                'cash': self.current_total_capital,
+                'initial_capital': self.initial_capital,
                 'positions': portfolio
             }
             with open(portfolio_file, 'w', encoding='utf-8') as f:
@@ -1751,7 +1802,10 @@ class StrategyRunner:
         """
         判断当前是否需要进行除权检测
         
-        规则：交易日收盘前（00:00-15:00）需要处理，收盘后及非交易日不需要处理
+        规则：
+        - 交易日（00:00-15:30）需要处理完整除权（信号+持仓+股票池）
+        - 交易日（15:30-23:59）需要处理持仓和股票池除权（信号已执行）
+        - 非交易日不需要处理
         
         Returns:
             是否需要进行除权检测
@@ -1761,57 +1815,128 @@ class StrategyRunner:
         
         # 检查是否为交易日
         if not is_trading_day(current_date):
-            logger.debug(f"【除权检测】{current_date} 不是交易日，跳过检测")
+            logger.info(f"【除权检测】{current_date} 不是交易日，跳过检测")
             return False
         
-        # 检查是否在收盘前（15:00之前）
-        if now.hour < 15:
+        # 检查是否在交易日内（00:00-23:59）
+        # 盘中模式（15:30前）：完整除权检测
+        # 盘后模式（15:30后）：持仓和股票池除权检测
+        if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+            logger.info(f"【除权检测】当前时间 {now.strftime('%H:%M')} < 15:30（盘中模式），需要检测")
+            return True
+        elif now.hour < 24:
+            logger.info(f"【除权检测】当前时间 {now.strftime('%H:%M')} >= 15:30（盘后模式），需要检测持仓和股票池")
             return True
         
-        logger.debug(f"【除权检测】当前时间 {now.strftime('%H:%M')} >= 15:00，跳过检测")
+        logger.info(f"【除权检测】当前时间 {now.strftime('%H:%M')} 超出交易时间范围")
         return False
     
-    def _daily_exdividend_check(self, trade_date: str, portfolio_file, signals_file):
+    
+    def _load_last_exdividend_date(self) -> str:
         """
-        每日除权检测主方法（一天只执行一次）
+        加载最后一次处理除权的日期（持久化存储）
+        
+        Returns:
+            最后处理日期，如果文件不存在或加载失败返回空字符串
+        """
+        processed_date_file = self.running_dir / 'last_exdividend_date.json'
+        if not processed_date_file.exists():
+            return ""
+        
+        try:
+            with open(processed_date_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('last_date', "")
+        except Exception as e:
+            logger.warning(f"【除权处理】加载最后处理日期文件失败: {e}")
+            return ""
+    
+    def _save_last_exdividend_date(self, trade_date: str):
+        """
+        保存最后处理除权的日期（持久化存储）
         
         Args:
-            trade_date: 交易日期
-            portfolio_file: 持仓文件路径
-            signals_file: 信号文件路径
+            trade_date: 处理日期
         """
-        # 检查今日是否已经处理过除权
-        if hasattr(self, '_exdividend_processed_date') and self._exdividend_processed_date == trade_date:
-            logger.info(f"【每日除权检测】{trade_date} 已处理过除权检测，跳过")
+        processed_date_file = self.running_dir / 'last_exdividend_date.json'
+        try:
+            with open(processed_date_file, 'w', encoding='utf-8') as f:
+                json.dump({'last_date': trade_date, 'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, f, ensure_ascii=False, indent=2)
+            logger.debug(f"【除权处理】已保存最后处理日期: {trade_date}")
+        except Exception as e:
+            logger.warning(f"【除权处理】保存最后处理日期失败: {e}")
+    
+    def _perform_exdividend_check(self, current_date: str, signal_date: str = None):
+        """
+        执行除权检测（根据盘中/盘后模式），包含双重保护检查
+        
+        Args:
+            current_date: 当日日期（用于持仓和股票池除权）
+            signal_date: 信号日期（用于信号除权，盘中模式为前一交易日，盘后模式为None）
+        """
+        # 双重保护检查：先检查内存标记，再检查持久化记录
+        if current_date in self._exdividend_processed_dates:
+            logger.info(f"【每日除权检测】{current_date} 已处理过除权检测（内存标记），跳过")
             return
         
-        logger.info(f"【每日除权检测】开始检测 {trade_date} 的除权情况...")
+        last_processed_date = self._load_last_exdividend_date()
+        if last_processed_date == current_date:
+            logger.info(f"【每日除权检测】{current_date} 已处理过除权检测（持久化记录），更新内存标记")
+            self._exdividend_processed_dates.add(current_date)
+            return
         
-        has_changes = False
+        # 判断当前时间，确定是否处理信号除权
+        now = datetime.datetime.now()
+        if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+            # 盘中模式（15:30前）：处理持仓除权 + 信号除权 + 股票池除权
+            logger.info(f"【数据初始化】盘中模式（{now.strftime('%H:%M')} < 15:30）")
+            # 持仓除权检测（使用当日日期）
+            logger.info(f"【数据初始化】检测 {current_date} 的持仓除权信息...")
+            portfolio_changed = self._check_portfolio_exdividend(current_date)
+            if portfolio_changed:
+                logger.info(f"【数据初始化】持仓除权检测完成，有 {len(self.portfolio)} 只股票进行了除权调整")
+            else:
+                logger.info(f"【数据初始化】持仓除权检测完成，{current_date} 无持仓除权信息")
+            # 信号除权检测（检测当日除权信息，调整前一交易日的信号）
+            if signal_date:
+                logger.info(f"【数据初始化】检测 {current_date} 的信号除权信息（调整 {signal_date} 的信号）...")
+                signals_changed = self._check_signals_exdividend(current_date, signal_date)
+                if signals_changed:
+                    logger.info(f"【数据初始化】信号除权检测完成，有信号进行了除权调整")
+                else:
+                    logger.info(f"【数据初始化】信号除权检测完成，{current_date} 无信号除权信息")
+            else:
+                logger.info(f"【数据初始化】跳过信号除权检测（无信号日期）")
+            # 股票池除权检测（使用当日日期）
+            logger.info(f"【数据初始化】检测 {current_date} 的股票池除权信息...")
+            pool_changed = self._check_pool_exdividend(current_date)
+            if pool_changed:
+                logger.info(f"【数据初始化】股票池除权检测完成，有股票池条目进行了除权调整")
+            else:
+                logger.info(f"【数据初始化】股票池除权检测完成，{current_date} 无股票池除权信息")
+        else:
+            # 盘后模式（15:30后）：只处理持仓除权 + 股票池除权
+            logger.info(f"【数据初始化】盘后模式（{now.strftime('%H:%M')} >= 15:30）")
+            # 持仓除权检测（使用当日日期）
+            logger.info(f"【数据初始化】检测 {current_date} 的持仓除权信息...")
+            portfolio_changed = self._check_portfolio_exdividend(current_date)
+            if portfolio_changed:
+                logger.info(f"【数据初始化】持仓除权检测完成，有 {len(self.portfolio)} 只股票进行了除权调整")
+            else:
+                logger.info(f"【数据初始化】持仓除权检测完成，{current_date} 无持仓除权信息")
+            # 股票池除权检测（使用当日日期）
+            logger.info(f"【数据初始化】检测 {current_date} 的股票池除权信息...")
+            pool_changed = self._check_pool_exdividend(current_date)
+            if pool_changed:
+                logger.info(f"【数据初始化】股票池除权检测完成，有股票池条目进行了除权调整")
+            else:
+                logger.info(f"【数据初始化】股票池除权检测完成，{current_date} 无股票池除权信息")
+            # 跳过信号除权检测（盘后模式）
+            logger.info(f"【数据初始化】跳过信号除权检测（盘后模式）")
         
-        # ========== 1. 持仓除权检测 ==========
-        if self._check_portfolio_exdividend(trade_date):
-            has_changes = True
-        
-        # ========== 2. 信号除权检测 ==========
-        if self._check_signals_exdividend(trade_date):
-            has_changes = True
-        
-        # ========== 3. 股票池除权检测 ==========
-        if self._check_pool_exdividend(trade_date):
-            has_changes = True
-        
-        # 如果有调整，保存文件
-        if has_changes:
-            logger.info(f"【每日除权检测】检测到除权，更新持仓、信号和股票池文件")
-            self._save_signals(self.signals, str(signals_file))
-            self._save_portfolio(self.portfolio, str(portfolio_file))
-            self._save_pool_to_file(self.buy_candidate_pool, trade_date)
-        
-        # 标记今日已处理
-        self._exdividend_processed_date = trade_date
-        
-        logger.info(f"【每日除权检测】完成")
+        # 更新内存标记和持久化记录
+        self._exdividend_processed_dates.add(current_date)
+        self._save_last_exdividend_date(current_date)
     
     def _check_portfolio_exdividend(self, trade_date: str) -> bool:
         """
@@ -1828,6 +1953,12 @@ class StrategyRunner:
         has_changes = False
         
         for stock_code, position in self.portfolio.items():
+            # 检查该股票当日是否已处理过除权
+            rights_history = position.get('rights_history', [])
+            if any(rh.get('date') == trade_date for rh in rights_history):
+                logger.debug(f"【持仓除权调整】{stock_code} {trade_date} 已处理过除权，跳过")
+                continue
+            
             # 检测是否除权
             exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
             
@@ -1861,12 +1992,13 @@ class StrategyRunner:
         
         return has_changes
     
-    def _check_signals_exdividend(self, trade_date: str) -> bool:
+    def _check_signals_exdividend(self, exdividend_date: str, signal_date: str = None) -> bool:
         """
         检测信号涉及股票的除权情况并调整
         
         Args:
-            trade_date: 交易日期
+            exdividend_date: 除权检测日期（当日日期，用于查询除权信息）
+            signal_date: 信号日期（前一交易日，用于确定加载哪个日期的信号）
         
         Returns:
             是否有调整
@@ -1884,21 +2016,32 @@ class StrategyRunner:
             if signal_type not in ('buy', 'sell', 'strategy_sell'):
                 continue
             
+            # 检查该信号是否已处理过除权
+            if signal.get('exdividend_adjusted'):
+                logger.debug(f"【信号除权调整】{signal.get('stock_code')} 信号已处理过除权，跳过")
+                continue
+            
             stock_code = signal.get('stock_code')
             if not stock_code:
                 continue
             
-            # 检测是否除权
-            exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
+            # 检测是否除权（使用除权日期检测）
+            exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, exdividend_date)
             
             if exdividend_info:
                 factor = exdividend_info.get('factor', 1.0)
                 logger.info(f"【信号除权调整】{stock_code} {signal_type} 信号检测到除权，因子: {factor}")
                 
-                # 买入信号：调整买入价格
-                if signal_type == 'buy' and 'price' in signal:
-                    signal['original_price'] = signal['price']
-                    signal['price'] = signal['price'] * factor
+                # 买入信号：调整买入价格和数量
+                if signal_type == 'buy':
+                    if 'price' in signal:
+                        signal['original_price'] = signal['price']
+                        signal['price'] = signal['price'] * factor
+                    if 'quantity' in signal:
+                        signal['original_quantity'] = signal['quantity']
+                        bonus_ratio = exdividend_info.get('bonus_ratio', 0)
+                        if bonus_ratio:
+                            signal['quantity'] = int(signal['quantity'] * (1 + bonus_ratio))
                     signal['exdividend_adjusted'] = True
                     signal['exdividend_factor'] = factor
                 
@@ -1937,22 +2080,35 @@ class StrategyRunner:
             if not stock_code:
                 continue
             
+            # 检查该股票当日是否已处理过除权
+            exdividend_dates = item.get('exdividend_dates', [])
+            if trade_date in exdividend_dates:
+                logger.debug(f"【股票池除权调整】{stock_code} {trade_date} 已处理过除权，跳过")
+                continue
+            
             # 检测是否除权
             exdividend_info = ExdividendUtils.get_exdividend_info(stock_code, trade_date)
             
             if exdividend_info:
                 factor = exdividend_info.get('factor', 1.0)
-                logger.info(f"【股票池除权调整】{stock_code} 支撑位已调整（除权因子={factor}）")
+                logger.info(f"【股票池除权调整】{stock_code} 检测到除权，因子: {factor}")
                 
-                # 调整支撑位
-                if 'support_level' in item:
-                    item['support_level'] = item['support_level'] * factor
-                    has_changes = True
+                # 调整支撑位和其他价格字段
+                price_fields = ['support_level', 'resistance_level', 'target_price', 'entry_price']
                 
-                # 调整股票信息中的支撑位（如果存在）
-                if 'support_level' in stock_info:
-                    stock_info['support_level'] = stock_info['support_level'] * factor
-                    has_changes = True
+                for field in price_fields:
+                    if field in item:
+                        item[field] = item[field] * factor
+                        logger.info(f"【股票池除权调整】{stock_code} {field}: {item[field]}")
+                        has_changes = True
+                    if field in stock_info:
+                        stock_info[field] = stock_info[field] * factor
+                        has_changes = True
+                
+                # 记录除权日期（避免重复处理）
+                if 'exdividend_dates' not in item:
+                    item['exdividend_dates'] = []
+                item['exdividend_dates'].append(trade_date)
         
         return has_changes
     
@@ -2302,7 +2458,7 @@ class StrategyRunner:
                 today = now.strftime('%Y-%m-%d')
                 
                 # 判断是否是交易日
-                if self._is_trading_day(today):
+                if is_trading_day(today):
                     # 交易日：15:30之前处理T日（前一交易日）数据，15:30之后处理当日数据
                     if now.hour < 15 or (now.hour == 15 and now.minute < 30):
                         # 15:30之前，处理前一交易日数据
@@ -2334,10 +2490,6 @@ class StrategyRunner:
             
             # 加载股票池
             self.buy_candidate_pool = self._load_pool_from_file()[0]
-            
-            # ========== 除权检测（交易日收盘前执行）==========
-            if self._need_exdividend_check():
-                self._daily_exdividend_check(trade_date, portfolio_file, signals_file)
             
             # 统计待执行的信号
             pending_buy_signals = [s for s in self.signals if s.get('signal_type') == 'buy' and not s.get('executed') and not s.get('ignored')]
@@ -2542,6 +2694,7 @@ class StrategyRunner:
             'MorningStarStrategy': '启明星策略',
             'TrendStartStrategy': '趋势起点策略',
             'Strategy2560Selection': '2560战法',
+            'GoldenTriangleStrategy': '金三角策略',
             'ShunShiBaoStrategy': '顺势宝',
             'turtle': '海龟策略',
             'bollinger': '布林带策略',
