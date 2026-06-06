@@ -57,7 +57,11 @@ class GoldenTriangleStrategy(BaseStrategy):
         result['prev_close'] = result['close'].shift(1)
         result['gain'] = (result['close'] - result['prev_close']) / result['prev_close']
 
-        result = result.ffill()
+        # 注意：不使用ffill()向前填充，避免引入未来函数
+        # ffill会使用未来数据填充NaN，导致回测结果失真
+        # 如果需要处理缺失数据，应使用bfill()向后填充（使用历史数据）
+        # result = result.ffill()  # ⚠️ 这是未来函数！
+        
         result = result.iloc[::-1].reset_index(drop=True)
         return result
 
