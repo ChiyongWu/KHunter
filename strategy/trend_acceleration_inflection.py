@@ -87,15 +87,18 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
         """
         填充缺失值，确保没有 None 值导致计算错误
         
-        使用前向填充和后向填充的组合方式
+        使用后向填充方式（只使用历史数据），避免引入未来函数
+        注意：此策略使用倒序数据（index=0是最新日期）
+        对于倒序数据：bfill()使用历史数据（安全），ffill()使用未来数据（未来函数）
         """
         result = df.copy()
         
         # 对数值列进行填充
         numeric_cols = result.select_dtypes(include=['float64', 'int64']).columns
         for col in numeric_cols:
-            # 先用前向填充，再用后向填充
-            result[col] = result[col].ffill().bfill()
+            # 只使用后向填充（使用历史数据），避免引入未来函数
+            # result[col] = result[col].ffill().bfill()  # ⚠️ ffill是未来函数！
+            result[col] = result[col].bfill()
             # 如果还有 NaN，用 0 填充
             result[col] = result[col].fillna(0)
         

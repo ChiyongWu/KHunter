@@ -118,7 +118,11 @@ class MultiGoldenCrossStrategy(BaseStrategy):
         result['volume_ratio'] = volume / result['volume_ma']
         
         # 填充缺失值
-        result = result.ffill().bfill()
+        # 注意：数据当前是正序排列（第123行提到"在升序数据上检测"）
+        # 对于正序数据：ffill()使用历史数据（安全），bfill()使用未来数据（未来函数）
+        # 所以只使用ffill()向前填充
+        # result = result.ffill().bfill()  # ⚠️ bfill是未来函数！
+        result = result.ffill()
         
         # 计算金叉信号 - 在升序数据上检测
         # 金叉 = 当前在上方且前一天在下方

@@ -276,9 +276,11 @@ class FastMultiGoldenCrossAnalyzer:
         DEA = DIF.ewm(span=self.macd_signal, adjust=False).mean()
         
         # 金叉信号检测
-        ma_cross = (ma_short > ma_long) & (ma_short.shift(-1) <= ma_long.shift(-1))
-        kdj_cross = (K > D) & (K.shift(-1) <= D.shift(-1))
-        macd_cross = (DIF > DEA) & (DIF.shift(-1) <= DEA.shift(-1))
+        # 注意：使用shift(1)而不是shift(-1)，避免引入未来函数
+        # 金叉定义：当前金叉 > 死叉，且前一天金叉 <= 死叉
+        ma_cross = (ma_short > ma_long) & (ma_short.shift(1) <= ma_long.shift(1))
+        kdj_cross = (K > D) & (K.shift(1) <= D.shift(1))
+        macd_cross = (DIF > DEA) & (DIF.shift(1) <= DEA.shift(1))
         
         # 获取回溯期间的数据
         lookback = min(self.lookback_days, len(df))
