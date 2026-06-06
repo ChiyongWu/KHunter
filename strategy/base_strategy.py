@@ -3,6 +3,7 @@
 """
 from abc import ABC, abstractmethod
 import pandas as pd
+from utils.trade_date_utils import is_trading_day
 
 
 class BaseStrategy(ABC):
@@ -70,7 +71,10 @@ class BaseStrategy(ABC):
         """
         检查股票是否停牌
 
-        逻辑：如果选股日期当天的数据不存在（最新数据日期 < 选股日期），则认为是停牌
+        逻辑：
+        1. 先判断选股日期是否是交易日
+        2. 如果是交易日，检查股票是否有当天的数据
+        3. 如果没有当天的数据，则认为是停牌
 
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param selection_date: 选股日期（YYYY-MM-DD格式）
@@ -80,9 +84,18 @@ class BaseStrategy(ABC):
             return True
 
         try:
+            # 先判断选股日期是否是交易日
+            if not is_trading_day(selection_date):
+                # 非交易日不认为是停牌
+                return False
+            
+            # 获取最新数据日期
             latest_date = str(df.iloc[0]['date']).split()[0]
+            
+            # 如果是交易日，但最新数据日期小于选股日期，则认为是停牌
             if latest_date < selection_date:
                 return True
+            
         except Exception:
             return True
 
@@ -155,9 +168,9 @@ class BaseStrategy(ABC):
         if not self._validate_data(df):
             return []
 
-        # 停牌股检查已禁用 - 暂时跳过此检查以避免非交易日无法选股
-        # if selection_date and self._is_suspended(df, selection_date):
-        #     return []
+        # 停牌股检查：过滤在交易日没有最新数据的股票
+        if selection_date and self._is_suspended(df, selection_date):
+            return []
 
         if hasattr(self, '_quick_filter_with_lookback'):
             if not self._quick_filter_with_lookback(df):
