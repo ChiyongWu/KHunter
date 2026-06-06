@@ -40,7 +40,12 @@ class GoldenTriangleStrategy(BaseStrategy):
     def calculate_indicators(self, df) -> pd.DataFrame:
         """计算技术指标"""
         result = df.copy()
-        if len(result) > 1 and str(result['date'].iloc[0]) > str(result['date'].iloc[1]):
+        
+        # 检测数据是否为倒序
+        is_reversed = len(result) > 1 and str(result['date'].iloc[0]) > str(result['date'].iloc[1])
+        
+        # 如果是倒序，先反转成正序以便正确计算
+        if is_reversed:
             result = result.iloc[::-1].reset_index(drop=True)
 
         short_period = int(self.params['short_period'])
@@ -62,7 +67,11 @@ class GoldenTriangleStrategy(BaseStrategy):
         # 如果需要处理缺失数据，应使用bfill()向后填充（使用历史数据）
         # result = result.ffill()  # ⚠️ 这是未来函数！
         
-        result = result.iloc[::-1].reset_index(drop=True)
+        # 只有原始数据是倒序时才反转回去
+        # 如果原始数据是正序，保持正序返回
+        if is_reversed:
+            result = result.iloc[::-1].reset_index(drop=True)
+        
         return result
 
     def get_selection_criteria(self):
