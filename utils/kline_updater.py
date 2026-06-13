@@ -87,7 +87,7 @@ class KlineUpdater:
             logger.info("=" * 60)
             logger.info("K线数据更新任务启动")
             logger.info("=" * 60)
-            logger.info(f"数据源策略: TickFlow 免费 API (前复权批量)；Baostock仅用于复权因子检测")
+            logger.info(f"数据源策略: TickFlow 免费 API (前复权批量)")
             logger.info(f"待更新股票数量: {len(stock_codes)}")
             logger.info(f"上次更新日期: {last_update_date}")
             logger.info(f"目标更新日期: {target_date}")
