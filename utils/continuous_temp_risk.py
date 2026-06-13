@@ -53,7 +53,7 @@ class ContinuousTempRiskController:
     """连续市场温度风控控制器"""
     
     # 自动补充温度数据的最大日历天数：超过此天数的缺失数据不再调API，直接用默认值50
-    MAX_AUTO_FILL_DAYS = 7
+    MAX_AUTO_FILL_DAYS = 5
     
     def __init__(self, config_path: str = 'config/continuous_temp_risk.yaml'):
         """
