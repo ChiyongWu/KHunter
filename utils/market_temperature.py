@@ -63,7 +63,8 @@ class MarketTemperature:
             except Exception as e:
                 logger.warning(f"初始化Tushare失败: {e}")
     
-    def calculate(self, trade_date: str, use_cache: bool = True) -> Dict:
+    def calculate(self, trade_date: str, use_cache: bool = True,
+                  skip_risk_eval: bool = False) -> Dict:
         """
         计算指定日期的市场温度
         
@@ -73,6 +74,9 @@ class MarketTemperature:
         Args:
             trade_date: 交易日期（YYYYMMDD格式）
             use_cache: 是否使用缓存，默认True
+            skip_risk_eval: 是否跳过连续温度风控评估，默认False。
+                设为True可避免递归级联（如自动补录缺失温度数据时），
+                仅顶级调用者应触发风控评估。
         
         Returns:
             市场温度数据字典，包含：
@@ -101,7 +105,7 @@ class MarketTemperature:
                 # 检查缓存的action是否是连续温度风控的action
                 # 如果不是（不包含SCENARIO标识），需要执行连续温度风控评估
                 cached_action = cached.get('action', '')
-                if 'SCENARIO' not in cached_action:
+                if 'SCENARIO' not in cached_action and not skip_risk_eval:
                     logger.info(f"缓存数据的action不是连续温度风控结果，执行风控评估")
                     try:
                         from utils.continuous_temp_risk import evaluate_continuous_temp_risk
@@ -171,19 +175,21 @@ class MarketTemperature:
         dao.save(result)
         
         # 自动触发连续温度风控评估（替代原有单日温度风控）
-        try:
-            from utils.continuous_temp_risk import evaluate_continuous_temp_risk
-            evaluate_continuous_temp_risk(trade_date)
-            logger.info(f"连续温度风控评估已自动执行，日期: {trade_date}")
-            
-            # 从数据库重新读取数据，获取连续温度风控更新后的action和position_ratio
-            updated_result = dao.query_by_date(trade_date)
-            if updated_result:
-                # 更新result中的action和position_ratio为连续温度风控的结果
-                result['action'] = updated_result.get('action', result['action'])
-                result['position_ratio'] = updated_result.get('position_ratio', result['position_ratio'])
-        except Exception as e:
-            logger.warning(f"连续温度风控评估执行失败: {e}")
+        # 仅在顶层调用时触发，避免自动补录时的递归级联
+        if not skip_risk_eval:
+            try:
+                from utils.continuous_temp_risk import evaluate_continuous_temp_risk
+                evaluate_continuous_temp_risk(trade_date)
+                logger.info(f"连续温度风控评估已自动执行，日期: {trade_date}")
+                
+                # 从数据库重新读取数据，获取连续温度风控更新后的action和position_ratio
+                updated_result = dao.query_by_date(trade_date)
+                if updated_result:
+                    # 更新result中的action和position_ratio为连续温度风控的结果
+                    result['action'] = updated_result.get('action', result['action'])
+                    result['position_ratio'] = updated_result.get('position_ratio', result['position_ratio'])
+            except Exception as e:
+                logger.warning(f"连续温度风控评估执行失败: {e}")
         
         return result
     

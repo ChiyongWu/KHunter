@@ -465,7 +465,10 @@ class ContinuousTempRiskController:
         for trade_date in missing_dates:
             try:
                 logger.info(f"尝试补充温度数据，日期: {trade_date}")
-                result = mt.calculate(trade_date, use_cache=True)
+                # skip_risk_eval=True 避免递归级联：
+                # calculate() 内部不再触发 evaluate_continuous_temp_risk()，
+                # 防止补录 → 风控 → 补录 → 风控的无限循环
+                result = mt.calculate(trade_date, use_cache=True, skip_risk_eval=True)
                 if result:
                     success_count += 1
                     logger.info(f"成功补充温度数据，日期: {trade_date}，温度: {result.get('temperature')}")
