@@ -947,7 +947,7 @@ class DataCollectionService:
                         stock_codes=stock_codes,
                         last_update_date=last_update_date,
                         target_date=target_date,
-                        batch_size=500  # TickFlow 免费 API 支持大批量查询
+                        batch_size=100  # TickFlow API每批最大100只股票
                     )
                     
                     # 更新统计信息
