@@ -942,12 +942,12 @@ class DataCollectionService:
                     stock_data_fetcher = StockDataFetcher()
                     kline_updater = KlineUpdater(self.db_manager, stock_data_fetcher)
                     
-                    # 执行K线数据更新（使用优化后的批次大小500）
+                    # 执行K线数据更新（TickFlow 批量接口，一次请求全批次）
                     kline_result = kline_updater.update_kline_data(
                         stock_codes=stock_codes,
                         last_update_date=last_update_date,
                         target_date=target_date,
-                        batch_size=500  # 优化：从100增加到500
+                        batch_size=500  # TickFlow 免费 API 支持大批量查询
                     )
                     
                     # 更新统计信息
@@ -1124,10 +1124,17 @@ class DataCollectionService:
             total_added = self.update_status['totalStats']['kline_added'] + self.update_status['totalStats']['fund_flow_added']
             total_updated = self.update_status['totalStats']['kline_updated'] + self.update_status['totalStats']['fund_flow_updated']
             total_success = total_added + total_updated
+            total_failed = self.update_status['totalStats']['kline_failed'] + self.update_status['totalStats']['fund_flow_failed']
             
             # 更新任务状态
             with self.update_lock:
-                if total_success > 0:
+                # 如果失败数量超过1000，标记为失败（即使有成功的数据）
+                if total_failed > 1000:
+                    self.update_status['status'] = 'failed'
+                    self.update_status['end_time'] = datetime.now().isoformat()
+                    self.update_status['message'] = f'更新失败: 失败股票数量({total_failed})超过1000，请重新更新'
+                    self.update_status['success'] = 0
+                elif total_success > 0:
                     # 有数据被成功更新，标记为完成
                     self.update_status['status'] = 'completed'
                     self.update_status['end_time'] = datetime.now().isoformat()
@@ -1139,7 +1146,10 @@ class DataCollectionService:
                     self.update_status['end_time'] = datetime.now().isoformat()
                     self.update_status['message'] = '更新失败: 没有数据被成功更新'
             
-            if total_success > 0:
+            if total_failed > 1000:
+                self._add_update_log(f"✗ 更新任务失败: 失败股票数量({total_failed})超过1000")
+                logger.warning(f"更新任务 {task_id} 失败: 失败股票数量({total_failed})超过1000")
+            elif total_success > 0:
                 self._add_update_log("✓ 更新任务完成")
                 logger.info(f"更新任务 {task_id} 完成")
             else:
@@ -1149,10 +1159,13 @@ class DataCollectionService:
             # 记录更新完成或失败
             if validator and target_date:
                 try:
-                    if total_success > 0:
+                    if total_failed <= 1000 and total_success > 0:
                         validator.record_update_complete(target_date, stats)
                     else:
-                        validator.record_update_failed(target_date, '没有数据被成功更新')
+                        if total_failed > 1000:
+                            validator.record_update_failed(target_date, f'失败股票数量({total_failed})超过1000')
+                        else:
+                            validator.record_update_failed(target_date, '没有数据被成功更新')
                 except Exception as log_e:
                     logger.error(f"记录更新状态失败: {str(log_e)}")
             
@@ -1161,9 +1174,16 @@ class DataCollectionService:
             total_added = self.update_status['totalStats']['kline_added'] + self.update_status['totalStats']['fund_flow_added']
             total_updated = self.update_status['totalStats']['kline_updated'] + self.update_status['totalStats']['fund_flow_updated']
             total_success = total_added + total_updated
+            total_failed = self.update_status['totalStats']['kline_failed'] + self.update_status['totalStats']['fund_flow_failed']
             
             with self.update_lock:
-                if total_success > 0:
+                # 如果失败数量超过1000，标记为失败（即使有成功的数据）
+                if total_failed > 1000:
+                    self.update_status['status'] = 'failed'
+                    self.update_status['end_time'] = datetime.now().isoformat()
+                    self.update_status['message'] = f'更新失败: 失败股票数量({total_failed})超过1000，请重新更新'
+                    self.update_status['success'] = 0
+                elif total_success > 0:
                     # 有数据被成功更新，标记为完成
                     self.update_status['status'] = 'completed'
                     self.update_status['end_time'] = datetime.now().isoformat()
@@ -1175,7 +1195,10 @@ class DataCollectionService:
                     self.update_status['end_time'] = datetime.now().isoformat()
                     self.update_status['message'] = f'更新失败: {str(e)}'
             
-            if total_success > 0:
+            if total_failed > 1000:
+                self._add_update_log(f"✗ 更新任务失败: 失败股票数量({total_failed})超过1000")
+                logger.warning(f"更新任务 {task_id} 失败: 失败股票数量({total_failed})超过1000")
+            elif total_success > 0:
                 self._add_update_log(f"✓ 更新任务完成（部分步骤失败）: {str(e)}")
                 logger.warning(f"更新任务 {task_id} 完成（部分步骤失败）: {str(e)}")
             else:
@@ -1185,10 +1208,13 @@ class DataCollectionService:
             # 记录更新完成或失败
             if validator and target_date:
                 try:
-                    if total_success > 0:
+                    if total_failed <= 1000 and total_success > 0:
                         validator.record_update_complete(target_date, stats)
                     else:
-                        validator.record_update_failed(target_date, str(e))
+                        if total_failed > 1000:
+                            validator.record_update_failed(target_date, f'失败股票数量({total_failed})超过1000')
+                        else:
+                            validator.record_update_failed(target_date, str(e))
                 except Exception as log_e:
                     logger.error(f"记录更新状态失败: {str(log_e)}")
         

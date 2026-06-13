@@ -52,6 +52,9 @@ class ContinuousTempRiskResult:
 class ContinuousTempRiskController:
     """连续市场温度风控控制器"""
     
+    # 自动补充温度数据的最大日历天数：超过此天数的缺失数据不再调API，直接用默认值50
+    MAX_AUTO_FILL_DAYS = 7
+    
     def __init__(self, config_path: str = 'config/continuous_temp_risk.yaml'):
         """
         初始化控制器
@@ -285,12 +288,21 @@ class ContinuousTempRiskController:
                                 # 不连续，停止补充
                                 break
                     
-                    # 最多补充5天
+                    # 最多补充5天，且只补充最近MAX_AUTO_FILL_DAYS天内的数据
                     consecutive_missing = consecutive_missing[:5]
                     
-                    if consecutive_missing:
-                        logger.info(f"发现缺失数据，尝试补充: {consecutive_missing}")
-                        self.fill_missing_temperatures(consecutive_missing)
+                    # 过滤掉过早的日期：只自动补充最近窗口内的缺失数据
+                    # 更早的数据直接用默认值50，避免大量Tushare API调用
+                    recent_missing = self._filter_recent_dates(consecutive_missing)
+                    
+                    if recent_missing:
+                        stale_missing = [d for d in consecutive_missing if d not in recent_missing]
+                        if stale_missing:
+                            logger.info(
+                                f"跳过补充过早数据（>{self.MAX_AUTO_FILL_DAYS}天前）: {stale_missing}"
+                            )
+                        logger.info(f"发现缺失数据，尝试补充: {recent_missing}")
+                        self.fill_missing_temperatures(recent_missing)
                         
                         # 补充后重新查询
                         results = dao.db.query(
@@ -410,6 +422,28 @@ class ContinuousTempRiskController:
         except Exception:
             pass
         return dates
+    
+    def _filter_recent_dates(self, dates: List[str]) -> List[str]:
+        """
+        过滤出最近 MAX_AUTO_FILL_DAYS 天内的日期
+
+        只对最近的缺失数据自动补充（调用 Tushare API），
+        更早的直接用默认值 50，避免大量无意义的 API 调用。
+
+        Args:
+            dates: 日期列表（YYYYMMDD格式）
+
+        Returns:
+            在最近窗口内的日期列表
+        """
+        if not dates:
+            return []
+        try:
+            cutoff = datetime.now() - timedelta(days=self.MAX_AUTO_FILL_DAYS)
+            cutoff_str = cutoff.strftime('%Y%m%d')
+            return [d for d in dates if d >= cutoff_str]
+        except Exception:
+            return dates
     
     def fill_missing_temperatures(self, missing_dates: List[str]) -> bool:
         """
