@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # TickFlow 免费 API 配置
 TICKFLOW_FREE_API = "https://free-api.tickflow.org"
-TICKFLOW_BATCH_MAX = 2000  # 单次批量查询最大股票数
+TICKFLOW_BATCH_MAX = 100   # 单次批量查询最大股票数（TickFlow API限制）
 
 # 股票代码格式转换缓存
 _CODE_TO_TF_CACHE: Dict[str, str] = {}
@@ -898,8 +898,7 @@ class StockDataFetcher:
         """
         抓取近期数据用于增量更新（单次请求，不做重试）
 
-        数据源策略：使用腾讯财经获取前复权数据。
-        Baostock 仅用于除权复权因子检查，不参与K线数据获取。
+        数据源策略：使用 TickFlow 批量接口获取前复权数据。
         不做单只股票重试，由调用方 kline_updater 在批次层做限流控制和重试。
 
         参数：
@@ -909,13 +908,13 @@ class StockDataFetcher:
         返回：
             增量数据DataFrame（前复权数据），失败返回 None
         """
-        # 使用腾讯财经获取 K 线数据（前复权）
+        # 使用 TickFlow 批量接口获取 K 线数据（前复权）
         try:
-            df = self._fetch_stock_update_tencent_light(stock_code, days)
-            if df is not None and not df.empty:
-                return df
+            results = self._fetch_stock_batch_tickflow([stock_code], days)
+            if stock_code in results:
+                return results[stock_code]
         except Exception as e:
-            logger.debug(f"【增量更新】腾讯财经获取 {stock_code} 失败: {e}")
+            logger.debug(f"【增量更新】TickFlow 获取 {stock_code} 失败: {e}")
 
         return None
 
@@ -1273,62 +1272,13 @@ class StockDataFetcher:
             }
 
         说明：
-            - 数据源优先级: Baostock > Tushare
-            - Baostock 复权因子更准确，且免费无需注册
+            - 使用 Tushare 获取复权因子
             - 对比前后两日因子，变化则判定为除权
             - 如果提供start_date，则检测该时间段内所有日期的变化
             - 自动分批查询，避免 API 限制
             - 自动扩展 start_date：若 start_date >= trade_date，向前取前一交易日确保至少2天数据
         """
-        # 方法1: 优先使用 Baostock 获取复权因子
-        try:
-            logger.info("【除权检测】优先使用 Baostock 获取复权因子...")
-            
-            from utils.baostock_fetcher import fetch_adjust_factor_baostock
-            import pandas as pd
-            
-            all_factor_dfs = []
-            
-            for stock_code in stock_codes:
-                try:
-                    # 转换日期格式
-                    start_date_str = None
-                    end_date_str = None
-                    
-                    if start_date:
-                        start_date_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
-                    if trade_date:
-                        end_date_str = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-                    
-                    df_factor = fetch_adjust_factor_baostock(stock_code, start_date_str, end_date_str)
-                    
-                    if df_factor is not None and not df_factor.empty:
-                        # 添加股票代码列
-                        df_factor['ts_code'] = f"{stock_code}.SH" if stock_code.startswith('6') or stock_code.startswith('88') else f"{stock_code}.SZ"
-                        # 转换日期格式为 YYYYMMDD
-                        df_factor['trade_date'] = df_factor['date'].dt.strftime('%Y%m%d')
-                        # 使用 foreAdjustFactor 作为前复权因子
-                        if 'foreAdjustFactor' in df_factor.columns:
-                            df_factor['adj_factor'] = df_factor['foreAdjustFactor']
-                        elif 'backAdjustFactor' in df_factor.columns:
-                            df_factor['adj_factor'] = df_factor['backAdjustFactor']
-                        else:
-                            continue
-                            
-                        all_factor_dfs.append(df_factor)
-                except Exception as e:
-                    logger.debug(f"【除权检测】Baostock 获取 {stock_code} 复权因子失败: {e}")
-                    continue
-            
-            if all_factor_dfs:
-                df = pd.concat(all_factor_dfs, ignore_index=True)
-                logger.info(f"【除权检测】Baostock 成功获取 {len(df)} 条复权因子记录")
-                return self._detect_exdividend_from_factor(df, stock_codes)
-                
-        except Exception as e:
-            logger.debug(f"【除权检测】Baostock 检测失败，降级到 Tushare: {e}")
-
-        # 方法2: 降级到 Tushare
+        # 使用 Tushare 获取复权因子
         try:
             import tushare as ts
             import json

@@ -53,7 +53,7 @@ class KlineUpdater:
             'percentage': 0
         }
 
-    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 500) -> Dict:
+    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 100) -> Dict:
         """
         增量更新K线数据
 
