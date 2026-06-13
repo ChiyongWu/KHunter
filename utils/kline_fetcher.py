@@ -27,7 +27,35 @@ class KlineFetcher:
         self.stock_data_fetcher = stock_data_fetcher
     
     # ==================== K线批量获取 ====================
-    
+
+    def _fetch_kline_tickflow_batch(self, stock_codes: list, days: int = 30) -> dict:
+        """
+        使用 TickFlow 免费 API 批量获取K线数据（前复权）
+
+        一次 HTTP 请求获取所有股票，替代原有的多线程逐只获取方式。
+
+        参数：
+            stock_codes: 股票代码列表
+            days: 获取最近多少天的数据
+
+        返回：
+            {stock_code: DataFrame, ...}
+        """
+        if not stock_codes:
+            return {}
+
+        logger.debug(f"TickFlow 批量获取K线: {len(stock_codes)} 只股票, {days} 天数据")
+
+        try:
+            results = self.stock_data_fetcher._fetch_stock_batch_tickflow(stock_codes, days)
+            success = len(results)
+            failed = len(stock_codes) - success
+            logger.info(f"TickFlow 批量获取完成: {success} 成功, {failed} 失败")
+            return results
+        except Exception as e:
+            logger.error(f"TickFlow 批量获取异常: {e}")
+            return {}
+
     def _fetch_kline_batch(self, stock_codes: list, days: int = 30, use_concurrent: bool = False, max_workers: int = 5) -> dict:
         """
         批量获取K线数据 - 所有股票获取相同天数的数据
@@ -92,69 +120,71 @@ class KlineFetcher:
         logger.info(f"顺序获取完成: {success_count} 只成功, {failed_count} 只失败")
         return results
     
-    def _fetch_kline_concurrent(self, stock_codes: list, days: int = 30, max_workers: int = 10) -> dict:
+    def _fetch_kline_concurrent(self, stock_codes: list, days: int = 30, max_workers: int = 3) -> dict:
         """
-        并发获取K线数据（多线程方式）
-        
+        并发获取K线数据（多线程方式）- 优化版：降低并发数
+
+        优化策略：
+        1. 降低并发数（从10降到3），减少服务器压力和WAF触发风险
+        2. 保持单只股票获取方式，避免批量请求被拦截
+
+        注意：单只股票返回空数据属于正常情况（如停牌），不做断路器处理。
+        批次级限流检测由调用方 kline_updater 负责。
+
         参数：
             stock_codes: 股票代码列表
             days: 获取最近多少天的数据
-            max_workers: 并发线程数
-        
+            max_workers: 并发线程数（默认3，降低并发）
+
         返回：
             dict: {stock_code: DataFrame, ...}
         """
-        # 简化日志：只在开始时输出
         logger.debug(f"并发获取K线数据: {len(stock_codes)} 只股票，并发线程数: {max_workers}...")
-        
+
         results = {}
         success_count = 0
         failed_count = 0
-        failed_reasons = {}  # 记录失败原因
+        failed_reasons = {}
         start_time = time.time()
         total_count = len(stock_codes)
-        
-        # 使用 ThreadPoolExecutor 并发获取
+
+        # 使用 ThreadPoolExecutor 并发获取（单只股票方式）
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
             future_to_code = {
-                executor.submit(self.stock_data_fetcher.fetch_stock_update, code, days): code 
+                executor.submit(self.stock_data_fetcher.fetch_stock_update, code, days): code
                 for code in stock_codes
             }
-            
+
             # 处理完成的任务
             for future in as_completed(future_to_code):
                 code = future_to_code[future]
                 try:
                     df_kline = future.result()
-                    
+
                     if df_kline is not None and len(df_kline) > 0:
                         results[code] = df_kline
                         success_count += 1
                     else:
                         failed_count += 1
                         failed_reasons[code] = "返回空数据"
-                
+
                 except Exception as e:
-                    # 改为warning级别，确保生产环境能看到失败原因
                     error_msg = str(e)[:100]
                     logger.warning(f"获取 {code} K线数据失败: {error_msg}")
                     failed_count += 1
                     failed_reasons[code] = error_msg
-        
+
         elapsed = time.time() - start_time
-        # 只在完成时输出一次汇总日志
-        logger.debug(f"并发获取完成: {success_count}/{total_count} 成功, {failed_count} 失败, 耗时 {elapsed:.1f}秒")
-        
+        logger.info(f"并发获取完成: {success_count}/{total_count} 成功, {failed_count} 失败, 耗时 {elapsed:.1f}秒")
+
         # 如果有失败，输出失败统计
         if failed_count > 0:
-            # 统计失败原因分布
             reason_counts = {}
             for reason in failed_reasons.values():
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
-            
             logger.warning(f"失败原因统计: {reason_counts}")
-        
+
         return results
     
     # ==================== 数据库操作 ====================

@@ -14,6 +14,31 @@ from datetime import datetime, timedelta
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# TickFlow 免费 API 配置
+TICKFLOW_FREE_API = "https://free-api.tickflow.org"
+TICKFLOW_BATCH_MAX = 2000  # 单次批量查询最大股票数
+
+# 股票代码格式转换缓存
+_CODE_TO_TF_CACHE: Dict[str, str] = {}
+
+
+def _code_to_tf_symbol(code: str) -> str:
+    """将6位纯数字代码转换为 TickFlow symbol 格式 (600000.SH / 000001.SZ)"""
+    if code in _CODE_TO_TF_CACHE:
+        return _CODE_TO_TF_CACHE[code]
+    if code.startswith(('6', '68', '8', '88')):
+        symbol = f"{code}.SH"
+    else:
+        symbol = f"{code}.SZ"
+    _CODE_TO_TF_CACHE[code] = symbol
+    return symbol
+
+
+def _tf_symbol_to_code(symbol: str) -> str:
+    """将 TickFlow symbol 转换回6位纯数字代码"""
+    return symbol.split('.')[0]
+
+
 # 备选A股股票列表（当网络获取失败时使用）
 DEFAULT_STOCK_LIST = {
     # 上证指数成分股（部分）
@@ -760,17 +785,29 @@ class StockDataFetcher:
     
     def fetch_stock_history(self, stock_code: str, years: int = 6) -> pd.DataFrame:
         """
-        抓取单只股票历史数据
-        前复权，按日期倒序排列
-        
+        抓取单只股票历史数据（前复权，按日期倒序排列）
+
+        数据源优先级: TickFlow 免费 API > 腾讯财经 > 模拟数据
+
         参数：
             stock_code: 股票代码
             years: 获取数据的年份数
-        
+
         返回：
             历史数据DataFrame
         """
-        # 方法1: 使用腾讯财经HTTP接口（最多1000天）
+        # 方法1: TickFlow 免费 API（批量端点，单只查询也支持）
+        try:
+            df = self._fetch_stock_history_tickflow(stock_code, years)
+            if df is not None and not df.empty:
+                logger.debug(f"TickFlow 获取 {len(df)} 条历史数据")
+                return df
+            else:
+                logger.debug(f"TickFlow 返回空数据，降级到腾讯财经...")
+        except Exception as e:
+            logger.debug(f"TickFlow 异常: {e}，降级到腾讯财经...")
+
+        # 方法2: 使用腾讯财经HTTP接口（最多1000天）
         try:
             df = self._fetch_stock_history_http(stock_code, years)
             if df is not None and not df.empty:
@@ -784,74 +821,103 @@ class StockDataFetcher:
         # 降级: 使用模拟数据
         return self._generate_mock_data(stock_code, years)
     
+    def _fetch_stock_update_tencent_light(self, stock_code: str, days: int) -> Optional[pd.DataFrame]:
+        """
+        【优化】轻量级腾讯财经获取 - 仅请求所需天数的数据，避免拉取全年数据触发限流
+
+        参数：
+            stock_code: 股票代码
+            days: 需要获取的天数
+
+        返回：
+            增量数据DataFrame（前复权），失败返回 None
+        """
+        # 判断市场前缀
+        if stock_code.startswith('6') or stock_code.startswith('88'):
+            market_code = 'sh' + stock_code
+        else:
+            market_code = 'sz' + stock_code
+
+        # 只获取需要天数 + 缓冲（多要 10 天防止缺失），最小 60 天保证 MA60 计算正确
+        max_days = max(days + 10, 60)
+
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={market_code},day,,,{max_days},qfq"
+
+        resp = requests.get(url, timeout=5, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://stock.finance.qq.com/'
+        })
+
+        data = resp.json()
+        data_level = data.get('data', {})
+
+        # 解析K线数据（与 _fetch_stock_history_http 逻辑一致）
+        klines = []
+        if isinstance(data_level, dict):
+            stock_data = data_level.get(market_code, {})
+            if isinstance(stock_data, dict):
+                klines = stock_data.get('qfqday', []) or stock_data.get('day', [])
+        elif isinstance(data_level, list) and len(data_level) > 0:
+            for item in data_level:
+                if isinstance(item, list) and len(item) >= 2 and item[0] == market_code:
+                    if isinstance(item[1], list):
+                        klines = item[1]
+                    break
+
+        if not klines:
+            return None
+
+        records = []
+        is_kcb = stock_code.startswith('688') or stock_code.startswith('689')
+        for item in klines:
+            if len(item) >= 6 and isinstance(item, list):
+                raw_vol = int(float(item[5]))
+                # 科创板成交量从"股"转换为"手"
+                volume = raw_vol // 100 if is_kcb else raw_vol
+                records.append({
+                    'date': str(item[0]),
+                    'open': float(item[1]),
+                    'close': float(item[2]),
+                    'high': float(item[3]),
+                    'low': float(item[4]),
+                    'volume': volume,
+                })
+
+        if records:
+            df = pd.DataFrame(records)
+            df['date'] = pd.to_datetime(df['date'])
+            # 过滤到所需天数
+            cutoff = datetime.now() - timedelta(days=days)
+            df = df[df['date'] >= cutoff]
+            df = df.sort_values('date', ascending=False)
+            return df if len(df) > 0 else None
+
+        return None
+
     def fetch_stock_update(self, stock_code: str, days: int = 10) -> Optional[pd.DataFrame]:
         """
-        抓取近期数据用于增量更新
-        优先使用腾讯财经数据源（支持前复权），失败时降级到 Tushare
+        抓取近期数据用于增量更新（单次请求，不做重试）
+
+        数据源策略：使用腾讯财经获取前复权数据。
+        Baostock 仅用于除权复权因子检查，不参与K线数据获取。
+        不做单只股票重试，由调用方 kline_updater 在批次层做限流控制和重试。
 
         参数：
             stock_code: 股票代码
             days: 获取最近多少天的数据
 
         返回：
-            增量数据DataFrame（前复权数据）
+            增量数据DataFrame（前复权数据），失败返回 None
         """
+        # 使用腾讯财经获取 K 线数据（前复权）
         try:
-            # 第一步：优先使用腾讯财经（支持前复权）
-            logger.debug(f"使用腾讯财经获取 {stock_code} 的更新数据（前复权）...")
-            try:
-                df = self._fetch_stock_history_http(stock_code, years=1)
-                if df is not None and not df.empty:
-                    df = df[df['date'] >= datetime.now() - timedelta(days=days)]
-                    if len(df) > 0:
-                        df = df.sort_values('date', ascending=False)
-                        logger.debug(f"腾讯财经获取 {len(df)} 条更新数据（前复权）")
-                        return df
-            except Exception as e:
-                logger.debug(f"腾讯财经获取失败: {e}")
-
-            # 第二步：降级到 Tushare（使用 pro.bar 获取前复权）
-            logger.debug(f"降级到 Tushare 获取 {stock_code} 的更新数据...")
-            try:
-                import tushare as ts
-                import json
-
-                tushare_config_path = 'config/tushare_config.json'
-                with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                    tushare_config = json.load(f)
-                token = tushare_config.get('token') or tushare_config.get('api_key')
-
-                if token:
-                    pro = ts.pro_api(token)
-                    ts_code = stock_code + '.SH' if stock_code.startswith('6') else stock_code + '.SZ'
-                    end_date = datetime.now().strftime('%Y%m%d')
-                    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
-
-                    # 使用 pro.bar 接口获取前复权数据
-                    # asset='E' 股票, freq='D' 日线, adj='qfq' 前复权
-                    df = pro.bar(
-                        ts_code=ts_code,
-                        start_date=start_date,
-                        end_date=end_date,
-                        asset='E',
-                        freq='D',
-                        adj='qfq'
-                    )
-
-                    if df is not None and len(df) > 0:
-                        df['date'] = pd.to_datetime(df['trade_date'])
-                        df = df.rename(columns={'vol': 'volume'})
-                        df = df.sort_values('date', ascending=False)
-                        logger.debug(f"Tushare 获取 {len(df)} 条更新数据（前复权）")
-                        return df
-            except Exception as e:
-                logger.debug(f"Tushare 获取失败: {e}")
-
-            return None
-
+            df = self._fetch_stock_update_tencent_light(stock_code, days)
+            if df is not None and not df.empty:
+                return df
         except Exception as e:
-            logger.error(f"获取更新数据失败: {e}")
-            return None
+            logger.debug(f"【增量更新】腾讯财经获取 {stock_code} 失败: {e}")
+
+        return None
 
     def get_stock_market_cap(self, max_retries=3) -> dict:
         """
@@ -1013,6 +1079,183 @@ class StockDataFetcher:
             'market_caps': market_caps
         }
 
+    # ==================== TickFlow 批量K线获取 ====================
+
+    def _fetch_stock_batch_tickflow(self, stock_codes: list, days: int) -> dict:
+        """
+        使用 TickFlow 免费 API 批量获取K线数据（前复权）
+
+        一次 HTTP 请求获取所有股票的K线，大幅减少网络开销。
+
+        参数：
+            stock_codes: 6位纯数字股票代码列表，如 ['600000', '000001']
+            days: 获取最近多少天的数据
+
+        返回：
+            {stock_code: DataFrame} 字典，DataFrame 包含 date/open/high/low/close/volume 列
+        """
+        if not stock_codes:
+            return {}
+
+        # 转换代码格式: 600000 -> 600000.SH, 000001 -> 000001.SZ
+        tf_symbols = [_code_to_tf_symbol(c) for c in stock_codes]
+        symbols_str = ",".join(tf_symbols)
+
+        # 确保有足够的缓冲天数
+        count = max(days + 10, 60)
+
+        url = f"{TICKFLOW_FREE_API}/v1/klines/batch"
+        params = {
+            "symbols": symbols_str,
+            "period": "1d",
+            "count": count,
+            "adjust": "forward",
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=60, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+            if resp.status_code != 200:
+                logger.warning(f"TickFlow batch 请求失败: HTTP {resp.status_code}")
+                return {}
+
+            data = resp.json()
+            raw_data = data.get("data", {}) if isinstance(data, dict) else {}
+
+            if not raw_data:
+                logger.warning("TickFlow batch 返回空数据")
+                return {}
+
+            # 解析每只股票的K线数据（数组格式 → DataFrame）
+            results = {}
+            empty_count = 0
+            for symbol, kline_obj in raw_data.items():
+                if not kline_obj or not kline_obj.get("close"):
+                    empty_count += 1
+                    continue
+
+                code = _tf_symbol_to_code(symbol)
+                df = self._tickflow_arrays_to_df(kline_obj, days)
+                if df is not None and len(df) > 0:
+                    results[code] = df
+
+            if empty_count > 0:
+                logger.debug(f"TickFlow batch: {len(results)}只有数据, {empty_count}只无数据")
+            return results
+
+        except requests.exceptions.Timeout:
+            logger.error("TickFlow batch 请求超时")
+            return {}
+        except Exception as e:
+            logger.error(f"TickFlow batch 请求异常: {e}")
+            return {}
+
+    def _tickflow_arrays_to_df(self, kline_obj: dict, days: int = None) -> Optional[pd.DataFrame]:
+        """
+        将 TickFlow 数组格式的K线数据转换为 DataFrame
+
+        TickFlow 返回格式（数组列）:
+        {"timestamp": [ms, ...], "open": [...], "high": [...], "low": [...],
+         "close": [...], "volume": [...]}
+
+        转换为行格式 DataFrame: date, open, high, low, close, volume
+
+        参数：
+            kline_obj: TickFlow 单只股票的K线数据对象
+            days: 需要保留的天数，None 表示保留全部
+
+        返回：
+            标准化 DataFrame（按日期倒序），失败返回 None
+        """
+        try:
+            timestamps = kline_obj.get("timestamp", [])
+            if not timestamps:
+                return None
+
+            # 将毫秒时间戳转为日期字符串
+            dates = []
+            for ts in timestamps:
+                try:
+                    dt = datetime.fromtimestamp(ts / 1000.0)
+                    dates.append(dt.strftime('%Y-%m-%d'))
+                except (ValueError, OSError):
+                    dates.append(str(ts))
+
+            records = {
+                'date': dates,
+                'open': [float(v) for v in kline_obj.get("open", [])],
+                'high': [float(v) for v in kline_obj.get("high", [])],
+                'low': [float(v) for v in kline_obj.get("low", [])],
+                'close': [float(v) for v in kline_obj.get("close", [])],
+                'volume': [int(float(v)) for v in kline_obj.get("volume", [])],
+            }
+
+            df = pd.DataFrame(records)
+            df['date'] = pd.to_datetime(df['date'])
+
+            # 按日期倒序排列
+            df = df.sort_values('date', ascending=False)
+
+            # 如果指定了天数，只保留最近N天
+            if days is not None and days > 0 and len(df) > days:
+                df = df.head(days)
+
+            return df if len(df) > 0 else None
+
+        except Exception as e:
+            logger.debug(f"TickFlow 数据转换失败: {e}")
+            return None
+
+    def _fetch_stock_history_tickflow(self, stock_code: str, years: int = 6) -> Optional[pd.DataFrame]:
+        """
+        使用 TickFlow 免费 API 获取单只股票完整历史数据（前复权）
+
+        用于除权后的历史数据重建。
+
+        参数：
+            stock_code: 6位纯数字股票代码
+            years: 获取数据的年份数
+
+        返回：
+            DataFrame（按日期倒序），失败返回 None
+        """
+        tf_symbol = _code_to_tf_symbol(stock_code)
+        # 估算交易日数：年 × 250
+        count = max(years * 250, 1500)
+
+        url = f"{TICKFLOW_FREE_API}/v1/klines/batch"
+        params = {
+            "symbols": tf_symbol,
+            "period": "1d",
+            "count": count,
+            "adjust": "forward",
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=30, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+            if resp.status_code != 200:
+                logger.warning(f"TickFlow history 请求失败: HTTP {resp.status_code}")
+                return None
+
+            data = resp.json()
+            raw_data = data.get("data", {}) if isinstance(data, dict) else {}
+            kline_obj = raw_data.get(tf_symbol)
+
+            if not kline_obj:
+                logger.warning(f"TickFlow history: {stock_code} 无数据")
+                return None
+
+            return self._tickflow_arrays_to_df(kline_obj)
+
+        except Exception as e:
+            logger.error(f"TickFlow history 请求异常 ({stock_code}): {e}")
+            return None
+
     def check_exdividend_by_factor(self, stock_codes: list, trade_date: str, start_date: str = None) -> dict:
         """
         通过复权因子检测是否发生除权
@@ -1030,11 +1273,62 @@ class StockDataFetcher:
             }
 
         说明：
-            - 调用 Tushare pro.adj_factor 接口获取复权因子
+            - 数据源优先级: Baostock > Tushare
+            - Baostock 复权因子更准确，且免费无需注册
             - 对比前后两日因子，变化则判定为除权
             - 如果提供start_date，则检测该时间段内所有日期的变化
-            - 支持批量查询（逗号分隔，最多50只）
+            - 自动分批查询，避免 API 限制
+            - 自动扩展 start_date：若 start_date >= trade_date，向前取前一交易日确保至少2天数据
         """
+        # 方法1: 优先使用 Baostock 获取复权因子
+        try:
+            logger.info("【除权检测】优先使用 Baostock 获取复权因子...")
+            
+            from utils.baostock_fetcher import fetch_adjust_factor_baostock
+            import pandas as pd
+            
+            all_factor_dfs = []
+            
+            for stock_code in stock_codes:
+                try:
+                    # 转换日期格式
+                    start_date_str = None
+                    end_date_str = None
+                    
+                    if start_date:
+                        start_date_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+                    if trade_date:
+                        end_date_str = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+                    
+                    df_factor = fetch_adjust_factor_baostock(stock_code, start_date_str, end_date_str)
+                    
+                    if df_factor is not None and not df_factor.empty:
+                        # 添加股票代码列
+                        df_factor['ts_code'] = f"{stock_code}.SH" if stock_code.startswith('6') or stock_code.startswith('88') else f"{stock_code}.SZ"
+                        # 转换日期格式为 YYYYMMDD
+                        df_factor['trade_date'] = df_factor['date'].dt.strftime('%Y%m%d')
+                        # 使用 foreAdjustFactor 作为前复权因子
+                        if 'foreAdjustFactor' in df_factor.columns:
+                            df_factor['adj_factor'] = df_factor['foreAdjustFactor']
+                        elif 'backAdjustFactor' in df_factor.columns:
+                            df_factor['adj_factor'] = df_factor['backAdjustFactor']
+                        else:
+                            continue
+                            
+                        all_factor_dfs.append(df_factor)
+                except Exception as e:
+                    logger.debug(f"【除权检测】Baostock 获取 {stock_code} 复权因子失败: {e}")
+                    continue
+            
+            if all_factor_dfs:
+                df = pd.concat(all_factor_dfs, ignore_index=True)
+                logger.info(f"【除权检测】Baostock 成功获取 {len(df)} 条复权因子记录")
+                return self._detect_exdividend_from_factor(df, stock_codes)
+                
+        except Exception as e:
+            logger.debug(f"【除权检测】Baostock 检测失败，降级到 Tushare: {e}")
+
+        # 方法2: 降级到 Tushare
         try:
             import tushare as ts
             import json
@@ -1067,16 +1361,44 @@ class StockDataFetcher:
                 else:
                     ts_codes.append(code + '.SZ')
 
-            # 批量获取指定时间段内的复权因子
-            ts_codes_str = ','.join(ts_codes)
-            df = pro.adj_factor(
-                ts_code=ts_codes_str,
-                start_date=query_start_date,
-                end_date=trade_date
-            )
+            # 检测需要至少2个交易日数据，如果 start_date == trade_date 则向前扩展一天
+            if query_start_date >= trade_date:
+                prev_day = self._get_previous_trading_date(trade_date)
+                if prev_day:
+                    query_start_date = prev_day
+                    logger.info(f"【除权检测】start_date 与 trade_date 相同，自动扩展至前一交易日: {query_start_date}")
 
-            if df is None or df.empty:
-                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '未获取到复权因子数据'}
+            # 分批获取复权因子（Tushare adj_factor 接口限制每批最多约500只）
+            BATCH_SIZE = 500
+            all_dfs = []
+            total_batches = (len(ts_codes) + BATCH_SIZE - 1) // BATCH_SIZE
+
+            logger.info(f"【除权检测】共 {len(ts_codes)} 只股票，分 {total_batches} 批查询复权因子...")
+            for batch_idx in range(0, len(ts_codes), BATCH_SIZE):
+                batch_codes = ts_codes[batch_idx:batch_idx + BATCH_SIZE]
+                batch_num = batch_idx // BATCH_SIZE + 1
+                ts_codes_str = ','.join(batch_codes)
+
+                try:
+                    logger.debug(f"【除权检测】第 {batch_num}/{total_batches} 批，查询 {len(batch_codes)} 只...")
+                    df_batch = pro.adj_factor(
+                        ts_code=ts_codes_str,
+                        start_date=query_start_date,
+                        end_date=trade_date
+                    )
+                    if df_batch is not None and not df_batch.empty:
+                        all_dfs.append(df_batch)
+                except Exception as batch_e:
+                    logger.warning(f"【除权检测】第 {batch_num}/{total_batches} 批查询失败: {batch_e}")
+                    continue
+
+            if not all_dfs:
+                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '所有批次均未获取到复权因子数据'}
+
+            # 合并所有批次结果
+            import pandas as pd
+            df = pd.concat(all_dfs, ignore_index=True)
+            logger.info(f"【除权检测】成功获取 {len(df)} 条复权因子记录")
 
             # 按股票分组，检测因子变化
             exdividend_stocks = []
@@ -1124,7 +1446,7 @@ class StockDataFetcher:
 
     def _get_previous_trading_date(self, trade_date: str) -> str:
         """
-        获取指定日期的前一个交易日
+        获取指定日期的前一个交易日（自动跳过周六周日）
 
         参数：
             trade_date: 交易日期 (格式：YYYYMMDD)
@@ -1135,7 +1457,10 @@ class StockDataFetcher:
         try:
             from datetime import datetime, timedelta
             dt = datetime.strptime(trade_date, '%Y%m%d')
+            # 向前回退，跳过周末（周六=5, 周日=6）
             prev_dt = dt - timedelta(days=1)
+            while prev_dt.weekday() >= 5:  # 周六或周日
+                prev_dt = prev_dt - timedelta(days=1)
             return prev_dt.strftime('%Y%m%d')
         except Exception as e:
             logger.debug(f"计算前一交易日失败: {e}")

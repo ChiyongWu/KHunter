@@ -53,7 +53,7 @@ class KlineUpdater:
             'percentage': 0
         }
 
-    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 500) -> Dict:
+    def update_kline_data(self, stock_codes: List[str], last_update_date: str, target_date: str, batch_size: int = 100) -> Dict:
         """
         增量更新K线数据
 
@@ -87,7 +87,7 @@ class KlineUpdater:
             logger.info("=" * 60)
             logger.info("K线数据更新任务启动")
             logger.info("=" * 60)
-            logger.info(f"数据源策略: 优先使用腾讯财经(前复权)，降级到Tushare(前复权)")
+            logger.info(f"数据源策略: TickFlow 免费 API (前复权批量)；Baostock仅用于复权因子检测")
             logger.info(f"待更新股票数量: {len(stock_codes)}")
             logger.info(f"上次更新日期: {last_update_date}")
             logger.info(f"目标更新日期: {target_date}")
@@ -112,8 +112,8 @@ class KlineUpdater:
             
             logger.info(f"需要获取 {days_to_fetch} 天的K线数据")
             
-            # 第2步：分批并发处理
-            logger.info(f"第2步: 分批并发处理 {len(stock_codes)} 只股票 (批次大小: {batch_size}, 并发数: 20)...")
+            # 第2步：分批批量处理（TickFlow API）
+            logger.info(f"第2步: TickFlow 批量处理 {len(stock_codes)} 只股票 (批次大小: {batch_size})...")
             self.progress['total'] = len(stock_codes)
             
             for batch_idx in range(0, len(stock_codes), batch_size):
@@ -126,21 +126,21 @@ class KlineUpdater:
                 self.progress['current'] = min(batch_idx + batch_size, len(stock_codes))
                 self.progress['percentage'] = int((self.progress['current'] / self.progress['total']) * 100)
                 
-                logger.info(f"批次 {batch_num}/{total_batches}: 处理 {len(batch_codes)} 只股票 [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
+                logger.info(f"批次 {batch_num}/{total_batches}: TickFlow 处理 {len(batch_codes)} 只股票 [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
                 
-                # 获取并保存该批数据（使用并发）
                 try:
                     batch_start_time = time.time()
                     batch_result = self._fetch_and_save_batch_concurrent(batch_codes, days_to_fetch)
                     batch_elapsed = time.time() - batch_start_time
-                    
+
                     self.stats['added'] += batch_result['added']
                     self.stats['updated'] += batch_result['updated']
                     self.stats['failed'] += batch_result['failed']
-                    
+
                     logger.info(f"批次 {batch_num} 完成: 新增 {batch_result['added']} 条, 失败 {batch_result['failed']} 只, 耗时 {batch_elapsed:.1f}秒")
+
                 except Exception as e:
-                    logger.warning(f"批次 {batch_num} 处理失败: {str(e)}")
+                    logger.warning(f"批次 {batch_num} TickFlow 处理失败: {str(e)}")
                     self.stats['failed'] += len(batch_codes)
             
             # 第3步：检测除权并重建历史数据
@@ -228,35 +228,30 @@ class KlineUpdater:
     
     def _fetch_and_save_batch_concurrent(self, batch_codes: List[str], days: int) -> Dict:
         """
-        【优化版】使用并发获取一批股票的K线数据并批量保存
-        
-        优化点：
-        1. 使用线程池并发获取数据（20个并发线程）
-        2. 批量提交数据库事务（减少事务开销）
-        3. 失败重试不阻塞其他股票
-        
+        【TickFlow 版】使用 TickFlow 批量 API 一次获取一批股票的K线数据并批量保存
+
+        替代旧版多线程逐只获取方式，大幅提升性能。
+
         参数：
             batch_codes: 股票代码列表
             days: 获取最近多少天的数据
-        
+
         返回：
             {'added': int, 'updated': int, 'failed': int}
         """
         added = 0
         updated = 0
         failed = 0
-        
+
         try:
-            # 使用 KlineFetcher 的并发方法批量获取数据
-            logger.debug(f"并发获取 {len(batch_codes)} 只股票的K线数据 (max_workers=10)...")
-            kline_data = self.kline_fetcher._fetch_kline_batch(
+            # 使用 TickFlow 批量 API 一次获取所有股票K线
+            logger.debug(f"TickFlow 批量获取 {len(batch_codes)} 只股票K线 (前复权, {days}天)...")
+            kline_data = self.kline_fetcher._fetch_kline_tickflow_batch(
                 batch_codes,
-                days=days,
-                use_concurrent=True,  # 启用并发
-                max_workers=10        # 降低并发数避免API限流
+                days=days
             )
-            
-            # 批量保存到数据库（整个批次一次性提交事务）
+
+            # 批量保存到数据库
             if kline_data:
                 logger.debug(f"批量保存 {len(kline_data)} 只股票的K线数据...")
                 with self.db_manager.transaction():
@@ -273,22 +268,22 @@ class KlineUpdater:
                                 failed += 1
                         else:
                             failed += 1
-                
+
                 # 统计获取失败的股票
                 failed += len(batch_codes) - len(kline_data)
             else:
                 # 全部获取失败
                 failed = len(batch_codes)
-                logger.warning(f"批次 {len(batch_codes)} 只股票全部获取失败")
-            
+                logger.warning(f"批次 {len(batch_codes)} 只股票 TickFlow 全部获取失败")
+
             return {
                 'added': added,
                 'updated': updated,
                 'failed': failed
             }
-        
+
         except Exception as e:
-            logger.error(f"并发批次处理失败: {str(e)}")
+            logger.error(f"TickFlow 批次处理失败: {str(e)}")
             return {
                 'added': added,
                 'updated': updated,
@@ -517,11 +512,11 @@ class KlineUpdater:
 
     def _rebuild_stock_history(self, stock_code: str, years: int = 6) -> bool:
         """
-        重建单只股票完整历史数据
+        重建单只股票完整历史数据（使用 TickFlow 免费 API）
 
         流程：
         1. 删除该股票现有历史数据
-        2. 重新获取多年历史数据（腾讯财经前复权）
+        2. 通过 TickFlow 重新获取多年历史数据（前复权）
         3. 保存新数据到数据库
 
         参数：
@@ -540,11 +535,11 @@ class KlineUpdater:
             conn.close()
             logger.info(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
 
-            logger.info(f"【历史重建】{stock_code} 重新获取 {years} 年历史数据...")
-            df_history = self.stock_data_fetcher.fetch_stock_history(stock_code, years=years)
+            logger.info(f"【历史重建】{stock_code} 通过 TickFlow 重新获取 {years} 年历史数据...")
+            df_history = self.stock_data_fetcher._fetch_stock_history_tickflow(stock_code, years=years)
 
             if df_history is None or df_history.empty:
-                logger.info(f"【历史重建】{stock_code} 获取历史数据失败")
+                logger.info(f"【历史重建】{stock_code} TickFlow 获取历史数据失败")
                 return False
 
             added, updated = self._save_kline_records_batch(stock_code, df_history)
