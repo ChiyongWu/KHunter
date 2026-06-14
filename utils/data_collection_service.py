@@ -879,7 +879,7 @@ class DataCollectionService:
                 )
                 
                 # 执行新股票检测和初始化
-                new_stock_result = detector.detect_and_init_new_stocks(years=1, days=30)
+                new_stock_result = detector.detect_and_init_new_stocks(years=3, days=30)
                 
                 # 更新统计信息
                 with self.update_lock:

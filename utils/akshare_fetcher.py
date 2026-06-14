@@ -269,7 +269,7 @@ class AKShareFetcher:
         """初始化基础数据"""
         self.data_initializer._init_basic_data(stock_codes, stock_dict)
     
-    def _init_kline_history_data(self, stock_codes: list, years: int = 1) -> None:
+    def _init_kline_history_data(self, stock_codes: list, years: int = 3) -> None:
         """初始化K线历史数据"""
         self.data_initializer._init_kline_history_data(stock_codes, years)
     
@@ -293,11 +293,11 @@ class AKShareFetcher:
         """初始化事件数据"""
         return self.data_initializer._init_event_data(stock_codes)
     
-    def init_full_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 1) -> None:
+    def init_full_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> None:
         """全量初始化所有数据"""
         self.data_initializer.init_full_data(max_stocks, skip_failed, years)
     
-    def init_incremental_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 1) -> Dict[str, int]:
+    def init_incremental_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> Dict[str, int]:
         """增量初始化数据"""
         return self.data_initializer.init_incremental_data(max_stocks, skip_failed, years)
     

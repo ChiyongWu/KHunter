@@ -104,7 +104,7 @@ class DataInitializer:
     
     # ==================== K线数据初始化 ====================
     
-    def _init_kline_history_data(self, stock_codes: list, years: int = 1) -> None:
+    def _init_kline_history_data(self, stock_codes: list, years: int = 3) -> None:
         """
         初始化K线历史数据（批量 TickFlow + 腾讯财经降级）
 
@@ -113,7 +113,7 @@ class DataInitializer:
 
         参数：
             stock_codes: 股票代码列表
-            years: 获取数据的年份数（默认 1 年）
+            years: 获取数据的年份数（默认 3 年）
         """
         import time as time_module
         # batch_size: 每批处理的股票数，与日常更新对齐
@@ -229,8 +229,8 @@ class DataInitializer:
             stock_codes: 股票代码列表
         """
         logger.info("开始初始化历史行情数据...")
-        # 调用 _init_kline_history_data 实现
-        self._init_kline_history_data(stock_codes, years=1)
+        # 调用 _init_kline_history_data 实现（默认 3 年）
+        self._init_kline_history_data(stock_codes, years=3)
     
     # ==================== 行业和板块数据初始化 ====================
     
@@ -302,14 +302,14 @@ class DataInitializer:
     
     # ==================== 全量和增量初始化 ====================
     
-    def init_full_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 1) -> None:
+    def init_full_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> None:
         """
         全量初始化所有数据
-        
+
         参数：
             max_stocks: 最多初始化多少只股票（None 表示全部）
             skip_failed: 是否跳过失败的股票继续处理
-            years: 获取K线数据的年份数
+            years: 获取K线数据的年份数（默认 3 年）
         """
         logger.info("开始全量初始化数据...")
         
@@ -347,14 +347,14 @@ class DataInitializer:
         except Exception as e:
             logger.error(f"全量初始化失败: {e}")
     
-    def init_incremental_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 1) -> Dict[str, int]:
+    def init_incremental_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> Dict[str, int]:
         """
         增量初始化数据（仅初始化新增股票）
-        
+
         参数：
             max_stocks: 最多初始化多少只新股票（None 表示全部）
             skip_failed: 是否跳过失败的股票继续处理
-            years: 获取K线数据的年份数
+            years: 获取K线数据的年份数（默认 3 年）
         
         返回：
             初始化统计信息字典

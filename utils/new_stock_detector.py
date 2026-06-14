@@ -69,7 +69,7 @@ class NewStockDetector:
             'logs': []
         }
     
-    def detect_and_init_new_stocks(self, years: int = 1, days: int = 30) -> Dict:
+    def detect_and_init_new_stocks(self, years: int = 3, days: int = 30) -> Dict:
         """
         检测新股票并进行增量初始化
         
