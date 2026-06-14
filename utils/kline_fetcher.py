@@ -28,7 +28,7 @@ class KlineFetcher:
     
     # ==================== K线批量获取 ====================
 
-    def _fetch_kline_tickflow_batch(self, stock_codes: list, days: int = 30) -> dict:
+    def _fetch_kline_tickflow_batch(self, stock_codes: list, days: int = 30) -> tuple:
         """
         使用 TickFlow 免费 API 批量获取K线数据（前复权）
 
@@ -39,22 +39,27 @@ class KlineFetcher:
             days: 获取最近多少天的数据
 
         返回：
-            {stock_code: DataFrame, ...}
+            (results: dict, api_ok: bool)
+            - results: {stock_code: DataFrame, ...}
+            - api_ok: True=API调用成功；False=API失败需降级
         """
         if not stock_codes:
-            return {}
+            return ({}, True)
 
         logger.debug(f"TickFlow 批量获取K线: {len(stock_codes)} 只股票, {days} 天数据")
 
         try:
-            results = self.stock_data_fetcher._fetch_stock_batch_tickflow(stock_codes, days)
+            results, api_ok = self.stock_data_fetcher._fetch_stock_batch_tickflow(stock_codes, days)
             success = len(results)
             failed = len(stock_codes) - success
-            logger.info(f"TickFlow 批量获取完成: {success} 成功, {failed} 失败")
-            return results
+            if api_ok:
+                logger.info(f"TickFlow 批量获取完成: {success} 成功, {failed} 无数据（正常）")
+            else:
+                logger.warning(f"TickFlow 批量获取API失败: {success} 成功, 整批需降级")
+            return (results, api_ok)
         except Exception as e:
             logger.error(f"TickFlow 批量获取异常: {e}")
-            return {}
+            return ({}, False)
 
     def _fetch_kline_batch(self, stock_codes: list, days: int = 30, use_concurrent: bool = False, max_workers: int = 5) -> dict:
         """

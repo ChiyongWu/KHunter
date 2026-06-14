@@ -135,24 +135,28 @@ class DataInitializer:
                 batch_num = batch_idx // batch_size + 1
 
                 # 步骤1: 使用 TickFlow 批量 API 获取当前批次所有股票K线
-                kline_dict = self.stock_data_fetcher._fetch_stock_batch_tickflow(
+                kline_dict, api_ok = self.stock_data_fetcher._fetch_stock_batch_tickflow(
                     batch_codes, days=days
                 )
                 tickflow_hit = len(kline_dict)
-                logger.debug(f"批次{batch_num}: TickFlow 命中 {tickflow_hit}/{len(batch_codes)} 只")
+                if api_ok:
+                    logger.debug(f"批次{batch_num}: TickFlow 命中 {tickflow_hit}/{len(batch_codes)} 只（无数据为正常，不需降级）")
+                else:
+                    logger.warning(f"批次{batch_num}: TickFlow API 失败，命中 {tickflow_hit}/{len(batch_codes)} 只，将降级")
 
-                # 步骤2: TickFlow 未覆盖的股票，降级到腾讯财经逐只获取
-                missing_codes = [c for c in batch_codes if c not in kline_dict]
-                if missing_codes:
-                    for code in missing_codes:
-                        try:
-                            # 腾讯财经返回「前复权」日K线，单位已统一为「手」
-                            df = self.stock_data_fetcher._fetch_stock_history_http(code, years)
-                            if df is not None and len(df) > 0:
-                                kline_dict[code] = df
-                        except Exception as e:
-                            logger.debug(f"腾讯财经降级获取 {code} 失败: {e}")
-                    logger.debug(f"批次{batch_num}: 腾讯财经补充 {len([c for c in missing_codes if c in kline_dict])}/{len(missing_codes)} 只")
+                # 步骤2: 仅 TickFlow API 失败时才降级到腾讯财经
+                if not api_ok:
+                    missing_codes = [c for c in batch_codes if c not in kline_dict]
+                    if missing_codes:
+                        for code in missing_codes:
+                            try:
+                                # 腾讯财经返回「前复权」日K线，单位已统一为「手」
+                                df = self.stock_data_fetcher._fetch_stock_history_http(code, years)
+                                if df is not None and len(df) > 0:
+                                    kline_dict[code] = df
+                            except Exception as e:
+                                logger.debug(f"腾讯财经降级获取 {code} 失败: {e}")
+                        logger.info(f"批次{batch_num}: 腾讯财经降级补充 {len([c for c in missing_codes if c in kline_dict])}/{len(missing_codes)} 只")
 
                 # 步骤3: 批量写入数据库（executemany 高效模式）
                 batch_inserted = 0

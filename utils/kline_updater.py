@@ -230,7 +230,8 @@ class KlineUpdater:
         """
         【TickFlow 版】使用 TickFlow 批量 API 一次获取一批股票的K线数据并批量保存
 
-        替代旧版多线程逐只获取方式，大幅提升性能。
+        TickFlow API 成功但个别股票无数据 → 正常（不降级），仅标记为 failed
+        TickFlow API 失败（限流/网络）→ 降级到腾讯财经逐只获取
 
         参数：
             batch_codes: 股票代码列表
@@ -246,10 +247,24 @@ class KlineUpdater:
         try:
             # 使用 TickFlow 批量 API 一次获取所有股票K线
             logger.debug(f"TickFlow 批量获取 {len(batch_codes)} 只股票K线 (前复权, {days}天)...")
-            kline_data = self.kline_fetcher._fetch_kline_tickflow_batch(
+            kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
                 batch_codes,
                 days=days
             )
+
+            # TickFlow API 失败时，降级到腾讯财经逐只获取
+            if not api_ok:
+                logger.warning(f"TickFlow API 失败，降级到腾讯财经逐只获取 {len(batch_codes)} 只...")
+                for code in batch_codes:
+                    if code in kline_data:
+                        continue  # 已有数据则跳过
+                    try:
+                        df = self.stock_data_fetcher.fetch_stock_update(code, days=days)
+                        if df is not None and len(df) > 0:
+                            kline_data[code] = df
+                    except Exception as e:
+                        logger.debug(f"腾讯财经降级获取 {code} 失败: {e}")
+                logger.info(f"腾讯财经降级补充: {len(kline_data)}/{len(batch_codes)} 只有数据")
 
             # 批量保存到数据库
             if kline_data:
@@ -269,12 +284,13 @@ class KlineUpdater:
                         else:
                             failed += 1
 
-                # 统计获取失败的股票
-                failed += len(batch_codes) - len(kline_data)
+                # 统计最终无数据的股票（TickFlow无数据 + 降级也无数据）
+                final_missing = len([c for c in batch_codes if c not in kline_data])
+                failed += final_missing
             else:
                 # 全部获取失败
                 failed = len(batch_codes)
-                logger.warning(f"批次 {len(batch_codes)} 只股票 TickFlow 全部获取失败")
+                logger.warning(f"批次 {len(batch_codes)} 只股票全部获取失败")
 
             return {
                 'added': added,

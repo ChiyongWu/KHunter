@@ -910,7 +910,7 @@ class StockDataFetcher:
         """
         # 使用 TickFlow 批量接口获取 K 线数据（前复权）
         try:
-            results = self._fetch_stock_batch_tickflow([stock_code], days)
+            results, api_ok = self._fetch_stock_batch_tickflow([stock_code], days)
             if stock_code in results:
                 return results[stock_code]
         except Exception as e:
@@ -1080,7 +1080,7 @@ class StockDataFetcher:
 
     # ==================== TickFlow 批量K线获取 ====================
 
-    def _fetch_stock_batch_tickflow(self, stock_codes: list, days: int) -> dict:
+    def _fetch_stock_batch_tickflow(self, stock_codes: list, days: int) -> tuple:
         """
         使用 TickFlow 免费 API 批量获取K线数据（前复权）
 
@@ -1091,10 +1091,13 @@ class StockDataFetcher:
             days: 获取最近多少天的数据
 
         返回：
-            {stock_code: DataFrame} 字典，DataFrame 包含 date/open/high/low/close/volume 列
+            (results: dict, api_ok: bool)
+            - results: {stock_code: DataFrame} 字典，仅包含有数据的股票
+            - api_ok: True=API调用成功，个别股票无数据属于正常情况无需降级；
+                      False=API调用失败（限流/网络/超时），整批需要降级到腾讯财经
         """
         if not stock_codes:
-            return {}
+            return ({}, True)
 
         # 转换代码格式: 600000 -> 600000.SH, 000001 -> 000001.SZ
         tf_symbols = [_code_to_tf_symbol(c) for c in stock_codes]
@@ -1116,16 +1119,22 @@ class StockDataFetcher:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
 
+            # API 调用失败（限流/服务器错误等），整批需要降级
             if resp.status_code != 200:
-                logger.warning(f"TickFlow batch 请求失败: HTTP {resp.status_code}")
-                return {}
+                logger.warning(f"TickFlow batch API失败 HTTP {resp.status_code}，整批需降级")
+                return ({}, False)
+            # 429 限流也归为 API 失败
+            if resp.status_code == 429:
+                logger.warning("TickFlow batch 触发限流(429)，整批需降级")
+                return ({}, False)
 
             data = resp.json()
             raw_data = data.get("data", {}) if isinstance(data, dict) else {}
 
+            # API 返回成功但 data 为空，视为 API 异常需降级
             if not raw_data:
-                logger.warning("TickFlow batch 返回空数据")
-                return {}
+                logger.warning("TickFlow batch 返回空data，整批需降级")
+                return ({}, False)
 
             # 解析每只股票的K线数据（数组格式 → DataFrame）
             results = {}
@@ -1142,15 +1151,19 @@ class StockDataFetcher:
                     results[code] = df
 
             if empty_count > 0:
-                logger.debug(f"TickFlow batch: {len(results)}只有数据, {empty_count}只无数据")
-            return results
+                logger.debug(f"TickFlow batch: {len(results)}只有数据, {empty_count}只无数据（正常，不需降级）")
+            # API 成功，返回 (有数据的股票, api_ok=True)
+            return (results, True)
 
         except requests.exceptions.Timeout:
-            logger.error("TickFlow batch 请求超时")
-            return {}
+            logger.error("TickFlow batch 请求超时，整批需降级")
+            return ({}, False)
+        except requests.exceptions.ConnectionError:
+            logger.error("TickFlow batch 连接失败，整批需降级")
+            return ({}, False)
         except Exception as e:
-            logger.error(f"TickFlow batch 请求异常: {e}")
-            return {}
+            logger.error(f"TickFlow batch 请求异常: {e}，整批需降级")
+            return ({}, False)
 
     def _tickflow_arrays_to_df(self, kline_obj: dict, days: int = None) -> Optional[pd.DataFrame]:
         """
