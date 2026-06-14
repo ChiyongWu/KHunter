@@ -106,66 +106,114 @@ class DataInitializer:
     
     def _init_kline_history_data(self, stock_codes: list, years: int = 1) -> None:
         """
-        初始化K线历史数据
-        获取新增股票的历史K线数据
-        
+        初始化K线历史数据（批量 TickFlow + 腾讯财经降级）
+
+        与日常更新保持一致：优先使用 TickFlow 批量 API 一次获取多只股票，
+        对 TickFlow 无数据的股票降级到腾讯财经。每批 100 只，executemany 入库。
+
         参数：
             stock_codes: 股票代码列表
             years: 获取数据的年份数（默认 1 年）
         """
-        logger.info(f"开始初始化K线历史数据: {len(stock_codes)} 只股票...")
+        import time as time_module
+        # batch_size: 每批处理的股票数，与日常更新对齐
+        batch_size = 100
+        # days: 将年份转换为交易日数，与 TickFlow batch API 参数对齐
+        days = years * 250
+        total = len(stock_codes)
         success_count = 0
         failed_count = 0
-        
+        total_inserted = 0
+
+        logger.info(f"开始初始化K线历史数据: {total} 只股票, years={years}, batch_size={batch_size}")
+
         try:
-            total = len(stock_codes)
-            
-            for idx, code in enumerate(stock_codes, 1):
-                try:
-                    # 获取K线历史数据
-                    df_kline = self.stock_data_fetcher.fetch_stock_history(code, years=years)
-                    
-                    if df_kline is not None and len(df_kline) > 0:
-                        # 保存到数据库
-                        with self.db_manager.transaction():
-                            for _, row in df_kline.iterrows():
-                                try:
-                                    # 将日期转换为字符串格式
-                                    date_str = str(row['date']).split(' ')[0] if hasattr(row['date'], '__str__') else str(row['date'])
-                                    
-                                    # 插入K线数据
-                                    insert_sql = """
-                                    INSERT OR REPLACE INTO stock_kline 
-                                    (code, date, open, high, low, close, volume)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    """
-                                    self.db_manager.execute_with_retry(insert_sql, (
-                                        code,
-                                        date_str,
-                                        float(row['open']),
-                                        float(row['high']),
-                                        float(row['low']),
-                                        float(row['close']),
-                                        int(row['volume'])
-                                    ))
-                                except Exception as e:
-                                    logger.debug(f"保存 {code} K线数据失败: {e}")
-                        
-                        success_count += 1
-                    else:
-                        failed_count += 1
-                        logger.debug(f"获取 {code} K线数据失败或无数据")
-                    
-                    # 定期输出进度（每100只股票输出一次）
-                    if idx % 100 == 0:
-                        logger.info(f"K线历史数据采集进度: {idx}/{total}, 成功: {success_count}")
-                
-                except Exception as e:
-                    failed_count += 1
-                    logger.debug(f"初始化 {code} K线历史数据失败: {e}")
-            
-            logger.info(f"K线历史数据初始化完成: 成功 {success_count} 只, 失败 {failed_count} 只")
-        
+            # 分批处理
+            for batch_idx in range(0, total, batch_size):
+                # 当前批次的股票代码列表
+                batch_codes = stock_codes[batch_idx:batch_idx + batch_size]
+                batch_num = batch_idx // batch_size + 1
+
+                # 步骤1: 使用 TickFlow 批量 API 获取当前批次所有股票K线
+                kline_dict = self.stock_data_fetcher._fetch_stock_batch_tickflow(
+                    batch_codes, days=days
+                )
+                tickflow_hit = len(kline_dict)
+                logger.debug(f"批次{batch_num}: TickFlow 命中 {tickflow_hit}/{len(batch_codes)} 只")
+
+                # 步骤2: TickFlow 未覆盖的股票，降级到腾讯财经逐只获取
+                missing_codes = [c for c in batch_codes if c not in kline_dict]
+                if missing_codes:
+                    for code in missing_codes:
+                        try:
+                            # 腾讯财经返回「前复权」日K线，单位已统一为「手」
+                            df = self.stock_data_fetcher._fetch_stock_history_http(code, years)
+                            if df is not None and len(df) > 0:
+                                kline_dict[code] = df
+                        except Exception as e:
+                            logger.debug(f"腾讯财经降级获取 {code} 失败: {e}")
+                    logger.debug(f"批次{batch_num}: 腾讯财经补充 {len([c for c in missing_codes if c in kline_dict])}/{len(missing_codes)} 只")
+
+                # 步骤3: 批量写入数据库（executemany 高效模式）
+                batch_inserted = 0
+                with self.db_manager.transaction():
+                    # 在事务中获取连接，与 kline_updater 保持一致
+                    conn = self.db_manager.connect()
+                    cursor = conn.cursor()
+                    insert_sql = """
+                    INSERT OR REPLACE INTO stock_kline
+                    (code, date, open, high, low, close, volume)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """
+                    for code, df_kline in kline_dict.items():
+                        try:
+                            if df_kline is None or len(df_kline) == 0:
+                                continue
+
+                            # 准备数据：向量化处理比 iterrows 快 10-100 倍
+                            dates = df_kline['date'].astype(str).str.split(' ').str[0]
+                            volumes = df_kline['volume'].fillna(0).astype(int)
+                            opens = df_kline['open'].astype(float)
+                            highs = df_kline['high'].astype(float)
+                            lows = df_kline['low'].astype(float)
+                            closes = df_kline['close'].astype(float)
+
+                            # 构建记录列表
+                            records = list(zip(
+                                [code] * len(df_kline), dates, opens, highs, lows, closes, volumes
+                            ))
+
+                            # executemany 批量插入
+                            cursor.executemany(insert_sql, records)
+                            batch_inserted += len(records)
+                            success_count += 1
+
+                        except Exception as e:
+                            failed_count += 1
+                            logger.debug(f"批量保存 {code} K线失败: {e}")
+
+                # 步骤4: 统计批次中本批无数据的股票数（不在 kline_dict 即为最终失败）
+                batch_failed_count = len([c for c in batch_codes if c not in kline_dict])
+                failed_count += batch_failed_count
+
+                total_inserted += batch_inserted
+
+                # 每批次输出进度
+                progress_pct = (batch_idx + len(batch_codes)) / total * 100
+                logger.info(
+                    f"K线初始化进度: {min(batch_idx + len(batch_codes), total)}/{total} "
+                    f"({progress_pct:.1f}%) | 成功: {success_count} | "
+                    f"本批插入: {batch_inserted} 条 | 累计插入: {total_inserted} 条"
+                )
+
+                # 批次间短暂休眠，避免 API 限流
+                time_module.sleep(0.5)
+
+            logger.info(
+                f"K线历史数据初始化完成: 成功 {success_count} 只, "
+                f"失败 {total - success_count} 只, 总记录 {total_inserted} 条"
+            )
+
         except Exception as e:
             logger.error(f"初始化K线历史数据失败: {e}")
     
