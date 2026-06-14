@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS stock_kline (
     close REAL,
     -- close: 收盘价，类型REAL，可选，例如10.55
     volume INTEGER,
-    -- volume: 成交量，类型INTEGER，可选，例如1000000
+    -- volume: 成交量，类型INTEGER，可选，单位「手」，全市场（含688科创板）统一口径，例如1000000手
     market_cap REAL,
     -- market_cap: 市值，类型REAL，可选，单位亿元，例如100.5
     K REAL,

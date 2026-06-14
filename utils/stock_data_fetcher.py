@@ -1137,9 +1137,7 @@ class StockDataFetcher:
 
                 code = _tf_symbol_to_code(symbol)
                 df = self._tickflow_arrays_to_df(kline_obj, days)
-                # TickFlow 返回 volume 单位是「手」，科创板(688)在DB中约定存「股」，需×100
-                if code.startswith('688') and df is not None and len(df) > 0 and 'volume' in df.columns:
-                    df['volume'] = df['volume'] * 100
+                # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
                 if df is not None and len(df) > 0:
                     results[code] = df
 
@@ -1253,9 +1251,7 @@ class StockDataFetcher:
                 return None
 
             df = self._tickflow_arrays_to_df(kline_obj)
-            # TickFlow 返回 volume 单位是「手」，科创板(688)在DB中约定存「股」，需×100
-            if stock_code.startswith('688') and df is not None and len(df) > 0 and 'volume' in df.columns:
-                df['volume'] = df['volume'] * 100
+            # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
             return df
 
         except Exception as e:
