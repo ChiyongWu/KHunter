@@ -1656,23 +1656,31 @@ class StrategyRunner:
             import csv
             from pathlib import Path
             
-            # 根据PTrade集成规范，文件名格式为 KHunter_signals_YYYYMMDD.csv
-            signals_path = Path(signals_file)
-            date_str = signals_path.stem.replace('signals_', '')
-            pt_csv_file = signals_path.parent / f"KHunter_signals_{date_str}.csv"
+            # PTrade集成：信号CSV固定文件名，保存到 data/running/to_ptrade/
+            # 每天只保留一份最新的 KHunter_signals.csv，避免重复上传
+            ptrade_dir = self.running_dir / "to_ptrade"
+            ptrade_dir.mkdir(parents=True, exist_ok=True)
+            pt_csv_file = ptrade_dir / "KHunter_signals.csv"
             
             # PTrade批量埋单CSV列定义
-            # 字段规范：symbol, side, order_volume, order_price, price_type, strategy_name, signal_id
+            # 字段规范：signal_date, symbol, side, order_volume, order_price, price_type, strategy_name, signal_id
+            # signal_date 用于PTrade端校验信号是否属于当日，避免处理过期信号
             csv_columns = [
-                'symbol', 'side', 'order_volume', 'order_price', 
+                'signal_date', 'symbol', 'side', 'order_volume', 'order_price', 
                 'price_type', 'strategy_name', 'signal_id'
             ]
             
+            # 从信号文件名中提取日期，格式 YYYYMMDD
+            # 文件名格式: signals_YYYY-MM-DD.json
+            import re
+            date_match = re.search(r'signals_(\d{4}-\d{2}-\d{2})', signals_file)
+            signal_date = date_match.group(1).replace('-', '') if date_match else datetime.datetime.now().strftime('%Y%m%d')
+
             # 处理信号数据
             csv_data = []
             for signal in signals:
                 stock_code = signal.get('stock_code', '')
-                # 确保股票代码带市场后缀（SH/SZ）
+                # 确保股票代码带市场后缀（SS/SZ，PTrade 格式）
                 symbol = self._format_stock_code(stock_code)
                 
                 # 转换交易类型：buy/sell
@@ -1705,6 +1713,7 @@ class StrategyRunner:
                     order_price = signal_price
                 
                 csv_row = {
+                    'signal_date': signal_date,
                     'symbol': symbol,
                     'side': side,
                     'order_volume': signal.get('quantity', 0),
@@ -1714,6 +1723,9 @@ class StrategyRunner:
                     'signal_id': signal.get('id', signal.get('signal_id', ''))
                 }
                 csv_data.append(csv_row)
+            
+            # 卖出信号排在买入信号前面：卖出释放资金后再买入
+            csv_data.sort(key=lambda r: (0 if r['side'] == 'sell' else 1))
             
             # 写入CSV文件（UTF-8编码，兼容PTrade批量埋单）
             with open(pt_csv_file, 'w', encoding='utf-8', newline='') as f:
@@ -1727,13 +1739,13 @@ class StrategyRunner:
             logger.error(f"保存信号文件失败: {str(e)}")
     
     def _format_stock_code(self, stock_code: str) -> str:
-        """格式化股票代码，确保带市场后缀
+        """格式化股票代码，确保带市场后缀（PTrade 格式 .SS / .SZ）
         
         Args:
             stock_code: 股票代码
             
         Returns:
-            带市场后缀的股票代码，如 000001.SZ, 600519.SH
+            带市场后缀的股票代码，如 000001.SZ, 600519.SS
         """
         if not stock_code:
             return ''
@@ -1743,15 +1755,15 @@ class StrategyRunner:
             return stock_code
         
         # 根据股票代码判断市场
-        # 60开头 -> 上海, 00开头 -> 深圳, 30开头 -> 创业板, 68开头 -> 科创板
+        # 60开头 -> 上海(.SS), 00开头 -> 深圳, 30开头 -> 创业板, 68开头 -> 科创板(.SS)
         if stock_code.startswith('6'):
-            return f"{stock_code}.SH"
+            return f"{stock_code}.SS"
         elif stock_code.startswith('0') or stock_code.startswith('2'):
             return f"{stock_code}.SZ"
         elif stock_code.startswith('3'):
             return f"{stock_code}.SZ"
         elif stock_code.startswith('8'):
-            return f"{stock_code}.SH"
+            return f"{stock_code}.SS"
         
         return stock_code
     
@@ -2382,9 +2394,11 @@ class StrategyRunner:
                 else:
                     return {"success": False, "error": f"未持有股票: {stock_code}"}
             
-            # 保存更新后的信号和持仓（使用信号日期而非当前工作日期，与execute_pending_signals保持一致）
+            # 保存更新后的信号和持仓
+            # 信号文件使用信号日期，持仓文件使用今日日期（确保前端能正确读取）
             signals_file = self.running_dir / f"signals_{portfolio_date}.json"
-            portfolio_file = self.running_dir / f"portfolio_{portfolio_date}.json"
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+            portfolio_file = self.running_dir / f"portfolio_{today_str}.json"
             self._save_signals(self.signals, str(signals_file))
             self._save_portfolio(self.portfolio, str(portfolio_file))
             
@@ -2852,7 +2866,6 @@ class StrategyRunner:
                 enable_trailing_stop = self.config.get('enable_trailing_stop', True)
                 base_stop_level = -6  # 基础止损固定为-6%
                 trailing_trigger_threshold = 5  # 触发移动止损的最低收益率
-                trailing_offset = -8  # 移动止损偏移量，止损线 = 最高收益率 + trailing_offset
 
                 # 计算当前止损线（默认使用基础止损）
                 current_stop = base_stop_level / 100
@@ -2860,22 +2873,24 @@ class StrategyRunner:
                 highest_price = current_price  # 默认使用当前价
 
                 if enable_trailing_stop:
-                    # 从持仓期间的历史数据中获取最高价
+                    # 从持仓期间的历史数据中获取最高价（截至前一日，不含当日）
                     if buy_date and stock_code in self.stock_filtered_cache:
                         cache_df = self.stock_filtered_cache[stock_code]
-                        # 筛选买入日期之后的数据
-                        holding_df = cache_df[cache_df['date'] >= buy_date].copy()
+                        # 筛选买入日期之后、前一交易日之前的数据
+                        prev_date = (pd.Timestamp(trade_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+                        holding_df = cache_df[(cache_df['date'] >= buy_date) & (cache_df['date'] <= prev_date)].copy()
                         if not holding_df.empty:
                             highest_price = holding_df['high'].max()
                             highest_price_return = (highest_price - buy_price) / buy_price * 100
                     
-                    # 简化的移动止损逻辑：
+                    # 移动止损逻辑：
                     # - 最高收益 < 5%：使用固定止损 -6%
-                    # - 最高收益 >= 5%：移动止损 = 最高收益率 - 8%
+                    # - 最高收益 >= 5%：移动止损 = 截至前一日的最高价 × 92%
                     if highest_price_return >= trailing_trigger_threshold:
-                        current_stop = (highest_price_return + trailing_offset) / 100
+                        stop_price = highest_price * 0.92
+                        current_stop = (stop_price - buy_price) / buy_price
 
-                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损线={current_stop*100:.2f}%")
+                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}")
                 # ========== 移动止损逻辑结束 ==========
 
                 # 记录择时信号详情
@@ -2898,11 +2913,11 @@ class StrategyRunner:
                         signal_type = 'stop_loss'
                     
                     # 计算止损价
-                    stop_price = buy_price * (1 + current_stop)
+                    stop_price = highest_price * 0.92 if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold else buy_price * (1 + current_stop)
                     
                     # 构建止损方式说明
                     if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
-                        stop_method = f"移动止损(最高收益{highest_price_return:.2f}%-8%={current_stop*100:.2f}%)"
+                        stop_method = f"移动止损(最高价{highest_price:.2f}×92%={highest_price*0.92:.2f})"
                     else:
                         stop_method = f"固定止损({base_stop_level}%)"
                     
@@ -2941,10 +2956,10 @@ class StrategyRunner:
                 else:
                     # 没有卖出信号，记录日志
                     # 计算止损价格（参考回测引擎逻辑）
-                    stop_price = buy_price * (1 + current_stop)
+                    stop_price = highest_price * 0.92 if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold else buy_price * (1 + current_stop)
                     # 构建止损方式说明
                     if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
-                        stop_method = f"移动止损(最高收益{highest_price_return:.2f}%-8%={current_stop*100:.2f}%)"
+                        stop_method = f"移动止损(最高价{highest_price:.2f}×92%={highest_price*0.92:.2f})"
                     else:
                         stop_method = f"固定止损({base_stop_level}%)"
                     
@@ -3251,7 +3266,7 @@ class StrategyRunner:
                 # 记录未生成买入信号的原因
                 elif not timing_result.is_buy:
                     # 判断原因
-                    reason = "未知原因"
+                    reason = "不满足策略条件"
                     if timing_result.message:
                         reason = timing_result.message
                     elif existing_pos and timing_result.trade_type != 'add':
