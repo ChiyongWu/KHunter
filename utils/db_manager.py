@@ -816,6 +816,70 @@ class DBManager:
             logger.debug(f"列出所有股票失败: {str(e)}")
             return []
     
+    def read_all_stocks_batch(self, start_date: str = None, end_date: str = None) -> Dict[str, 'pd.DataFrame']:
+        """
+        批量读取所有股票K线数据（一次 SQL 查询替代逐只读取）
+        
+        将 stock_kline 表全量数据按 code 分组，返回 {code: DataFrame} 字典。
+        大幅减少数据库查询次数，从 N 次降低到 1 次。
+        
+        Args:
+            start_date: 开始日期（可选），格式 YYYY-MM-DD
+            end_date: 结束日期（可选），格式 YYYY-MM-DD
+        
+        Returns:
+            Dict[str, DataFrame]: {股票代码: K线DataFrame}，DataFrame 列含
+                date(已转datetime), open, high, low, close, volume,
+                market_cap, K, D, J
+        """
+        import pandas as pd
+
+        try:
+            sql = """
+                SELECT code, date, open, high, low, close, volume,
+                       market_cap, K, D, J
+                FROM stock_kline
+            """
+            params = ()
+
+            # 添加日期过滤条件
+            if start_date:
+                sql += " AND date >= ?"
+                params += (start_date,)
+            if end_date:
+                sql += " AND date <= ?"
+                params += (end_date,)
+
+            # 去掉 WHERE 之前的 AND
+            sql = sql.replace("FROM stock_kline\n                AND", "FROM stock_kline WHERE")
+
+            sql += " ORDER BY code, date ASC"
+
+            results = self.query(sql, params)
+            if not results:
+                logger.warning("批量读取：stock_kline 表无数据")
+                return {}
+
+            # 转为 DataFrame
+            df_all = pd.DataFrame(results)
+
+            # 确保 date 列为 datetime 类型
+            df_all['date'] = pd.to_datetime(df_all['date'])
+
+            # 按 code 分组
+            result = {}
+            for code, group in df_all.groupby('code'):
+                # 重置索引，保留 code 列
+                df = group.reset_index(drop=True)
+                result[code] = df
+
+            logger.info(f"批量读取完成：{len(result)} 只股票，{len(df_all)} 行数据")
+            return result
+
+        except Exception as e:
+            logger.error(f"批量读取股票数据失败: {str(e)}")
+            return {}
+
     def stock_exists(self, stock_code: str) -> bool:
         """
         检查股票数据是否存在（替代 CSVManager.stock_exists）

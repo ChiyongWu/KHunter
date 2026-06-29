@@ -549,21 +549,21 @@ class StrategyRunner:
         extended_start = (current_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
         logger.info(f"预加载股票数据: {extended_start} ~ {current_date} (历史: {required_days}天)")
         
-        # 获取所有股票代码
-        stock_codes = self.db_manager.list_all_stocks()
-        total = len(stock_codes)
+        # 使用批量加载：一次 SQL 查询读取全部股票数据，替代逐只查询
+        logger.info(f"开始批量加载全部股票数据...")
+        all_stock_data = self.db_manager.read_all_stocks_batch()
+        total = len(all_stock_data)
         loaded = 0
         skipped = 0
         
-        for i, code in enumerate(stock_codes):
+        # 批量获取所有股票名称（可选优化：后续可改为批量查询）
+        for code, df in all_stock_data.items():
             try:
-                df = self.db_manager.read_stock(code)
-                
                 if df is None or (hasattr(df, 'empty') and df.empty) or len(df) < 60:
                     skipped += 1
                     continue
                 
-                # 缓存原始数据
+                # 缓存原始数据（日期列转字符串格式，保持与之前一致）
                 df_copy = df.copy()
                 df_copy['date'] = df_copy['date'].dt.strftime('%Y-%m-%d')
                 self.stock_data_cache[code] = df_copy
@@ -593,8 +593,9 @@ class StrategyRunner:
                 logger.debug(f"预加载股票 {code} 失败: {str(e)}")
                 skipped += 1
             
-            if (i + 1) % 500 == 0:
-                logger.info(f"预加载进度: {i + 1}/{total}, 有效股票: {loaded}, 跳过: {skipped}")
+            # 每 500 只汇报一次进度
+            if (loaded + skipped) % 500 == 0:
+                logger.info(f"预加载进度: {loaded + skipped}/{total}, 有效股票: {loaded}, 跳过: {skipped}")
         
         logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, 总计 {total}")
 
