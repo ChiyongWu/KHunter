@@ -3539,7 +3539,8 @@ def get_portfolio():
         if runner.config.get('run_mode') == 'auto':
             try:
                 from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
-                project_root = str(Path(runner.running_dir).parent)
+                # running_dir 是 data/running，需再往上一级才是项目根目录
+                project_root = str(Path(runner.running_dir).parent.parent)
                 handler = PTradeFeedbackHandler(project_root=project_root)
                 today_compact = today.replace('-', '')
                 # 检查 PTrade 反馈文件是否存在
