@@ -25,6 +25,7 @@ from trading.timing_strategies import TimingStrategyFactory
 from utils.strategy_name_mapper import get_english_name
 from utils.trade_date_utils import is_trading_day, get_previous_trading_day
 from utils.trading_time_validator import is_market_closed
+from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler, process_ptrade_feedback
 from trading.strategy_kelly_loader import KellyCalculator
 from trading.strategy_execution_plan import ExecutionPlan, StrategyCombination
 from trading.backtest_dao import BacktestDAO
@@ -131,6 +132,9 @@ def calculate_trading_cost(stock_code: str, price: float, quantity: int, is_buy:
         'adjusted_amount': round(adjusted_amount, 2)
     }
 
+
+# PTrade 信号文件保留数量上限（PTrade 上传文件数有限制）
+MAX_PTRADE_CSV_FILES = 3
 
 class StrategyRunner:
     """策略运行引擎核心类"""
@@ -508,96 +512,165 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"保存股票池文件失败: {str(e)}")
     
+    # ==================== 停牌检查 ====================
+    
+    def _is_stock_suspended(self, stock_code: str, current_date: str) -> bool:
+        """
+        检查股票是否在指定日期停牌
+        
+        判断依据：数据库中该股票是否有指定日期的K线数据
+        
+        Args:
+            stock_code: 股票代码
+            current_date: 检查日期，格式 YYYY-MM-DD
+            
+        Returns:
+            True 表示停牌（无当日K线），False 表示正常交易（有当日K线）
+        """
+        # 方法1：从缓存中检查（如果缓存中有该股票的数据）
+        if stock_code in self.stock_filtered_cache:
+            df = self.stock_filtered_cache[stock_code]
+            # 检查是否有 current_date 当日的数据
+            dates = df['date'].unique()
+            return current_date not in dates
+        
+        # 方法2：从数据库查询当日是否有K线
+        try:
+            # 数据库代码无 .SZ/.SH 后缀，需去除
+            db_code = stock_code.replace('.SZ', '').replace('.SH', '')
+            # 查询当日数据
+            df = self.db_manager.read_stock(db_code, start_date=current_date, end_date=current_date)
+            if df is None or df.empty:
+                return True  # 无当日数据，视为停牌
+            
+            return False  # 有当日数据，正常交易
+            
+        except Exception as e:
+            logger.debug(f"检查股票 {stock_code} 停牌状态失败: {str(e)}")
+            return True  # 查询失败保守处理为停牌
+    
     # ==================== 预加载股票数据 ====================
     
     def _preload_stock_data(self, current_date: str, strategy_name: str = None):
-        """预加载所有股票数据到内存
-        
+        """预加载所有股票数据到内存（批量加载优化版）
+
+        优化：3次SQL替代逐只 read_stock（~5280次独立查询）
+
         Args:
             current_date: 当前日期
             strategy_name: 策略名称，用于计算需要的历史数据天数
         """
         from datetime import datetime, timedelta
+        import pandas as pd
+
         current_dt = datetime.strptime(current_date, '%Y-%m-%d')
-        
+
         # 根据策略参数计算需要的历史数据天数
         buffer_days = 60
         required_days = buffer_days
-        
+
         if strategy_name:
             strategy = self.strategy_registry.get_strategy(strategy_name)
             if strategy and hasattr(strategy, 'params'):
                 params = strategy.params
                 max_value = 0
-                
+
                 lookback_keys = [
                     'lookback_days', 'pattern_days', 'limit_up_lookback_days',
                     'lowest_point_lookback_days', 'surge_lookback_days', 'uptrend_lookback_days'
                 ]
                 period_keys = ['ma_period', 'ma_short_period', 'ma_long_period', 'kdj_n',
                              'macd_short', 'macd_long', 'macd_signal', 'volume_ma_period']
-                
+
                 for key in lookback_keys + period_keys:
                     if key in params:
                         val = params[key]
                         if isinstance(val, (int, float)):
                             max_value = max(max_value, int(val))
-                
+
                 required_days = max_value + buffer_days
-        
+
         # 扩展开始日期
         extended_start = (current_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
         logger.info(f"预加载股票数据: {extended_start} ~ {current_date} (历史: {required_days}天)")
-        
-        # 使用批量加载：一次 SQL 查询读取全部股票数据（过滤到当前日期，与前端选股行为一致）
-        logger.info(f"开始批量加载股票数据到 {current_date}...")
-        all_stock_data = self.db_manager.read_all_stocks_batch(end_date=current_date)
-        total = len(all_stock_data)
+
+        # 第1步：一次SQL获取选股日有K线的活跃股票（退市/停牌自动排除）
+        step1_start = datetime.now()
+        active_codes = self.db_manager.get_active_stock_codes(current_date)
+        step1_time = (datetime.now() - step1_start).total_seconds()
+        total_stocks = len(self.db_manager.list_all_stocks())
+        logger.info(f"[预加载-第1步] 选股日{current_date}有效股票: {len(active_codes)} 只, "
+                    f"排除(退市/停牌): {total_stocks - len(active_codes)} 只, "
+                    f"耗时 {step1_time:.1f}s")
+
+        if not active_codes:
+            logger.warning("没有活跃股票数据，跳过预加载")
+            return
+
+        # 第2步：一次SQL批量加载活跃股票K线（仅限定日期范围）
+        step2_start = datetime.now()
+        all_kline_df = self.db_manager.read_all_stocks_kline(
+            extended_start, current_date, codes=active_codes
+        )
+        step2_time = (datetime.now() - step2_start).total_seconds()
+
+        if all_kline_df.empty:
+            logger.warning("批量K线数据为空，跳过预加载")
+            return
+
+        # 统一日期格式为字符串（与原有 cache 格式一致）
+        all_kline_df['date'] = pd.to_datetime(all_kline_df['date']).dt.strftime('%Y-%m-%d')
+        # 按code分组，按日期正序排列（与原有格式一致）
+        all_kline_df = all_kline_df.sort_values(['code', 'date'])
+
+        # 第3步：批量获取股票名称
+        step3_start = datetime.now()
+        all_stock_names = self.db_manager.get_all_stock_names()
+        self.stock_name_cache.update(all_stock_names)
+        step3_time = (datetime.now() - step3_start).total_seconds()
+
+        # 第4步：按code分组并构建缓存
+        step4_start = datetime.now()
         loaded = 0
         skipped = 0
-        
-        # 批量获取所有股票名称（可选优化：后续可改为批量查询）
-        for code, df in all_stock_data.items():
-            try:
-                if df is None or (hasattr(df, 'empty') and df.empty) or len(df) < 60:
-                    skipped += 1
-                    continue
-                
-                # 缓存原始数据（日期列转字符串格式，保持与之前一致）
-                df_copy = df.copy()
-                df_copy['date'] = df_copy['date'].dt.strftime('%Y-%m-%d')
-                self.stock_data_cache[code] = df_copy
-                
-                # 获取股票名称
-                name = self._get_stock_name(code)
-                
-                # 过滤ST股票和退市股票
-                invalid = name.startswith('ST') or name.startswith('*ST')
-                if not invalid:
-                    for kw in ['退', '未知', '退市', '已退']:
-                        if kw in name:
-                            invalid = True
-                            break
-                
-                if invalid:
-                    skipped += 1
-                    continue
-                
-                # 缓存有效股票
-                df_filtered = df.copy()
-                df_filtered['date'] = df_filtered['date'].dt.strftime('%Y-%m-%d')
-                self.stock_filtered_cache[code] = df_filtered
-                loaded += 1
-                
-            except Exception as e:
-                logger.debug(f"预加载股票 {code} 失败: {str(e)}")
+        no_kline_skip = 0  # 选股日无K线（不应出现，仅防御）
+
+        grouped = all_kline_df.groupby('code')
+        for code, group_df in grouped:
+            # 数据行数不足60行 → 跳过
+            if len(group_df) < 60:
                 skipped += 1
-            
-            # 每 500 只汇报一次进度
-            if (loaded + skipped) % 500 == 0:
-                logger.info(f"预加载进度: {loaded + skipped}/{total}, 有效股票: {loaded}, 跳过: {skipped}")
-        
-        logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, 总计 {total}")
+                continue
+
+            # 缓存原始数据（正序，全部活跃股票）
+            self.stock_data_cache[code] = group_df.copy()
+
+            # 获取股票名称
+            name = all_stock_names.get(code, '未知')
+
+            # 过滤ST股票和退市股票
+            invalid = name.startswith('ST') or name.startswith('*ST')
+            if not invalid:
+                for kw in ['退', '未知', '退市', '已退']:
+                    if kw in name:
+                        invalid = True
+                        break
+
+            if invalid:
+                skipped += 1
+                continue
+
+            # 缓存有效股票（非ST/非退市）
+            self.stock_filtered_cache[code] = group_df.copy()
+            loaded += 1
+
+        step4_time = (datetime.now() - step4_start).total_seconds()
+
+        total_time = step1_time + step2_time + step3_time + step4_time
+        logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, "
+                    f"总股票 {len(active_codes)}, 总耗时 {total_time:.1f}s "
+                    f"(步骤: SQL-1={step1_time:.1f}s SQL-2={step2_time:.1f}s "
+                    f"名称={step3_time:.1f}s 分组={step4_time:.1f}s)")
 
     # ==================== 初始股票池预加载 ====================
 
@@ -745,9 +818,30 @@ class StrategyRunner:
         if not selected_stocks:
             return []
         
-        # 评分
-        logger.info(f"开始对 {len(selected_stocks)} 只股票进行评分")
-        scored_stocks = self._score_stocks(selected_stocks, strategy_name, current_date)
+        # ========== 过滤停牌股票 ==========
+        # 检查每只股票是否停牌，剔除当日停牌的股票
+        active_stocks = []
+        suspended_stocks = []
+        for stock in selected_stocks:
+            code = stock.get('stock_code', '')
+            if self._is_stock_suspended(code, current_date):
+                suspended_stocks.append(f"{code} {stock.get('stock_name', '')}")
+                logger.debug(f"过滤停牌股票: {code} {stock.get('stock_name', '')}")
+            else:
+                active_stocks.append(stock)
+        
+        if suspended_stocks:
+            logger.info(f"【停牌过滤】剔除 {len(suspended_stocks)} 只停牌股票: {', '.join(suspended_stocks[:5])}{'...' if len(suspended_stocks) > 5 else ''}")
+        
+        if not active_stocks:
+            logger.warning(f"选股后全部股票均停牌，过滤后无可交易股票")
+            return []
+        
+        logger.info(f"【停牌过滤】过滤后剩余 {len(active_stocks)} 只可交易股票")
+        
+        # 评分（仅对可交易股票评分）
+        logger.info(f"开始对 {len(active_stocks)} 只可交易股票进行评分")
+        scored_stocks = self._score_stocks(active_stocks, strategy_name, current_date)
         
         # 记录每只股票的综合评分（与回测引擎一致）
         logger.info("\n股票评分详情:")
@@ -872,9 +966,8 @@ class StrategyRunner:
                     if not price_row.empty:
                         latest_price = float(price_row['close'].values[0])
                     else:
-                        # 如果没有当日数据，取最新收盘价（显式按日期降序，兼容不同数据源排序）
-                        df_desc = df_price.sort_values('date', ascending=False)
-                        latest_price = float(df_desc['close'].values[0])
+                        # 如果没有当日数据，取最新收盘价
+                        latest_price = float(df_price['close'].values[0])
                     
                     # 更新股票信号中的价格
                     if 'signal' in candidate['stock']:
@@ -917,14 +1010,12 @@ class StrategyRunner:
                 continue
             
             # 破支撑位检查：使用当天收盘价（或最新可用收盘价）
+            # 注意：缓存数据是正序排列的（最旧日期在前面），iloc[-1] 才是最新
             df_for_support = df[df['date'] <= current_date].copy()
             if len(df_for_support) < 20:
                 remaining.append(candidate)
                 continue
-            # 确保数据按日期降序（最新在前），批量加载可能返回升序数据
-            if len(df_for_support) > 1 and df_for_support['date'].iloc[0] < df_for_support['date'].iloc[-1]:
-                df_for_support = df_for_support.iloc[::-1].reset_index(drop=True)
-            price_for_check = df_for_support.iloc[0]['close']  # 最新数据在 iloc[0]
+            price_for_check = df_for_support.iloc[-1]['close']  # 正序数据，iloc[-1] 为最新
             
             # 趋势检查：需要至少20天历史数据
             trend_df = df_for_support.copy()
@@ -1108,21 +1199,8 @@ class StrategyRunner:
             'min_score': 70,
             'working_hour': 9,
             'working_minute': 30,
-            'check_interval': 60,
-            'run_mode': 'manual'  # 默认手工模式
+            'check_interval': 60
         }
-        
-        # 读取 config.yaml 获取 run_mode（自动/手工模式）
-        main_config_path = Path("config/config.yaml")
-        if main_config_path.exists():
-            try:
-                with open(main_config_path, 'r', encoding='utf-8') as f:
-                    main_config = yaml.safe_load(f) or {}
-                run_mode_cfg = main_config.get('run_mode', {})
-                default_config['run_mode'] = run_mode_cfg.get('mode', 'manual')
-                logger.info(f"运行模式: {default_config['run_mode']}")
-            except Exception as e:
-                logger.warning(f"读取 config.yaml run_mode 失败: {e}，使用默认 manual 模式")
         
         # 尝试从yaml文件加载
         config_path = Path("config/strategy_params.yaml")
@@ -1136,6 +1214,27 @@ class StrategyRunner:
                     logger.info("策略运行配置加载成功")
             except Exception as e:
                 logger.error(f"加载策略运行配置失败: {str(e)}")
+        
+        # 加载运行模式配置（手动/自动）和 PTrade 配置
+        main_config_path = Path("config/config.yaml")
+        if main_config_path.exists():
+            try:
+                with open(main_config_path, 'r', encoding='utf-8') as f:
+                    main_config = yaml.safe_load(f)
+                    # 运行模式
+                    run_mode_config = main_config.get('run_mode', {})
+                    self.run_mode = run_mode_config.get('mode', 'manual')
+                    logger.info(f"运行模式: {self.run_mode}")
+                    # 保存完整主配置供后续 PTrade 反馈处理等模块使用
+                    self.main_config = main_config
+            except Exception as e:
+                logger.warning(f"加载运行模式配置失败，默认使用 manual 模式: {str(e)}")
+                self.run_mode = 'manual'
+                self.main_config = {}
+        else:
+            self.run_mode = 'manual'
+            self.main_config = {}
+            logger.info("config/config.yaml 不存在，默认使用 manual 模式")
         
         # 从数据库回测配置获取止盈止损参数（优先级最高）
         backtest_config = self._get_backtest_config()
@@ -1368,6 +1467,118 @@ class StrategyRunner:
             return date_str
         return get_previous_trading_day(date_str)
     
+    # PTrade 交易时间常量（与 TradingTimeValidator 保持一致）
+    _TRADING_START_MINUTES = 9 * 60 + 30   # 9:30
+    _TRADING_END_MINUTES = 15 * 60          # 15:00
+    
+    def _should_process_ptrade_feedback(self) -> bool:
+        """判断是否应该处理 PTrade 反馈文件
+        
+        规则：
+        - 仅自动模式（run_mode=auto）且 ptrade.enabled=true 时才处理
+        - 交易日盘中（9:30-15:00）不处理，避免干扰实时交易
+        - 交易日盘后（15:00后）或非交易日：执行反馈处理
+        
+        Returns:
+            是否应该处理 PTrade 反馈
+        """
+        # 仅自动模式处理
+        if getattr(self, 'run_mode', 'manual') != 'auto':
+            logger.debug(f"当前运行模式为 manual，跳过 PTrade 反馈处理")
+            return False
+        
+        # 检查 ptrade.enabled 配置
+        main_config = getattr(self, 'main_config', {})
+        ptrade_cfg = main_config.get('ptrade', {}) if main_config else {}
+        if not ptrade_cfg.get('enabled', True):
+            logger.info("【PTrade反馈】ptrade.enabled=false，跳过反馈处理")
+            return False
+        
+        now = datetime.datetime.now()
+        current_minutes = now.hour * 60 + now.minute
+        today_str = now.strftime('%Y-%m-%d')
+        
+        # 判断是否为交易日
+        if is_trading_day(today_str):
+            # 交易日：盘中（9:30-15:00）跳过，盘后处理
+            if self._TRADING_START_MINUTES <= current_minutes < self._TRADING_END_MINUTES:
+                logger.info("【PTrade反馈】当前为交易日盘中，跳过反馈处理")
+                return False
+            logger.info("【PTrade反馈】当前为交易日盘后，执行反馈处理")
+            return True
+        
+        # 非交易日：处理
+        logger.info("【PTrade反馈】当前非交易日，执行反馈处理")
+        return True
+
+    def sync_portfolio_from_ptrade(self, portfolio_date: str) -> bool:
+        """同步 PTrade 反馈到 portfolio 文件（供 API 查询时自动更新）
+
+        在 auto 模式下，当 PTrade 反馈文件比当前 portfolio 文件更新时，
+        自动处理 PTrade 反馈以更新 portfolio 数据。
+
+        Args:
+            portfolio_date: 工作日期 YYYY-MM-DD
+
+        Returns:
+            是否执行了 PTrade 同步
+        """
+        # 只自动模式 + ptrade enabled 时才同步
+        if not self._should_process_ptrade_feedback():
+            return False
+
+        # PTrade 反馈文件按交易日命名（如 20260626），需要将工作日期转为 YYYYMMDD
+        working_date = self.get_working_date()
+        feedback_date = working_date.replace("-", "")
+
+        # 防重复同步：同一天只执行一次 PTrade 同步
+        # 多个并发 API 请求可能同时触发此方法，避免重复处理
+        if getattr(self, '_ptrade_synced_feedback_date', '') == feedback_date:
+            logger.debug(f"【PTrade同步】今日已同步过 feedback_date={feedback_date}，跳过重复调用")
+            return True
+        # 构建 portfolio 文件路径（使用传入的日期，表示当日系统运行结果）
+        portfolio_file = self.running_dir / f"portfolio_{portfolio_date}.json"
+
+        try:
+            # 创建临时 handler 检查文件
+            # running_dir 是 {project_root}/data/running，取 parent.parent 得到项目根目录
+            project_root = str(self.running_dir.parent.parent)
+            temp_handler = PTradeFeedbackHandler(
+                project_root=project_root,
+                config=getattr(self, 'main_config', None))
+            # 检查 PTrade 反馈文件是否存在
+            if not temp_handler.check_feedback_exists(feedback_date):
+                logger.debug(f"【PTrade同步】反馈文件不存在: {feedback_date}，跳过")
+                return False
+            # 自动模式下 PTrade 数据是唯一真实数据源，始终处理（不依赖 mtime 比较）
+            # mtime 比较可能因 initialize_daily_data 保存操作更新文件时间而误判跳过
+            logger.info(
+                f"【PTrade同步】检测到 PTrade 反馈文件，同步 portfolio: "
+                f"feedback_date={feedback_date}")
+            result = temp_handler.process(feedback_date)
+            if result.get("success"):
+                # 同步成功后，更新内存中的 self.portfolio
+                # PTrade 数据完全覆盖本地持仓，确保自动模式下持仓数据与实盘一致
+                ptrade_portfolio = result.get('portfolio', {})
+                self.portfolio = ptrade_portfolio.get('positions', {})
+                self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
+                self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
+                # 标记已同步，防止同一天重复处理
+                self._ptrade_synced_feedback_date = feedback_date
+                logger.info(
+                    f"【PTrade同步】portfolio 已从 PTrade 更新: "
+                    f"持仓={len(result.get('holdings', []))} 条, "
+                    f"现金={ptrade_portfolio.get('cash')}, "
+                    f"总资产={ptrade_portfolio.get('total_asset')}")
+                return True
+            else:
+                logger.warning(
+                    f"【PTrade同步】处理失败: {result.get('error')}")
+                return False
+        except Exception as e:
+            logger.warning(f"【PTrade同步】同步异常: {str(e)}")
+            return False
+
     def check_if_processed(self, date: str) -> bool:
         """检查指定日期是否已处理
         
@@ -1425,125 +1636,79 @@ class StrategyRunner:
         if date is None:
             date = self.get_working_date()
         
-        # 获取当日日期（用于除权检测和持仓文件）
-        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        logger.info(f"【数据初始化】开始检查并初始化 {date} 的数据")
         
-        logger.info(f"【数据初始化】开始检查并初始化 {today} 的数据（信号日期: {date}）")
-        
-        # 检查是否已经初始化过（使用信号日期进行检查）
+        # 检查是否已经初始化过（以工作日期判断，避免同一天重复初始化）
         if date in self._initialized_dates:
             logger.debug(f"【数据初始化】{date} 已经初始化过，跳过")
             return False
+        # 立即标记为已初始化，防止并发 API 请求重复触发
+        self._initialized_dates.add(date)
         
-        # 检查当日持仓文件是否已存在（使用当日日期，而非前一交易日）
-        portfolio_file = self.running_dir / f"portfolio_{today}.json"
+        # 所有文件以工作日期（交易日）命名
+        portfolio_file = self.running_dir / f"portfolio_{date}.json"
         signals_file = self.running_dir / f"signals_{date}.json"
-        trades_file = self.running_dir / f"trades_{today}.json"
+        trades_file = self.running_dir / f"trades_{date}.json"
         
-        # ========== 如果当日持仓文件已存在，先加载数据再执行除权检测 ==========
+        # ========== 如果当日持仓文件已存在，先同步 PTrade 再执行除权检测 ==========
+        # 自动模式下 PTrade 是唯一真实数据源，必须先同步 PTrade 反馈，
+        # 再对 PTrade 实盘数据执行除权检测，确保除权调整基于最新真实持仓
         if portfolio_file.exists():
-            logger.info(f"【数据初始化】{today} 的持仓文件已存在，加载数据并检测除权")
-            prev_data = self._load_portfolio(str(portfolio_file))
-            self.portfolio = prev_data.get('positions', {})
-            self.current_total_capital = prev_data.get('cash', 300000)
-            self.initial_capital = prev_data.get('initial_capital', 300000)
+            logger.info(f"【数据初始化】{date} 的持仓文件已存在")
             
-            # ========== 自动模式下校验持仓来源 ==========
-            # 若已有持仓文件非 PTrade 来源，且自动模式开启，尝试用 PTrade 覆盖
-            source = prev_data.get('source', 'unknown')
-            if self.config.get('run_mode') == 'auto' and source != 'ptrade_feedback':
-                logger.info(
-                    f"【数据初始化】自动模式，持仓来源为 '{source}'（非 PTrade），"
-                    f"尝试从 PTrade 反馈文件更新 {today} 的持仓")
-                if self._try_init_from_ptrade_feedback(today, str(portfolio_file)):
-                    # PTrade 覆盖成功，跳过除权检测（PTrade 数据已是除权后真实数据）
-                    if not signals_file.exists():
-                        self._save_signals([], str(signals_file))
-                    if not trades_file.exists():
-                        with open(trades_file, 'w', encoding='utf-8') as f:
-                            json.dump([], f, ensure_ascii=False, indent=2)
-                    self._initialized_dates.add(date)
-                    logger.info(
-                        f"【数据初始化】{today} 的持仓已从 '{source}' 切换为 PTrade 反馈源，"
-                        f"共 {len(self.portfolio)} 只股票")
-                    return False  # 已完成处理
-                else:
-                    logger.warning(
-                        f"【数据初始化】自动模式：PTrade 反馈文件不可用，"
-                        f"继续使用来源 '{source}' 的现有持仓数据。"
-                        f"请确认 PTrade 已在 15:05 导出 Fund 和 Hold 文件到 "
-                        f"data/running/ptrade_feedback/ 目录。")
+            # Step 1: 自动模式下优先从 PTrade 同步真实持仓
+            ptrade_synced = self.sync_portfolio_from_ptrade(date)
             
-            # 执行除权检测
-            # 根据盘中/盘后模式决定信号日期
+            # Step 2: 如果 PTrade 未同步（非自动模式或无反馈文件），从本地文件加载
+            if not ptrade_synced:
+                prev_data = self._load_portfolio(str(portfolio_file))
+                self.portfolio = prev_data.get('positions', {})
+                self.current_total_capital = prev_data.get('cash', 300000)
+                self.initial_capital = prev_data.get('initial_capital', 300000)
+            
+            # Step 3: 对最终持仓（PTrade 数据或本地数据）执行除权检测
             now = datetime.datetime.now()
             if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                # 盘中模式：信号使用前一交易日
-                self._perform_exdividend_check(current_date=today, signal_date=date)
+                self._perform_exdividend_check(current_date=date, signal_date=date)
             else:
-                # 盘后模式：所有都使用当日日期
-                self._perform_exdividend_check(current_date=today, signal_date=None)
+                self._perform_exdividend_check(current_date=date, signal_date=None)
             
-            # 保存调整后的持仓（保留原来源信息）
-            self._save_portfolio(self.portfolio, str(portfolio_file), source=source)
-            
-            self._initialized_dates.add(date)
             return False
         
-        # ========== 自动模式：PTrade 反馈文件优先 ==========
-        # 自动模式下，PTrade 是唯一真实持仓数据源
-        # 当日持仓文件不存在时，应优先读取 PTrade 反馈文件获取真实持仓
-        if self.config.get('run_mode') == 'auto':
-            logger.info(f"【数据初始化】自动模式，持仓文件不存在，尝试从 PTrade 反馈文件获取 {today} 的持仓")
-            if self._try_init_from_ptrade_feedback(today, str(portfolio_file)):
-                # PTrade 反馈初始化成功（handler.process() 已保存 source="ptrade_feedback"），创建空信号/交易文件
-                if not signals_file.exists():
-                    self._save_signals([], str(signals_file))
-                    logger.info(f"【数据初始化】创建空信号文件: {signals_file}")
-                if not trades_file.exists():
-                    with open(trades_file, 'w', encoding='utf-8') as f:
-                        json.dump([], f, ensure_ascii=False, indent=2)
-                    logger.info(f"【数据初始化】创建空交易记录文件: {trades_file}")
-                self._initialized_dates.add(date)
-                logger.info(f"【数据初始化】{date} 的数据初始化完成（PTrade 反馈源）")
-                return True
+        # ========== 当日持仓文件不存在：先尝试 PTrade 同步，再走继承 ==========
+        # 自动模式下 PTrade 是唯一真实数据源，优先从 PTrade 反馈文件生成 portfolio
+        ptrade_synced = self.sync_portfolio_from_ptrade(date)
+        if ptrade_synced:
+            # PTrade 已同步，portfolio 文件已由 sync_portfolio_from_ptrade 写入
+            # 执行除权检测（基于 PTrade 实盘数据）
+            logger.info(f"【数据初始化】{date} 数据从 PTrade 反馈同步完成，跳过历史继承")
+            now = datetime.datetime.now()
+            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                self._perform_exdividend_check(current_date=date, signal_date=date)
             else:
-                # PTrade 反馈文件不可用，告警后回退到历史继承逻辑
-                logger.warning(
-                    f"【数据初始化】自动模式下 PTrade 反馈文件不可用，"
-                    f"将回退到历史数据继承方式。"
-                    f"请确认 PTrade 已在 15:05 导出 Fund 和 Hold 文件到 "
-                    f"data/running/ptrade_feedback/ 目录。")
-        
-        # 手工模式 / 自动模式回退：查找有数据的最近交易日（向前查找最多30天）
-        current_date = date
-        days_looked = 0
-        max_days = 30
-        found_date = None
-        days_between = 0
-        
-        while days_looked < max_days:
-            # 获取前一交易日
-            current_date = get_previous_trading_day(current_date)
-            days_looked += 1
+                self._perform_exdividend_check(current_date=date, signal_date=None)
             
-            # 检查该交易日是否有持仓数据
-            prev_portfolio_file = self.running_dir / f"portfolio_{current_date}.json"
-            if prev_portfolio_file.exists():
-                found_date = current_date
-                days_between = days_looked
-                break
+            # 创建空的信号文件（如果不存在）
+            if not signals_file.exists():
+                self._save_signals([], str(signals_file))
+            # 创建空的交易记录文件（如果不存在）
+            if not trades_file.exists():
+                with open(trades_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+            logger.info(f"【数据初始化】{date} 的数据初始化完成（PTrade 来源）")
+            return True
         
-        if found_date:
+        # PTrade 未同步，查找有数据的最近交易日 -> 继承历史数据
+        prev_portfolio_path, found_date, days_between = self.find_latest_portfolio_file(date, max_days=30)
+        
+        if prev_portfolio_path and found_date:
             logger.info(f"【数据初始化】{date} 的持仓文件不存在，从最近有数据的交易日 {found_date} 继承数据（间隔 {days_between} 个交易日）")
             
             # 加载找到的交易日的持仓数据
-            prev_data = self._load_portfolio(str(prev_portfolio_file))
+            prev_data = self._load_portfolio(prev_portfolio_path)
             prev_positions = prev_data.get('positions', {})
             prev_cash = prev_data.get('cash', 300000)
             prev_initial_capital = prev_data.get('initial_capital', 300000)
-            # 获取前一日持仓的来源信息，用于传递给新生成的持仓文件
-            prev_source = prev_data.get('source', 'history_inheritance')
             
             # 更新持仓的持有天数和现价（加上间隔的交易日数）
             updated_positions = {}
@@ -1611,15 +1776,13 @@ class StrategyRunner:
                 # 更新后的持仓
                 updated_positions = self.portfolio
             
-            # 保存持仓，标记来源为历史继承
-            self._save_portfolio(updated_positions, str(portfolio_file),
-                                 source='history_inheritance')
+            self._save_portfolio(updated_positions, str(portfolio_file))
             logger.info(f"【数据初始化】成功从 {found_date} 继承持仓数据，共 {len(updated_positions)} 只股票，总资产: ¥{total_assets:.2f}")
         else:
             # 找不到有数据的交易日，使用初始资金初始化
             self.current_total_capital = self.config.get('initial_capital', 300000)
             self.initial_capital = self.current_total_capital
-            self._save_portfolio({}, str(portfolio_file), source='manual_init')
+            self._save_portfolio({}, str(portfolio_file))
             logger.info(f"【数据初始化】未找到有数据的历史交易日，使用初始资金 {self.current_total_capital} 初始化")
         
         # 创建空的信号文件（如果不存在）
@@ -1633,78 +1796,39 @@ class StrategyRunner:
                 json.dump([], f, ensure_ascii=False, indent=2)
             logger.info(f"【数据初始化】创建空交易记录文件: {trades_file}")
         
-        # 标记为已初始化
-        self._initialized_dates.add(date)
+        # 已在方法入口处标记为已初始化，无需重复标记
         
         logger.info(f"【数据初始化】{date} 的数据初始化完成")
         return True
     
-    def _try_init_from_ptrade_feedback(self, today: str, portfolio_file: str) -> bool:
-        """自动模式下尝试从 PTrade 反馈文件初始化持仓数据
-        
-        通过读取 PTrade 15:05 导出的 Fund_/Hold_ CSV 文件，
-        构建真实持仓数据并保存为 portfolio JSON。
+    def find_latest_portfolio_file(self, start_date: str = None, max_days: int = 30):
+        """从指定日期向前查找最近有 portfolio 文件的交易日
         
         Args:
-            today: 当日日期 YYYY-MM-DD
-            portfolio_file: portfolio 文件路径
+            start_date: 起始查找日期（YYYY-MM-DD），默认当天
+            max_days: 最大向前查找交易日数
             
         Returns:
-            初始化成功返回 True，失败返回 False
+            (portfolio_file_path, found_date_str, trading_days_gap) 
+            或 (None, None, 0) 如果找不到
         """
-        # 日期格式转换: YYYY-MM-DD → YYYYMMDD
-        today_compact = today.replace('-', '')
+        if start_date is None:
+            start_date = datetime.datetime.now().strftime('%Y-%m-%d')
         
-        try:
-            # 导入 PTrade 反馈处理器
-            from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler, PTradeFeedbackError
-            
-            # 初始化处理器（项目根目录为 strategy_runner 的上两级目录）
-            project_root = str(Path(__file__).resolve().parent.parent)
-            handler = PTradeFeedbackHandler(project_root=project_root)
-            
-            # 检查反馈文件是否存在（不完整时已输出告警）
-            if not handler.check_feedback_exists(today_compact):
-                logger.warning(
-                    f"【数据初始化】自动模式：PTrade 反馈文件不完整，"
-                    f"无法从 PTrade 获取 {today} 的持仓数据")
-                return False
-            
-            # 处理反馈文件 → 生成 portfolio JSON
-            result = handler.process(today_compact)
-            
-            if result.get('success'):
-                # PTrade 反馈处理成功，portfolio JSON 已由 process() 自动保存
-                # 加载到策略运行器内存
-                portfolio_data = result.get('portfolio', {})
-                self.portfolio = portfolio_data.get('positions', {})
-                self.current_total_capital = portfolio_data.get(
-                    'cash', self.config.get('initial_capital', 300000))
-                self.initial_capital = portfolio_data.get(
-                    'initial_capital', self.config.get('initial_capital', 300000))
-                # 计算总资产
-                total_assets = self.current_total_capital
-                for pos in self.portfolio.values():
-                    total_assets += pos.get('market_value', 0)
-                self.current_total_assets = total_assets
-                logger.info(
-                    f"【数据初始化】自动模式：从 PTrade 反馈成功获取持仓，"
-                    f"共 {len(self.portfolio)} 只股票，"
-                    f"可用资金: ¥{self.current_total_capital:.2f}，"
-                    f"总资产: ¥{total_assets:.2f}")
-                return True
-            else:
-                logger.warning(
-                    f"【数据初始化】自动模式：PTrade 反馈处理返回失败: "
-                    f"{result.get('error', '未知错误')}")
-                return False
-        except PTradeFeedbackError as e:
-            # PTrade 反馈文件不完整等预期异常
-            logger.warning(f"【数据初始化】自动模式：PTrade 反馈处理异常: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"【数据初始化】自动模式：PTrade 反馈处理未预期异常: {e}", exc_info=True)
-            return False
+        # 优先检查 start_date 本身
+        portfolio_file = self.running_dir / f"portfolio_{start_date}.json"
+        if portfolio_file.exists():
+            return str(portfolio_file), start_date, 0
+        
+        # 向前查找最多 max_days 个交易日
+        current_date = start_date
+        for days_looked in range(1, max_days + 1):
+            current_date = get_previous_trading_day(current_date)
+            portfolio_file = self.running_dir / f"portfolio_{current_date}.json"
+            if portfolio_file.exists():
+                return str(portfolio_file), current_date, days_looked
+        
+        return None, None, 0
     
     def _load_portfolio(self, portfolio_file: str) -> Dict:
         """加载持仓信息
@@ -1713,44 +1837,30 @@ class StrategyRunner:
             portfolio_file: 持仓文件路径
             
         Returns:
-            包含 cash、initial_capital、source、positions 的字典
+            包含 cash 和 positions 的字典
         """
         try:
             if not Path(portfolio_file).exists():
-                return {'cash': 300000, 'initial_capital': 300000, 'positions': {}, 'source': 'unknown'}
+                return {'cash': 300000, 'positions': {}}
             with open(portfolio_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 cash = data.get('cash', 300000)
                 initial_capital = data.get('initial_capital', 300000)
                 positions = data.get('positions', {})
-                source = data.get('source', 'unknown')
                 # 恢复可用资金和初始资金
                 self.current_total_capital = cash
                 self.initial_capital = initial_capital
-                # 同步计算总资产（可用资金 + 持仓市值）
-                total_assets = cash
-                for pos in positions.values():
-                    mv = pos.get('market_value', 0)
-                    if mv > 0:
-                        total_assets += mv
-                    else:
-                        # 无 market_value 时用 current_price * quantity 估算
-                        total_assets += pos.get('quantity', 0) * pos.get('current_price', 0)
-                self.current_total_assets = total_assets
-                return {'cash': cash, 'initial_capital': initial_capital,
-                        'positions': positions, 'source': source}
+                return {'cash': cash, 'initial_capital': initial_capital, 'positions': positions}
         except Exception as e:
             logger.warning(f"加载持仓文件失败: {str(e)}")
-            return {'cash': 300000, 'initial_capital': 300000, 'positions': {}, 'source': 'unknown'}
+            return {'cash': 300000, 'positions': {}}
     
-    def _save_portfolio(self, portfolio: Dict, portfolio_file: str, source: str = None):
+    def _save_portfolio(self, portfolio: Dict, portfolio_file: str):
         """保存持仓信息
         
         Args:
             portfolio: 持仓字典
             portfolio_file: 持仓文件路径
-            source: 数据来源标识 ('ptrade_feedback'/'history_inheritance'/'manual_init')
-                    若为 None，则尝试从已有文件读取来源信息以保持一致性
         """
         try:
             # 确保资金信息已初始化
@@ -1762,40 +1872,17 @@ class StrategyRunner:
             if not hasattr(self, 'initial_capital'):
                 self.initial_capital = self.current_total_capital
             
-            # 自动保留已有文件的来源信息（未显式传入时）
-            if source is None:
-                source = self._read_portfolio_source(portfolio_file)
-            
             data = {
                 'last_updated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'cash': self.current_total_capital,
                 'initial_capital': self.initial_capital,
-                'source': source,  # 持久化数据来源标识
                 'positions': portfolio
             }
             with open(portfolio_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"持仓信息已保存到: {portfolio_file} (来源: {source})")
+            logger.info(f"持仓信息已保存到: {portfolio_file}")
         except Exception as e:
             logger.error(f"保存持仓文件失败: {str(e)}")
-    
-    def _read_portfolio_source(self, portfolio_file: str) -> str:
-        """从已有持仓文件中读取来源信息
-        
-        Args:
-            portfolio_file: 持仓文件路径
-            
-        Returns:
-            来源字符串，文件不存在或无来源信息返回 'unknown'
-        """
-        try:
-            if not Path(portfolio_file).exists():
-                return 'unknown'
-            with open(portfolio_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get('source', 'unknown')
-        except Exception:
-            return 'unknown'
     
     def _load_signals(self, signals_file: str) -> List:
         """加载信号历史
@@ -1832,25 +1919,29 @@ class StrategyRunner:
             import csv
             from pathlib import Path
             
-            # PTrade集成：信号CSV固定文件名，保存到 data/running/to_ptrade/
-            # 每天只保留一份最新的 KHunter_signals.csv，避免重复上传
+            # PTrade集成：信号CSV按执行日期命名，保存到 data/running/to_ptrade/
+            # 文件名格式: KHunter_signals_YYYYMMDD.csv，便于回测追溯历史信号
             ptrade_dir = self.running_dir / "to_ptrade"
             ptrade_dir.mkdir(parents=True, exist_ok=True)
-            pt_csv_file = ptrade_dir / "KHunter_signals.csv"
             
-            # PTrade批量埋单CSV列定义
-            # 字段规范：signal_date, symbol, side, order_volume, order_price, price_type, strategy_name, signal_id
-            # signal_date 用于PTrade端校验信号是否属于当日，避免处理过期信号
-            csv_columns = [
-                'signal_date', 'symbol', 'side', 'order_volume', 'order_price', 
-                'price_type', 'strategy_name', 'signal_id'
-            ]
-            
-            # 从信号文件名中提取日期，格式 YYYYMMDD
+            # 从信号文件名中提取信号日期（T日），格式 YYYYMMDD
             # 文件名格式: signals_YYYY-MM-DD.json
             import re
             date_match = re.search(r'signals_(\d{4}-\d{2}-\d{2})', signals_file)
             signal_date = date_match.group(1).replace('-', '') if date_match else datetime.datetime.now().strftime('%Y%m%d')
+            # 执行日期 = T日 + 1个交易日（T+1日执行），PTrade只需 exec_date == today_str 判断
+            signal_date_dt = datetime.datetime.strptime(signal_date, '%Y%m%d').strftime('%Y-%m-%d')
+            exec_date = self._get_future_trading_day(signal_date_dt, 1).replace('-', '')
+            # 文件路径依赖 exec_date，必须在计算 exec_date 之后构建
+            pt_csv_file = ptrade_dir / f"KHunter_signals_{exec_date}.csv"
+            
+            # PTrade批量埋单CSV列定义
+            # 字段规范：exec_date, symbol, side, order_volume, order_price, price_type, strategy_name, signal_id
+            # exec_date = 信号日(T日)的下一个交易日(T+1日)，PTrade直接与当日比较即可，无需自行计算交易日
+            csv_columns = [
+                'exec_date', 'symbol', 'side', 'order_volume', 'order_price', 
+                'price_type', 'strategy_name', 'signal_id'
+            ]
 
             # 处理信号数据
             csv_data = []
@@ -1889,7 +1980,7 @@ class StrategyRunner:
                     order_price = signal_price
                 
                 csv_row = {
-                    'signal_date': signal_date,
+                    'exec_date': exec_date,
                     'symbol': symbol,
                     'side': side,
                     'order_volume': signal.get('quantity', 0),
@@ -1904,12 +1995,40 @@ class StrategyRunner:
             csv_data.sort(key=lambda r: (0 if r['side'] == 'sell' else 1))
             
             # 写入CSV文件（UTF-8编码，兼容PTrade批量埋单）
+            # 文件名含执行日期，每日不覆盖，便于回测追溯
             with open(pt_csv_file, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=csv_columns)
                 writer.writeheader()
                 writer.writerows(csv_data)
             
             logger.info(f"PTrade格式CSV信号文件已保存到: {pt_csv_file}")
+            
+            # 清理旧信号文件，控制文件数量（PTrade 上传文件数有限制）
+            # 保留最近 MAX_PTRADE_CSV_FILES 个文件，删除更早的
+            import glob as _glob
+            # 清理旧的固定文件名残留（无日期的旧格式）
+            old_fixed = ptrade_dir / "KHunter_signals.csv"
+            if old_fixed.exists():
+                old_fixed.unlink()
+                logger.info(f"已删除旧格式残留文件: {old_fixed.name}")
+            # 扫描所有日期命名文件，按日期排序，保留最新的
+            pattern = str(ptrade_dir / "KHunter_signals_*.csv")
+            existing = sorted(_glob.glob(pattern))
+            existing.sort(reverse=True)  # 按日期降序（最新在前）
+            kept = 0
+            for fpath in existing:
+                fpath_obj = Path(fpath)
+                if kept < MAX_PTRADE_CSV_FILES:
+                    kept += 1
+                    continue
+                # 超过保留数，删除
+                try:
+                    fpath_obj.unlink()
+                    logger.info(f"已清理过期信号文件: {fpath_obj.name}")
+                except OSError as e:
+                    logger.warning(f"清理过期文件失败 {fpath_obj.name}: {e}")
+            if kept > 0:
+                logger.info(f"信号文件清理完成: 保留 {kept} 个 (上限 {MAX_PTRADE_CSV_FILES})")
             
         except Exception as e:
             logger.error(f"保存信号文件失败: {str(e)}")
@@ -2376,15 +2495,57 @@ class StrategyRunner:
             if not portfolio_date:
                 portfolio_date = self.get_working_date()
             
-            # 加载持仓信息（如果内存中为空）
+            # ========== 关键修复：资金同步 ==========
+            # 关键逻辑：可用资金 = 持仓文件中的可用资金 + 本次会话已执行的卖出收入
+            # 内存中的 current_total_capital 可能在本次会话中已累加了卖出收入，
+            # 而持仓文件中的 cash 是上次保存的快照。
+            # 因此需要加载持仓文件获取"基线可用资金"，再加上本次会话的卖出增量。
+            
+            # 1. 记录加载前的当前可用资金（可能是会话内已累加的）
+            current_cash_before_load = getattr(self, 'current_total_capital', 0)
+            
+            # 2. 从交易日持仓文件加载"基线可用资金"
+            pf_file_signal = self.running_dir / f"portfolio_{portfolio_date}.json"
+            
+            baseline_cash = None
+            if pf_file_signal.exists():
+                # 使用交易日持仓文件
+                with open(pf_file_signal, 'r', encoding='utf-8') as f:
+                    portfolio_data = json.load(f)
+                baseline_cash = portfolio_data.get('cash', 0)
+                positions_from_file = portfolio_data.get('positions', {})
+                logger.info(f"【资金基线】从信号日期持仓文件加载基线: ¥{baseline_cash:.2f}")
+            else:
+                positions_from_file = {}
+                logger.info(f"【资金基线】无持仓文件，基线=0")
+            
+            # 3. 合并持仓（保留内存中的）
             if not self.portfolio:
-                pf_file = self.running_dir / f"portfolio_{portfolio_date}.json"
-                if pf_file.exists():
-                    portfolio_data = self._load_portfolio(str(pf_file))
-                    self.portfolio = portfolio_data.get('positions', {})
-                    logger.info(f"【持仓加载】从文件加载持仓: {portfolio_date}, 共 {len(self.portfolio)} 只股票")
+                self.portfolio = positions_from_file
+            else:
+                for code, pos in positions_from_file.items():
+                    if code not in self.portfolio:
+                        self.portfolio[code] = pos
+            
+            # 4. 关键：计算"本次会话内已执行的卖出收入增量"
+            # 内存中的 current_total_capital - 加载的基线 cash = 会话内增量
+            if baseline_cash is not None and current_cash_before_load > baseline_cash:
+                # 内存比基线多，说明本次会话执行了卖出
+                session_sell_income = current_cash_before_load - baseline_cash
+                logger.info(f"【资金增量】本次会话卖出收入: ¥{session_sell_income:.2f}")
+                # 维持内存中的 current_total_capital（已包含卖出收入）
+            elif baseline_cash is not None:
+                # 内存比基线少或相等，说明本次会话没有卖出收入（或有买入）
+                # 使用基线作为当前可用资金
+                if hasattr(self, 'current_total_capital'):
+                    logger.info(f"【资金同步】使用基线资金: ¥{baseline_cash:.2f}（原: ¥{current_cash_before_load:.2f}）")
+                    self.current_total_capital = baseline_cash
                 else:
-                    logger.info(f"【持仓加载】持仓文件不存在: {pf_file}，使用空持仓")
+                    self.current_total_capital = baseline_cash
+            else:
+                # 无基线文件，保持内存中的值
+                if not hasattr(self, 'current_total_capital'):
+                    self.current_total_capital = self.config.get('initial_capital', 300000.0)
             
             # 加载信号历史（如果内存中为空）
             if not self.signals:
@@ -2570,11 +2731,9 @@ class StrategyRunner:
                 else:
                     return {"success": False, "error": f"未持有股票: {stock_code}"}
             
-            # 保存更新后的信号和持仓
-            # 信号文件使用信号日期，持仓文件使用今日日期（确保前端能正确读取）
+            # 保存更新后的信号和持仓（统一使用交易日 portfolio_date）
             signals_file = self.running_dir / f"signals_{portfolio_date}.json"
-            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-            portfolio_file = self.running_dir / f"portfolio_{today_str}.json"
+            portfolio_file = self.running_dir / f"portfolio_{portfolio_date}.json"
             self._save_signals(self.signals, str(signals_file))
             self._save_portfolio(self.portfolio, str(portfolio_file))
             
@@ -2928,6 +3087,45 @@ class StrategyRunner:
             logger.error(f"获取股票数据失败 {stock_code}: {str(e)}")
             return None
     
+    def _get_stock_data_from_db(self, stock_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+        """从本地数据库获取股票数据（用于卖出操作，不依赖外部API）
+        
+        与 _get_stock_data() 返回格式一致：
+        - 倒序排列（最新在前），iloc[0] 为最新数据
+        - 包含 date/open/high/low/close/volume 等列
+        
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            
+        Returns:
+            DataFrame 或 None
+        """
+        try:
+            # 尝试从缓存获取
+            cache_key = f"{stock_code}_{start_date}_{end_date}"
+            if cache_key in self.stock_data_cache:
+                return self.stock_data_cache[cache_key]
+            
+            # 数据库 stock_kline 表中代码无 .SZ/.SH 后缀，需去除
+            db_code = stock_code.replace('.SZ', '').replace('.SH', '')
+            
+            # 从本地数据库 stock_kline 表查询，默认倒序排列
+            df = self.db_manager.read_stock(db_code, start_date=start_date, end_date=end_date)
+            # read_stock 返回空 DataFrame（非 None）表示无数据
+            if df is not None and not df.empty:
+                # 缓存命中后写入
+                self.stock_data_cache[cache_key] = df
+                return df
+            # 查询无结果
+            logger.warning(f"数据库无 {stock_code} 在 {start_date}~{end_date} 的数据")
+            return None
+        except Exception as e:
+            # DB 查询异常，记录日志后返回 None
+            logger.error(f"从数据库获取股票数据失败 {stock_code}: {str(e)}")
+            return None
+    
     def _get_stock_name(self, stock_code: str) -> str:
         """获取股票名称
         
@@ -3009,13 +3207,18 @@ class StrategyRunner:
             position_expire_hold_days = self.config.get('position_expire_hold_days', 10)
             position_expire_return_threshold = self.config.get('position_expire_return_threshold', 5) / 100  # 转换为小数
             
-            # 遍历持仓股票
+            # 遍历持仓股票（跳过持仓为0的空仓位，避免对已清仓股票生成卖出信号）
             stocks_to_remove = []
             for stock_code, position in self.portfolio.items():
+                # 跳过持仓数量为0的空仓位
+                if position.get('quantity', 0) <= 0:
+                    logger.info(f"【卖出跳过】{stock_code} 持仓为0，跳过卖出检查")
+                    continue
+                
                 # 获取股票数据
                 end_date = trade_date
                 start_date = (datetime.datetime.strptime(end_date, '%Y-%m-%d') - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
-                df = self._get_stock_data(stock_code, start_date, end_date)
+                df = self._get_stock_data_from_db(stock_code, start_date, end_date)
                 
                 if df is None or df.empty:
                     logger.warning(f"获取股票数据失败 {stock_code}，跳过卖出检查")
@@ -3025,9 +3228,7 @@ class StrategyRunner:
                 timing_result = self.timing_strategy.get_timing_result(df, position, use_prev_day_signal=False)
 
                 # 检查止损止盈
-                # 确保数据按日期降序（最新在前），兼容批量加载的升序数据
-                if len(df) > 1 and df['date'].iloc[0] < df['date'].iloc[-1]:
-                    df = df.iloc[::-1].reset_index(drop=True)
+                # 注意：缓存数据是倒序排列的（最新日期在前面）
                 current_price = df.iloc[0]['close']
                 open_price = df.iloc[0]['open']
                 buy_price = position['buy_price']
@@ -3335,10 +3536,7 @@ class StrategyRunner:
                 timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False)
                 
                 # 记录择时信号详情
-                # 确保数据按日期降序（最新在前），兼容批量加载的升序数据
-                if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
-                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
-                current_price = df_to_date.iloc[0]['close']  # iloc[0]是最新数据
+                current_price = df_to_date.iloc[0]['close']  # 倒序数据，iloc[0]是最新数据
                 logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
                            f"评分: {score:.1f} | 现价: ¥{current_price:.2f} | "
                            f"支撑位: ¥{candidate.get('support_level', 0):.2f} | "
@@ -3370,6 +3568,38 @@ class StrategyRunner:
                                     logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} 相对20日最低点涨幅 {gain_from_low*100:.1f}% > 50%，跳过")
                                     continue
                         # ========== 涨幅检查结束 ==========
+                        
+                        # ========== 重复信号检查：避免追高（仅首次建仓）==========
+                        # 直接从信号文件中读取昨天和前天的信号，判断是否重复
+                        from utils.trade_date_utils import get_previous_trading_day
+                        prev_day1 = get_previous_trading_day(trade_date)
+                        prev_day2 = get_previous_trading_day(prev_day1)
+                        
+                        has_repeat_signal = False
+                        repeat_date = None
+                        for check_date in [prev_day1, prev_day2]:
+                            signals_file = self.running_dir / f"signals_{check_date}.json"
+                            if signals_file.exists():
+                                try:
+                                    with open(signals_file, 'r', encoding='utf-8') as f:
+                                        signals_data = json.load(f)
+                                        if isinstance(signals_data, list):
+                                            for signal in signals_data:
+                                                if (signal.get('stock_code') == stock_code and 
+                                                    signal.get('signal_type') == 'buy' and
+                                                    signal.get('trade_type') == 'first'):
+                                                    has_repeat_signal = True
+                                                    repeat_date = check_date
+                                                    break
+                                    if has_repeat_signal:
+                                        break
+                                except Exception as e:
+                                    logger.debug(f"【买入检查】读取信号文件 {signals_file} 失败: {str(e)}")
+                        
+                        if has_repeat_signal:
+                            logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} 重复信号（前次信号: {repeat_date}），跳过")
+                            continue
+                        # ========== 重复信号检查结束 ==========
                         
                         strategy_name = candidate.get('strategy_name', 'N/A')
                         
@@ -3434,6 +3664,8 @@ class StrategyRunner:
                     # T+1日执行模式：更新可用资金
                     if check_capital:
                         current_cash -= current_price * buy_quantity
+                        current_cash = round(current_cash, 2)
+                        self.current_total_capital = current_cash
                 
                 # 记录加仓信号
                 elif timing_result.trade_type == 'add' and existing_pos:
@@ -3465,12 +3697,14 @@ class StrategyRunner:
     
     def _check_continuous_temp_risk(self, trade_date: str) -> Dict:
         """
-        检查连续温度风控状态
+        检查连续温度风控状态（仅记录警告，不阻止信号生成）
         
-        根据连续温度风控规则检查当前日期的风控状态，决定是否允许买入操作。
+        根据连续温度风控规则检查当前日期的风控状态，返回风控评估结果。
+        信号文件仍完整生成供回测追溯；PTrade 端根据风控结果自主决定是否执行实际交易。
+        
         规则：
-        - 0%仓位限制：禁止买入
-        - 20%/50%仓位限制：与实际仓位比较，当实际仓位大于限制阈值时，跳过买入
+        - 0%仓位限制：allow_buy=False（警告级别）
+        - 20%/50%仓位限制：按实际仓位比较决定
         
         Args:
             trade_date: 交易日期，格式 YYYY-MM-DD
@@ -3648,6 +3882,25 @@ class StrategyRunner:
             # 确定工作日期
             working_date = self.get_working_date()
             logger.info(f"工作日期: {working_date}")
+            
+            # 【自动模式】处理 PTrade 反馈文件生成 portfolio（仅盘后/非交易日）
+            if self._should_process_ptrade_feedback():
+                # 将 working_date (YYYY-MM-DD) 转为 PTrade 需要的格式 (YYYYMMDD)
+                feedback_date = working_date.replace("-", "")
+                try:
+                    # 传入主配置，让 Handler 从中读取 ptrade 和 trading 节
+                    handler = PTradeFeedbackHandler(
+                        config=getattr(self, 'main_config', None))
+                    result = handler.process(feedback_date)
+                    if result.get("success"):
+                        logger.info(f"【PTrade反馈】已从 PTrade 文件生成 portfolio: "
+                                    f"feedback_date={feedback_date}, "
+                                    f"holdings={len(result.get('holdings', []))} 条")
+                    else:
+                        logger.info(f"【PTrade反馈】处理跳过: {result.get('error', '未知')} "
+                                    f"(首次运行或 PTrade 文件未生成时正常)")
+                except Exception as e:
+                    logger.warning(f"【PTrade反馈】处理异常，继续使用本地 portfolio: {str(e)}")
             
             # 检查是否已处理
             if self.check_if_processed(working_date):
@@ -3840,14 +4093,15 @@ class StrategyRunner:
             # 保存股票池
             self._save_pool_to_file(self.buy_candidate_pool, working_date)
             
-            # 连续温度风控检查（在生成买入信号之前）
+            # 连续温度风控检查（仅记录警告，不阻止信号生成）
+            # 信号文件仍完整生成，便于回测追溯；
+            # PTrade 端可根据风控状态自主决定是否执行实际交易
             risk_control_result = self._check_continuous_temp_risk(working_date)
             if not risk_control_result['allow_buy']:
-                logger.info(f"【风控检查】{working_date} {risk_control_result['message']}，跳过买入信号生成")
-                buy_signals = []
-            else:
-                # 执行买入操作
-                buy_signals = self._execute_buy_operations(working_date, initial_capital)
+                logger.warning(f"【风控警告】{working_date} {risk_control_result['message']}，但仍生成买入信号供回测参考")
+            
+            # 始终执行买入操作，生成完整信号
+            buy_signals = self._execute_buy_operations(working_date, initial_capital)
             
             # 构建当日记录
             signals = sell_signals + buy_signals
