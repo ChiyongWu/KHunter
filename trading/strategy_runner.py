@@ -1104,8 +1104,21 @@ class StrategyRunner:
             'min_score': 70,
             'working_hour': 9,
             'working_minute': 30,
-            'check_interval': 60
+            'check_interval': 60,
+            'run_mode': 'manual'  # 默认手工模式
         }
+        
+        # 读取 config.yaml 获取 run_mode（自动/手工模式）
+        main_config_path = Path("config/config.yaml")
+        if main_config_path.exists():
+            try:
+                with open(main_config_path, 'r', encoding='utf-8') as f:
+                    main_config = yaml.safe_load(f) or {}
+                run_mode_cfg = main_config.get('run_mode', {})
+                default_config['run_mode'] = run_mode_cfg.get('mode', 'manual')
+                logger.info(f"运行模式: {default_config['run_mode']}")
+            except Exception as e:
+                logger.warning(f"读取 config.yaml run_mode 失败: {e}，使用默认 manual 模式")
         
         # 尝试从yaml文件加载
         config_path = Path("config/strategy_params.yaml")
@@ -1447,7 +1460,32 @@ class StrategyRunner:
             self._initialized_dates.add(date)
             return False
         
-        # 查找有数据的最近交易日（向前查找最多30天）
+        # ========== 自动模式：PTrade 反馈文件优先 ==========
+        # 自动模式下，PTrade 是唯一真实持仓数据源
+        # 当日持仓文件不存在时，应优先读取 PTrade 反馈文件获取真实持仓
+        if self.config.get('run_mode') == 'auto':
+            logger.info(f"【数据初始化】自动模式，持仓文件不存在，尝试从 PTrade 反馈文件获取 {today} 的持仓")
+            if self._try_init_from_ptrade_feedback(today, str(portfolio_file)):
+                # PTrade 反馈初始化成功，创建空信号/交易文件
+                if not signals_file.exists():
+                    self._save_signals([], str(signals_file))
+                    logger.info(f"【数据初始化】创建空信号文件: {signals_file}")
+                if not trades_file.exists():
+                    with open(trades_file, 'w', encoding='utf-8') as f:
+                        json.dump([], f, ensure_ascii=False, indent=2)
+                    logger.info(f"【数据初始化】创建空交易记录文件: {trades_file}")
+                self._initialized_dates.add(date)
+                logger.info(f"【数据初始化】{date} 的数据初始化完成（PTrade 反馈源）")
+                return True
+            else:
+                # PTrade 反馈文件不可用，告警后回退到历史继承逻辑
+                logger.warning(
+                    f"【数据初始化】自动模式下 PTrade 反馈文件不可用，"
+                    f"将回退到历史数据继承方式。"
+                    f"请确认 PTrade 已在 15:05 导出 Fund 和 Hold 文件到 "
+                    f"data/running/ptrade_feedback/ 目录。")
+        
+        # 手工模式 / 自动模式回退：查找有数据的最近交易日（向前查找最多30天）
         current_date = date
         days_looked = 0
         max_days = 30
@@ -1566,6 +1604,73 @@ class StrategyRunner:
         
         logger.info(f"【数据初始化】{date} 的数据初始化完成")
         return True
+    
+    def _try_init_from_ptrade_feedback(self, today: str, portfolio_file: str) -> bool:
+        """自动模式下尝试从 PTrade 反馈文件初始化持仓数据
+        
+        通过读取 PTrade 15:05 导出的 Fund_/Hold_ CSV 文件，
+        构建真实持仓数据并保存为 portfolio JSON。
+        
+        Args:
+            today: 当日日期 YYYY-MM-DD
+            portfolio_file: portfolio 文件路径
+            
+        Returns:
+            初始化成功返回 True，失败返回 False
+        """
+        # 日期格式转换: YYYY-MM-DD → YYYYMMDD
+        today_compact = today.replace('-', '')
+        
+        try:
+            # 导入 PTrade 反馈处理器
+            from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler, PTradeFeedbackError
+            
+            # 初始化处理器（项目根目录为 strategy_runner 的上两级目录）
+            project_root = str(Path(__file__).resolve().parent.parent)
+            handler = PTradeFeedbackHandler(project_root=project_root)
+            
+            # 检查反馈文件是否存在（不完整时已输出告警）
+            if not handler.check_feedback_exists(today_compact):
+                logger.warning(
+                    f"【数据初始化】自动模式：PTrade 反馈文件不完整，"
+                    f"无法从 PTrade 获取 {today} 的持仓数据")
+                return False
+            
+            # 处理反馈文件 → 生成 portfolio JSON
+            result = handler.process(today_compact)
+            
+            if result.get('success'):
+                # PTrade 反馈处理成功，portfolio JSON 已由 process() 自动保存
+                # 加载到策略运行器内存
+                portfolio_data = result.get('portfolio', {})
+                self.portfolio = portfolio_data.get('positions', {})
+                self.current_total_capital = portfolio_data.get(
+                    'cash', self.config.get('initial_capital', 300000))
+                self.initial_capital = portfolio_data.get(
+                    'initial_capital', self.config.get('initial_capital', 300000))
+                # 计算总资产
+                total_assets = self.current_total_capital
+                for pos in self.portfolio.values():
+                    total_assets += pos.get('market_value', 0)
+                self.current_total_assets = total_assets
+                logger.info(
+                    f"【数据初始化】自动模式：从 PTrade 反馈成功获取持仓，"
+                    f"共 {len(self.portfolio)} 只股票，"
+                    f"可用资金: ¥{self.current_total_capital:.2f}，"
+                    f"总资产: ¥{total_assets:.2f}")
+                return True
+            else:
+                logger.warning(
+                    f"【数据初始化】自动模式：PTrade 反馈处理返回失败: "
+                    f"{result.get('error', '未知错误')}")
+                return False
+        except PTradeFeedbackError as e:
+            # PTrade 反馈文件不完整等预期异常
+            logger.warning(f"【数据初始化】自动模式：PTrade 反馈处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"【数据初始化】自动模式：PTrade 反馈处理未预期异常: {e}", exc_info=True)
+            return False
     
     def _load_portfolio(self, portfolio_file: str) -> Dict:
         """加载持仓信息

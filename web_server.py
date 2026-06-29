@@ -1514,38 +1514,20 @@ def get_strategies():
         return jsonify({'success': False, 'error': str(e)})
 
 
-@ app.route('/api/timing-strategies')
+@app.route('/api/timing-strategies')
 def get_timing_strategies():
-    """获取择时策略列表 - 根据配置文件存在与否决定是否包含顺势宝策略"""
+    """获取择时策略列表 - 始终包含全部策略（功能配置检查已移除）"""
     logger.info("开始获取择时策略列表")
     try:
-        from utils.feature_config_checker import FeatureConfigChecker
-        
-        # 检查功能配置
-        checker = FeatureConfigChecker()
-        has_valid_config = False
-        try:
-            valid_files, expire_date = checker.check_config()
-            has_valid_config = bool(valid_files)
-            logger.info(f"功能配置检查结果: 有效文件={valid_files}, 过期日期={expire_date}, has_valid_config={has_valid_config}")
-        except Exception as e:
-            logger.warning(f"检查功能配置时发生异常: {e}")
-        
-        # 基础择时策略列表
+        # 全部择时策略列表
         timing_strategies = [
             {'name': 'turtle', 'display_name': '海龟策略'},
             {'name': 'support', 'display_name': '支撑位策略'},
             {'name': 'rsi', 'display_name': 'RSI策略'},
-            {'name': 'bollinger', 'display_name': '布林带策略'}
+            {'name': 'bollinger', 'display_name': '布林带策略'},
+            {'name': 'macd_bollinger', 'display_name': '顺势宝'}
         ]
-        logger.info(f"基础择时策略列表: {[s['display_name'] for s in timing_strategies]}")
-        
-        # 只有配置文件存在时才添加顺势宝策略
-        if has_valid_config:
-            timing_strategies.append({'name': 'macd_bollinger', 'display_name': '顺势宝'})
-            logger.info("检测到有效配置文件，添加顺势宝策略")
-        else:
-            logger.info("未检测到有效配置文件，不添加顺势宝策略")
+        logger.info(f"择时策略列表: {[s['display_name'] for s in timing_strategies]}")
         
         return jsonify({'success': True, 'strategies': timing_strategies})
     except Exception as e:
@@ -1555,29 +1537,13 @@ def get_timing_strategies():
 
 @app.route('/api/strategy/has-config')
 def check_strategy_config():
-    """检查策略配置文件是否存在"""
-    logger.info("检查策略配置文件是否存在")
-    try:
-        from utils.feature_config_checker import FeatureConfigChecker
-        
-        checker = FeatureConfigChecker()
-        valid_files, expire_date = checker.check_config()
-        has_valid_config = bool(valid_files)
-        
-        logger.info(f"配置文件检查结果: has_valid_config={has_valid_config}, expire_date={expire_date}")
-        
-        return jsonify({
-            'success': True,
-            'has_config': has_valid_config,
-            'expire_date': expire_date
-        })
-    except Exception as e:
-        logger.error(f"检查配置文件失败: {str(e)}")
-        return jsonify({
-            'success': True,
-            'has_config': False,
-            'expire_date': None
-        })
+    """检查策略配置文件是否存在（功能配置检查已移除，始终返回 True）"""
+    logger.info("策略配置文件检查已移除，始终返回 has_config=true")
+    return jsonify({
+        'success': True,
+        'has_config': True,
+        'expire_date': None
+    })
 
 
 @app.route('/api/strategies/<name>/validate', methods=['POST'])

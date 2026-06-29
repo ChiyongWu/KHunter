@@ -12,35 +12,20 @@ let lastSelectionTime = null;
 // 模块变量
 let modules = {};
 
-// 检查策略配置文件是否存在
+// 检查策略配置文件是否存在（功能配置检查已移除，始终返回 true）
 async function checkStrategyConfig() {
     try {
         const response = await fetch('/api/strategy/has-config');
         const result = await response.json();
         
         if (result.success) {
-            const hasConfig = result.has_config;
-            
-            // 如果没有配置文件，隐藏策略执行器菜单和页面
-            if (!hasConfig) {
-                const strategyRunnerMenu = document.querySelector('.nav-item[data-page="strategy-runner"]');
-                const strategyRunnerPage = document.getElementById('strategy-runner-page');
-                
-                if (strategyRunnerMenu) {
-                    strategyRunnerMenu.style.display = 'none';
-                    console.log('未检测到配置文件，已隐藏策略执行器菜单');
-                }
-                if (strategyRunnerPage) {
-                    strategyRunnerPage.style.display = 'none';
-                }
-            }
-            
-            return hasConfig;
+            // 功能配置检查已移除，策略运行器菜单始终显示
+            return true;
         }
     } catch (error) {
         console.error('检查策略配置文件失败:', error);
     }
-    return false;
+    return true;
 }
 
 // 动态加载模块
