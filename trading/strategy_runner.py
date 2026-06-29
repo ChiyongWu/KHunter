@@ -1444,6 +1444,32 @@ class StrategyRunner:
             self.current_total_capital = prev_data.get('cash', 300000)
             self.initial_capital = prev_data.get('initial_capital', 300000)
             
+            # ========== 自动模式下校验持仓来源 ==========
+            # 若已有持仓文件非 PTrade 来源，且自动模式开启，尝试用 PTrade 覆盖
+            source = prev_data.get('source', 'unknown')
+            if self.config.get('run_mode') == 'auto' and source != 'ptrade_feedback':
+                logger.info(
+                    f"【数据初始化】自动模式，持仓来源为 '{source}'（非 PTrade），"
+                    f"尝试从 PTrade 反馈文件更新 {today} 的持仓")
+                if self._try_init_from_ptrade_feedback(today, str(portfolio_file)):
+                    # PTrade 覆盖成功，跳过除权检测（PTrade 数据已是除权后真实数据）
+                    if not signals_file.exists():
+                        self._save_signals([], str(signals_file))
+                    if not trades_file.exists():
+                        with open(trades_file, 'w', encoding='utf-8') as f:
+                            json.dump([], f, ensure_ascii=False, indent=2)
+                    self._initialized_dates.add(date)
+                    logger.info(
+                        f"【数据初始化】{today} 的持仓已从 '{source}' 切换为 PTrade 反馈源，"
+                        f"共 {len(self.portfolio)} 只股票")
+                    return False  # 已完成处理
+                else:
+                    logger.warning(
+                        f"【数据初始化】自动模式：PTrade 反馈文件不可用，"
+                        f"继续使用来源 '{source}' 的现有持仓数据。"
+                        f"请确认 PTrade 已在 15:05 导出 Fund 和 Hold 文件到 "
+                        f"data/running/ptrade_feedback/ 目录。")
+            
             # 执行除权检测
             # 根据盘中/盘后模式决定信号日期
             now = datetime.datetime.now()
@@ -1454,8 +1480,8 @@ class StrategyRunner:
                 # 盘后模式：所有都使用当日日期
                 self._perform_exdividend_check(current_date=today, signal_date=None)
             
-            # 保存调整后的持仓
-            self._save_portfolio(self.portfolio, str(portfolio_file))
+            # 保存调整后的持仓（保留原来源信息）
+            self._save_portfolio(self.portfolio, str(portfolio_file), source=source)
             
             self._initialized_dates.add(date)
             return False
@@ -1466,7 +1492,7 @@ class StrategyRunner:
         if self.config.get('run_mode') == 'auto':
             logger.info(f"【数据初始化】自动模式，持仓文件不存在，尝试从 PTrade 反馈文件获取 {today} 的持仓")
             if self._try_init_from_ptrade_feedback(today, str(portfolio_file)):
-                # PTrade 反馈初始化成功，创建空信号/交易文件
+                # PTrade 反馈初始化成功（handler.process() 已保存 source="ptrade_feedback"），创建空信号/交易文件
                 if not signals_file.exists():
                     self._save_signals([], str(signals_file))
                     logger.info(f"【数据初始化】创建空信号文件: {signals_file}")
@@ -1512,6 +1538,8 @@ class StrategyRunner:
             prev_positions = prev_data.get('positions', {})
             prev_cash = prev_data.get('cash', 300000)
             prev_initial_capital = prev_data.get('initial_capital', 300000)
+            # 获取前一日持仓的来源信息，用于传递给新生成的持仓文件
+            prev_source = prev_data.get('source', 'history_inheritance')
             
             # 更新持仓的持有天数和现价（加上间隔的交易日数）
             updated_positions = {}
@@ -1579,13 +1607,15 @@ class StrategyRunner:
                 # 更新后的持仓
                 updated_positions = self.portfolio
             
-            self._save_portfolio(updated_positions, str(portfolio_file))
+            # 保存持仓，标记来源为历史继承
+            self._save_portfolio(updated_positions, str(portfolio_file),
+                                 source='history_inheritance')
             logger.info(f"【数据初始化】成功从 {found_date} 继承持仓数据，共 {len(updated_positions)} 只股票，总资产: ¥{total_assets:.2f}")
         else:
             # 找不到有数据的交易日，使用初始资金初始化
             self.current_total_capital = self.config.get('initial_capital', 300000)
             self.initial_capital = self.current_total_capital
-            self._save_portfolio({}, str(portfolio_file))
+            self._save_portfolio({}, str(portfolio_file), source='manual_init')
             logger.info(f"【数据初始化】未找到有数据的历史交易日，使用初始资金 {self.current_total_capital} 初始化")
         
         # 创建空的信号文件（如果不存在）
@@ -1679,30 +1709,44 @@ class StrategyRunner:
             portfolio_file: 持仓文件路径
             
         Returns:
-            包含 cash 和 positions 的字典
+            包含 cash、initial_capital、source、positions 的字典
         """
         try:
             if not Path(portfolio_file).exists():
-                return {'cash': 300000, 'positions': {}}
+                return {'cash': 300000, 'initial_capital': 300000, 'positions': {}, 'source': 'unknown'}
             with open(portfolio_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 cash = data.get('cash', 300000)
                 initial_capital = data.get('initial_capital', 300000)
                 positions = data.get('positions', {})
+                source = data.get('source', 'unknown')
                 # 恢复可用资金和初始资金
                 self.current_total_capital = cash
                 self.initial_capital = initial_capital
-                return {'cash': cash, 'initial_capital': initial_capital, 'positions': positions}
+                # 同步计算总资产（可用资金 + 持仓市值）
+                total_assets = cash
+                for pos in positions.values():
+                    mv = pos.get('market_value', 0)
+                    if mv > 0:
+                        total_assets += mv
+                    else:
+                        # 无 market_value 时用 current_price * quantity 估算
+                        total_assets += pos.get('quantity', 0) * pos.get('current_price', 0)
+                self.current_total_assets = total_assets
+                return {'cash': cash, 'initial_capital': initial_capital,
+                        'positions': positions, 'source': source}
         except Exception as e:
             logger.warning(f"加载持仓文件失败: {str(e)}")
-            return {'cash': 300000, 'positions': {}}
+            return {'cash': 300000, 'initial_capital': 300000, 'positions': {}, 'source': 'unknown'}
     
-    def _save_portfolio(self, portfolio: Dict, portfolio_file: str):
+    def _save_portfolio(self, portfolio: Dict, portfolio_file: str, source: str = None):
         """保存持仓信息
         
         Args:
             portfolio: 持仓字典
             portfolio_file: 持仓文件路径
+            source: 数据来源标识 ('ptrade_feedback'/'history_inheritance'/'manual_init')
+                    若为 None，则尝试从已有文件读取来源信息以保持一致性
         """
         try:
             # 确保资金信息已初始化
@@ -1714,17 +1758,40 @@ class StrategyRunner:
             if not hasattr(self, 'initial_capital'):
                 self.initial_capital = self.current_total_capital
             
+            # 自动保留已有文件的来源信息（未显式传入时）
+            if source is None:
+                source = self._read_portfolio_source(portfolio_file)
+            
             data = {
                 'last_updated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'cash': self.current_total_capital,
                 'initial_capital': self.initial_capital,
+                'source': source,  # 持久化数据来源标识
                 'positions': portfolio
             }
             with open(portfolio_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"持仓信息已保存到: {portfolio_file}")
+            logger.info(f"持仓信息已保存到: {portfolio_file} (来源: {source})")
         except Exception as e:
             logger.error(f"保存持仓文件失败: {str(e)}")
+    
+    def _read_portfolio_source(self, portfolio_file: str) -> str:
+        """从已有持仓文件中读取来源信息
+        
+        Args:
+            portfolio_file: 持仓文件路径
+            
+        Returns:
+            来源字符串，文件不存在或无来源信息返回 'unknown'
+        """
+        try:
+            if not Path(portfolio_file).exists():
+                return 'unknown'
+            with open(portfolio_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('source', 'unknown')
+        except Exception:
+            return 'unknown'
     
     def _load_signals(self, signals_file: str) -> List:
         """加载信号历史

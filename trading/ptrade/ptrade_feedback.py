@@ -460,6 +460,7 @@ class PTradeFeedbackHandler:
             "total_asset": fund["total_asset"],
             "market_value": fund["market_value"],
             "initial_capital": self.initial_capital,
+            "source": "ptrade_feedback",  # 标记数据来源为 PTrade 反馈
             "positions": new_positions,
         }
         logger.info(

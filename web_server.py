@@ -3612,6 +3612,9 @@ def get_portfolio():
         total_assets = available_cash + total_value
         total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
         
+        # 同步策略运行器的总资产（确保信号生成时使用一致的总资产数据）
+        runner.current_total_assets = total_assets
+        
         # 返回持仓信息和统计数据
         return jsonify({
             "success": True, 
