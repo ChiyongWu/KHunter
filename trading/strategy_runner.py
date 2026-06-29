@@ -4186,7 +4186,8 @@ class StrategyRunner:
             
             # 确保信号文件路径正确
             signals_file = self.running_dir / f"signals_{working_date}.json"
-            self.signals.extend(signals)
+            # 使用赋值替换（而非extend追加），防止重复执行时信号叠加
+            self.signals = signals
             self._save_signals(self.signals, str(signals_file))
             logger.info(f"信号已保存到: {signals_file}，卖出信号: {len(sell_signals)} 条，买入信号: {len(buy_signals)} 条")
             
