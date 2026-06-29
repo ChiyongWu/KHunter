@@ -549,9 +549,9 @@ class StrategyRunner:
         extended_start = (current_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
         logger.info(f"预加载股票数据: {extended_start} ~ {current_date} (历史: {required_days}天)")
         
-        # 使用批量加载：一次 SQL 查询读取全部股票数据，替代逐只查询
-        logger.info(f"开始批量加载全部股票数据...")
-        all_stock_data = self.db_manager.read_all_stocks_batch()
+        # 使用批量加载：一次 SQL 查询读取全部股票数据（过滤到当前日期，与前端选股行为一致）
+        logger.info(f"开始批量加载股票数据到 {current_date}...")
+        all_stock_data = self.db_manager.read_all_stocks_batch(end_date=current_date)
         total = len(all_stock_data)
         loaded = 0
         skipped = 0
@@ -872,8 +872,9 @@ class StrategyRunner:
                     if not price_row.empty:
                         latest_price = float(price_row['close'].values[0])
                     else:
-                        # 如果没有当日数据，取最新收盘价
-                        latest_price = float(df_price['close'].values[0])
+                        # 如果没有当日数据，取最新收盘价（显式按日期降序，兼容不同数据源排序）
+                        df_desc = df_price.sort_values('date', ascending=False)
+                        latest_price = float(df_desc['close'].values[0])
                     
                     # 更新股票信号中的价格
                     if 'signal' in candidate['stock']:
@@ -916,11 +917,13 @@ class StrategyRunner:
                 continue
             
             # 破支撑位检查：使用当天收盘价（或最新可用收盘价）
-            # 注意：缓存数据是倒序排列的（最新日期在前面）
             df_for_support = df[df['date'] <= current_date].copy()
             if len(df_for_support) < 20:
                 remaining.append(candidate)
                 continue
+            # 确保数据按日期降序（最新在前），批量加载可能返回升序数据
+            if len(df_for_support) > 1 and df_for_support['date'].iloc[0] < df_for_support['date'].iloc[-1]:
+                df_for_support = df_for_support.iloc[::-1].reset_index(drop=True)
             price_for_check = df_for_support.iloc[0]['close']  # 最新数据在 iloc[0]
             
             # 趋势检查：需要至少20天历史数据
@@ -3022,7 +3025,9 @@ class StrategyRunner:
                 timing_result = self.timing_strategy.get_timing_result(df, position, use_prev_day_signal=False)
 
                 # 检查止损止盈
-                # 注意：缓存数据是倒序排列的（最新日期在前面）
+                # 确保数据按日期降序（最新在前），兼容批量加载的升序数据
+                if len(df) > 1 and df['date'].iloc[0] < df['date'].iloc[-1]:
+                    df = df.iloc[::-1].reset_index(drop=True)
                 current_price = df.iloc[0]['close']
                 open_price = df.iloc[0]['open']
                 buy_price = position['buy_price']
@@ -3330,7 +3335,10 @@ class StrategyRunner:
                 timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False)
                 
                 # 记录择时信号详情
-                current_price = df_to_date.iloc[0]['close']  # 倒序数据，iloc[0]是最新数据
+                # 确保数据按日期降序（最新在前），兼容批量加载的升序数据
+                if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                    df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                current_price = df_to_date.iloc[0]['close']  # iloc[0]是最新数据
                 logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
                            f"评分: {score:.1f} | 现价: ¥{current_price:.2f} | "
                            f"支撑位: ¥{candidate.get('support_level', 0):.2f} | "
