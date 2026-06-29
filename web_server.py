@@ -3298,6 +3298,10 @@ strategy_runner = None
 import threading
 _strategy_run_lock = threading.Lock()
 
+# PTrade 反馈会话缓存：防止同一日期重复创建 Handler 和检查文件
+# key: 日期 YYYYMMDD, value: True（已处理）或 False（已检查但无文件）
+_ptrade_processed_cache = {}
+
 def get_strategy_runner(auto_init=False):
     """获取策略运行器实例（延迟初始化）
     
@@ -3535,28 +3539,34 @@ def get_portfolio():
         portfolio_file = runner.running_dir / f"portfolio_{today}.json"
         
         # ========== 自动模式：PTrade 反馈文件优先生成 portfolio ==========
-        # 绕过 initialize_daily_data 的幂等性限制，确保始终从 PTrade 反馈文件读取最新持仓
+        # 使用会话缓存避免重复创建 Handler、检查文件（每日期仅处理一次）
         if runner.config.get('run_mode') == 'auto':
-            try:
-                from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
-                # running_dir 是 data/running，需再往上一级才是项目根目录
-                project_root = str(Path(runner.running_dir).parent.parent)
-                handler = PTradeFeedbackHandler(project_root=project_root)
-                today_compact = today.replace('-', '')
-                # 检查 PTrade 反馈文件是否存在
-                if handler.check_feedback_exists(today_compact):
-                    need_ptrade = True
-                    if portfolio_file.exists():
-                        existing = runner._load_portfolio(str(portfolio_file))
-                        if existing.get('source') == 'ptrade_feedback':
-                            need_ptrade = False  # 已是最新 PTrade 数据，跳过
-                    if need_ptrade:
-                        logger.info(f"【Web】自动模式：从 PTrade 反馈文件 {today_compact} 生成持仓数据")
-                        handler.process(today_compact)
-                else:
-                    logger.warning(f"【Web】自动模式：PTrade 反馈文件 {today_compact} 不存在，使用现有持仓")
-            except Exception as e:
-                logger.warning(f"【Web】PTrade 反馈处理失败: {e}")
+            today_compact = today.replace('-', '')
+            cache_key = f"ptrade_{today_compact}"
+            # 缓存命中：今日已处理过，跳过整个 Handler 创建流程
+            if cache_key not in _ptrade_processed_cache:
+                try:
+                    from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
+                    project_root = str(Path(runner.running_dir).parent.parent)
+                    handler = PTradeFeedbackHandler(project_root=project_root)
+                    if handler.check_feedback_exists(today_compact):
+                        need_ptrade = True
+                        if portfolio_file.exists():
+                            existing = runner._load_portfolio(str(portfolio_file))
+                            if existing.get('source') == 'ptrade_feedback':
+                                need_ptrade = False  # 已是最新 PTrade 数据，跳过
+                        if need_ptrade:
+                            logger.info(f"【Web】自动模式：从 PTrade 反馈文件 {today_compact} 生成持仓数据")
+                            handler.process(today_compact)
+                        _ptrade_processed_cache[cache_key] = True
+                    else:
+                        # 无 PTrade 文件也记录，当天不再重复检查
+                        _ptrade_processed_cache[cache_key] = False
+                        logger.info(f"【Web】自动模式：日期 {today_compact} 无 PTrade 反馈文件，使用现有持仓")
+                except Exception as e:
+                    logger.warning(f"【Web】PTrade 反馈处理失败: {e}")
+                    _ptrade_processed_cache[cache_key] = False  # 失败也缓存，避免死循环
+            # else: 缓存命中，直接跳过
         
         # 先读取文件数据，获取资金和持仓
         file_data = {}
