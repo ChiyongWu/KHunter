@@ -835,27 +835,28 @@ class DBManager:
         import pandas as pd
 
         try:
+            # 使用列表构建条件，避免字符串替换导致的 SQL 语法错误
+            conditions = []
+            params = []
+
+            if start_date:
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("date <= ?")
+                params.append(end_date)
+
             sql = """
                 SELECT code, date, open, high, low, close, volume,
                        market_cap, K, D, J
                 FROM stock_kline
             """
-            params = ()
-
-            # 添加日期过滤条件
-            if start_date:
-                sql += " AND date >= ?"
-                params += (start_date,)
-            if end_date:
-                sql += " AND date <= ?"
-                params += (end_date,)
-
-            # 去掉 WHERE 之前的 AND
-            sql = sql.replace("FROM stock_kline\n                AND", "FROM stock_kline WHERE")
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
 
             sql += " ORDER BY code, date ASC"
 
-            results = self.query(sql, params)
+            results = self.query(sql, tuple(params))
             if not results:
                 logger.warning("批量读取：stock_kline 表无数据")
                 return {}

@@ -3533,6 +3533,30 @@ def get_portfolio():
         
         # 加载持仓信息（使用当日日期，而非前一交易日）
         portfolio_file = runner.running_dir / f"portfolio_{today}.json"
+        
+        # ========== 自动模式：PTrade 反馈文件优先生成 portfolio ==========
+        # 绕过 initialize_daily_data 的幂等性限制，确保始终从 PTrade 反馈文件读取最新持仓
+        if runner.config.get('run_mode') == 'auto':
+            try:
+                from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
+                project_root = str(Path(runner.running_dir).parent)
+                handler = PTradeFeedbackHandler(project_root=project_root)
+                today_compact = today.replace('-', '')
+                # 检查 PTrade 反馈文件是否存在
+                if handler.check_feedback_exists(today_compact):
+                    need_ptrade = True
+                    if portfolio_file.exists():
+                        existing = runner._load_portfolio(str(portfolio_file))
+                        if existing.get('source') == 'ptrade_feedback':
+                            need_ptrade = False  # 已是最新 PTrade 数据，跳过
+                    if need_ptrade:
+                        logger.info(f"【Web】自动模式：从 PTrade 反馈文件 {today_compact} 生成持仓数据")
+                        handler.process(today_compact)
+                else:
+                    logger.warning(f"【Web】自动模式：PTrade 反馈文件 {today_compact} 不存在，使用现有持仓")
+            except Exception as e:
+                logger.warning(f"【Web】PTrade 反馈处理失败: {e}")
+        
         # 先读取文件数据，获取资金和持仓
         file_data = {}
         if portfolio_file.exists():
