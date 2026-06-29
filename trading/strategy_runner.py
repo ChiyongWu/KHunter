@@ -3897,11 +3897,8 @@ class StrategyRunner:
             # 同一日期多次调用不会重复处理
             self.initialize_daily_data(working_date)
             
-            # 检查是否已处理（已有策略执行结果则跳过，避免重复跑策略）
-            if self.check_if_processed(working_date):
-                logger.info(f"日期 {working_date} 已处理，直接返回结果")
-                StrategyRunner._is_running = False
-                return {"status": "success", "message": "日期已处理", "data": {"date": working_date}}
+            # 用户点击执行 = 明确要运行策略，不因旧 daily 文件存在而跳过
+            # 策略运行锁 (_strategy_run_lock) 已防止并发重复执行
             
             # 加载持仓信息
             portfolio_file = self.running_dir / f"portfolio_{working_date}.json"
