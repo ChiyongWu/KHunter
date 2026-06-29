@@ -171,6 +171,8 @@ class StrategyRunner:
         self.stock_data_cache = {}  # {code: df} 完整历史数据
         self.stock_name_cache = {}  # {code: name} 股票名称缓存
         self.stock_filtered_cache = {}  # {code: df} 已过滤ST/退市的股票
+        self._preload_date = None  # 缓存预加载日期，日期变化时自动重新加载
+        self._preload_days = 0  # 记录预加载时的历史天数，参数变化时重新加载
         
         # 可买股票池
         self.buy_candidate_pool = []  # 可买股票池，每个元素包含股票信息和加入日期
@@ -567,9 +569,10 @@ class StrategyRunner:
 
         current_dt = datetime.strptime(current_date, '%Y-%m-%d')
 
-        # 根据策略参数计算需要的历史数据天数
-        buffer_days = 60
-        required_days = buffer_days
+        # 与前端选股保持一致的K线加载范围，确保选股结果一致
+        # 前端固定使用200天，此处 min_days 设为 200 以统一数据口径
+        min_days = 200
+        required_days = min_days
 
         if strategy_name:
             strategy = self.strategy_registry.get_strategy(strategy_name)
@@ -590,7 +593,8 @@ class StrategyRunner:
                         if isinstance(val, (int, float)):
                             max_value = max(max_value, int(val))
 
-                required_days = max_value + buffer_days
+                # 取策略所需天数与前端统一天数(200)的较大值
+                required_days = max(min_days, max_value + 60)
 
         # 扩展开始日期
         extended_start = (current_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
@@ -638,9 +642,11 @@ class StrategyRunner:
         no_kline_skip = 0  # 选股日无K线（不应出现，仅防御）
 
         grouped = all_kline_df.groupby('code')
+        # 最小行数阈值：与前端选股保持一致，固定30行
+        min_rows = 30
         for code, group_df in grouped:
-            # 数据行数不足60行 → 跳过
-            if len(group_df) < 60:
+            # 数据行数不足 → 跳过（按交易日比例折算，避免加载范围不足时全跳过）
+            if len(group_df) < min_rows:
                 skipped += 1
                 continue
 
@@ -673,6 +679,9 @@ class StrategyRunner:
                     f"总股票 {len(active_codes)}, 总耗时 {total_time:.1f}s "
                     f"(步骤: SQL-1={step1_time:.1f}s SQL-2={step2_time:.1f}s "
                     f"名称={step3_time:.1f}s 分组={step4_time:.1f}s)")
+        # 记录预加载参数，用于后续检查是否需要重新加载
+        self._preload_date = current_date
+        self._preload_days = required_days
 
     # ==================== 初始股票池预加载 ====================
 
@@ -1008,6 +1017,7 @@ class StrategyRunner:
             # 获取股票数据
             df = self.stock_filtered_cache.get(stock_code)
             if df is None:
+                logger.debug(f"【股票池移除】{stock_code} {stock_name} 缓存无数据，跳过检查")
                 remaining.append(candidate)
                 continue
             
@@ -1015,6 +1025,7 @@ class StrategyRunner:
             # 注意：缓存数据是正序排列的（最旧日期在前面），iloc[-1] 才是最新
             df_for_support = df[df['date'] <= current_date].copy()
             if len(df_for_support) < 20:
+                logger.debug(f"【股票池移除】{stock_code} {stock_name} 数据不足{len(df_for_support)}天<20，跳过检查")
                 remaining.append(candidate)
                 continue
             price_for_check = df_for_support.iloc[-1]['close']  # 正序数据，iloc[-1] 为最新
@@ -1101,6 +1112,8 @@ class StrategyRunner:
         if removed:
             logger.info(f"股票池移除: {len(removed)} 只, 剩余: {len(remaining)} 只")
             self.buy_candidate_pool = remaining
+        else:
+            logger.info(f"股票池移除检查完成: 0 只移除, {len(remaining)} 只全部保留")
         
         return removed
     
@@ -1659,44 +1672,13 @@ class StrategyRunner:
         signals_file = self.running_dir / f"signals_{date}.json"
         trades_file = self.running_dir / f"trades_{date}.json"
         
-        # ========== 如果当日持仓文件已存在，先同步 PTrade 再执行除权检测 ==========
-        # 自动模式下 PTrade 是唯一真实数据源，必须先同步 PTrade 反馈，
-        # 再对 PTrade 实盘数据执行除权检测，确保除权调整基于最新真实持仓
-        if portfolio_file.exists():
-            logger.info(f"【数据初始化】{date} 的持仓文件已存在")
-            
-            # Step 1: 自动模式下优先从 PTrade 同步真实持仓
-            ptrade_synced = self.sync_portfolio_from_ptrade(date)
-            
-            # Step 2: 如果 PTrade 未同步（非自动模式或无反馈文件），从本地文件加载
-            if not ptrade_synced:
-                prev_data = self._load_portfolio(str(portfolio_file))
-                self.portfolio = prev_data.get('positions', {})
-                self.current_total_capital = prev_data.get('cash', 300000)
-                self.initial_capital = prev_data.get('initial_capital', 300000)
-            
-            # Step 3: 对最终持仓（PTrade 数据或本地数据）执行除权检测
-            now = datetime.datetime.now()
-            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                self._perform_exdividend_check(current_date=date, signal_date=date)
-            else:
-                self._perform_exdividend_check(current_date=date, signal_date=None)
-            
-            return False
-        
-        # ========== 当日持仓文件不存在：先尝试 PTrade 同步，再走继承 ==========
-        # 自动模式下 PTrade 是唯一真实数据源，优先从 PTrade 反馈文件生成 portfolio
+        # ========== 统一入口：优先从 PTrade 同步真实持仓 ==========
+        # PTrade 数据已是除权后信息，无需执行除权检测
         ptrade_synced = self.sync_portfolio_from_ptrade(date)
+        
         if ptrade_synced:
-            # PTrade 已同步，portfolio 文件已由 sync_portfolio_from_ptrade 写入
-            # 执行除权检测（基于 PTrade 实盘数据）
-            logger.info(f"【数据初始化】{date} 数据从 PTrade 反馈同步完成，跳过历史继承")
-            now = datetime.datetime.now()
-            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                self._perform_exdividend_check(current_date=date, signal_date=date)
-            else:
-                self._perform_exdividend_check(current_date=date, signal_date=None)
-            
+            # PTrade 同步成功，portfolio 文件已由 sync_portfolio_from_ptrade 写入
+            logger.info(f"【数据初始化】{date} 数据从 PTrade 反馈同步完成")
             # 创建空的信号文件（如果不存在）
             if not signals_file.exists():
                 self._save_signals([], str(signals_file))
@@ -1707,7 +1689,27 @@ class StrategyRunner:
             logger.info(f"【数据初始化】{date} 的数据初始化完成（PTrade 来源）")
             return True
         
-        # PTrade 未同步，查找有数据的最近交易日 -> 继承历史数据
+        # ========== PTrade 同步失败，按运行模式分流 ==========
+        if getattr(self, 'run_mode', 'manual') == 'auto':
+            # 自动模式下 PTrade 是唯一数据源，同步失败直接报错，禁止任何回退
+            logger.error(
+                f"【数据初始化】{date} 自动模式下 PTrade 反馈文件不存在或同步失败，"
+                f"禁止加载本地缓存。请检查 PTrade 反馈文件是否已生成。"
+                f"预期路径: data/running/ptrade_feedback/Fund_{date.replace('-', '')}.csv 和 "
+                f"Hold_{date.replace('-', '')}.csv")
+            return False
+        
+        # ========== 非自动模式：本地文件或历史继承 ==========
+        if portfolio_file.exists():
+            logger.info(f"【数据初始化】{date} 的持仓文件已存在，从本地加载")
+            prev_data = self._load_portfolio(str(portfolio_file))
+            self.portfolio = prev_data.get('positions', {})
+            self.current_total_capital = prev_data.get('cash', 300000)
+            self.initial_capital = prev_data.get('initial_capital', 300000)
+            return False
+        
+        # ========== 非自动模式：文件不存在，继承历史数据 ==========
+        # 查找有数据的最近交易日 -> 继承历史数据
         prev_portfolio_path, found_date, days_between = self.find_latest_portfolio_file(date, max_days=30)
         
         if prev_portfolio_path and found_date:
@@ -1807,7 +1809,7 @@ class StrategyRunner:
         
         # 已在方法入口处标记为已初始化，无需重复标记
         
-        logger.info(f"【数据初始化】{date} 的数据初始化完成")
+        logger.info(f"【数据初始化】{date} 的数据初始化完成（历史继承）")
         return True
     
     def find_latest_portfolio_file(self, start_date: str = None, max_days: int = 30):
@@ -3927,9 +3929,16 @@ class StrategyRunner:
                 logger.info("需要重新执行，初始化股票池...")
                 is_first_run = True
             
-            # 预加载股票数据
-            if not self.stock_filtered_cache:
-                logger.info(f"股票数据缓存为空，开始预加载...")
+            # 预加载股票数据（缓存为空或工作日期变化时重新加载）
+            need_reload = (
+                not self.stock_filtered_cache
+                or self._preload_date != working_date
+            )
+            if need_reload:
+                if self._preload_date:
+                    logger.info(f"工作日期变化 ({self._preload_date} → {working_date})，重新预加载股票数据...")
+                else:
+                    logger.info(f"股票数据缓存为空，开始预加载...")
                 self._preload_stock_data(working_date, first_strategy)
             
             if need_reexecute:
@@ -3946,6 +3955,8 @@ class StrategyRunner:
             removed_count = len(removed) if removed else 0
             if removed:
                 logger.info(f"股票池移除 {removed_count} 只股票，剩余: {len(self.buy_candidate_pool)} 只")
+            else:
+                logger.info(f"股票池移除检查完成：无需移除，当前 {len(self.buy_candidate_pool)} 只全部通过条件检查")
             
             # 执行卖出操作（在选股之前，释放资金用于买入）
             # 先初始化择时策略（使用第一个任务的择时策略）

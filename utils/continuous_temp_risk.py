@@ -527,14 +527,14 @@ class ContinuousTempRiskController:
             curr_date = sorted_data[i]['trade_date']
             
             if not self._is_consecutive(prev_date, curr_date):
-                # 检查是否是周末或节假日导致的不连续
-                d1 = datetime.strptime(prev_date, '%Y%m%d')
-                d2 = datetime.strptime(curr_date, '%Y%m%d')
-                days_diff = (d2 - d1).days
-                
-                # 最多允许间隔3天（考虑周末+节假日）
-                if days_diff > 3:
+                # 使用交易日历检查：prev_date 是否是 curr_date 的前一交易日
+                # 解决端午节等假日导致日历日差 > 3 天但交易日仍连续的问题
+                from utils.trade_date_utils import get_previous_trading_day
+                prev_trade = get_previous_trading_day(curr_date).replace('-', '')
+                if prev_trade != prev_date:
+                    # 两个日期之间存在缺失交易日，数据不连续
                     return (False, i)
+                # 之间无交易日（假日导致），视为连续
         
         return (True, len(temp_data))
     

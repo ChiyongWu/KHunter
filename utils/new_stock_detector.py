@@ -168,7 +168,7 @@ class NewStockDetector:
             logger.info(f"第3步: 初始化 {len(new_stocks)} 只新股票...")
             self._log(f"第3步: 初始化 {len(new_stocks)} 只新股票...")
             
-            init_result = self._init_new_stocks(new_stocks, years, days)
+            init_result = self._init_new_stocks(new_stocks, years, days, latest_stocks)
             
             # 更新统计信息
             self.stats['initialized'] = init_result['initialized']
@@ -250,27 +250,16 @@ class NewStockDetector:
             logger.error(f"检测新增股票失败: {str(e)}")
             raise
     
-    def _init_new_stocks(self, new_stock_codes: List[str], years: int = 1, days: int = 30) -> Dict:
+    def _init_new_stocks(self, new_stock_codes: List[str], years: int = 3, days: int = 30,
+                         stock_dict: Dict = None) -> Dict:
         """
-        初始化新股票
-        
-        流程：
-        1. 对每只新股票执行初始化
-        2. 初始化包括：基础数据、K线数据、资金流向数据、行业/板块数据
-        3. 记录初始化结果
-        
+        初始化新股票：使用统一初始化入口
+
         Args:
             new_stock_codes: 新股票代码列表
-            years: 初始化K线数据的年数
-            days: 初始化资金流向数据的天数
-        
-        Returns:
-            初始化结果字典，包含：
-            {
-                'initialized': int,     # 成功初始化的股票数
-                'failed': int,          # 初始化失败的股票数
-                'failed_stocks': List[str]  # 初始化失败的股票列表
-            }
+            years: 初始化K线数据的年数（默认3年）
+            days: 已废弃，保留兼容性
+            stock_dict: 股票代码到名称的映射字典（可选，避免重复拉取）
         """
         initialized = 0
         failed = 0
@@ -280,53 +269,19 @@ class NewStockDetector:
             logger.info(f"开始初始化 {len(new_stock_codes)} 只新股票...")
             self._log(f"开始初始化 {len(new_stock_codes)} 只新股票...")
             
-            # 第1步：初始化基础数据（所有新股票一起处理）
-            try:
-                logger.info(f"第1步: 初始化 {len(new_stock_codes)} 只新股票的基础数据...")
-                self._log(f"第1步: 初始化基础数据...")
-                self.data_initializer._init_basic_data(new_stock_codes)
-            except Exception as e:
-                logger.warning(f"初始化基础数据失败: {str(e)}")
-                self._log(f"初始化基础数据失败: {str(e)}")
+            # 使用统一初始化入口
+            self.data_initializer.init_full_data(
+                stock_codes=new_stock_codes, years=years, stock_dict=stock_dict
+            )
+            initialized = len(new_stock_codes)
             
-            # 第2步：初始化K线历史数据（所有新股票一起处理）
-            try:
-                logger.info(f"第2步: 初始化 {len(new_stock_codes)} 只新股票的K线历史数据...")
-                self._log(f"第2步: 初始化K线历史数据...")
-                self.data_initializer._init_kline_history_data(new_stock_codes, years=years)
-            except Exception as e:
-                logger.warning(f"初始化K线历史数据失败: {str(e)}")
-                self._log(f"初始化K线历史数据失败: {str(e)}")
-            
-            # 第3步：对每只新股票执行其他初始化（如果需要）
-            for idx, stock_code in enumerate(new_stock_codes, 1):
-                try:
-                    # 显示进度
-                    progress_pct = (idx / len(new_stock_codes)) * 100
-                    logger.info(f"初始化进度: [{idx}/{len(new_stock_codes)}] {progress_pct:.1f}% - {stock_code}")
-                    
-                    # 这里可以添加其他初始化逻辑（如资金流向、行业/板块等）
-                    # 目前基础数据和K线数据已经初始化，标记为成功
-                    initialized += 1
-                    logger.debug(f"成功初始化: {stock_code}")
-                
-                except Exception as e:
-                    # 记录失败的股票
-                    failed += 1
-                    failed_stocks.append(stock_code)
-                    logger.warning(f"初始化失败: {stock_code} - {str(e)}")
-                    self._log(f"初始化失败: {stock_code} - {str(e)}")
-                    
-                    # 继续处理下一只股票
-                    continue
-            
-            logger.info(f"新股票初始化完成: 成功 {initialized} 只，失败 {failed} 只")
-            self._log(f"初始化完成: 成功 {initialized} 只，失败 {failed} 只")
+            logger.info(f"新股票初始化完成: 成功 {initialized} 只，失败 {0} 只")
+            self._log(f"初始化完成: 成功 {initialized} 只")
             
             return {
                 'initialized': initialized,
-                'failed': failed,
-                'failed_stocks': failed_stocks
+                'failed': 0,
+                'failed_stocks': []
             }
         
         except Exception as e:

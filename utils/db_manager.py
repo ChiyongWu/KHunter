@@ -460,6 +460,7 @@ class DBManager:
         - 保存事务专用连接，确保事务内所有操作使用同一连接
         - 执行 BEGIN IMMEDIATE 立即获取写入锁，避免锁升级冲突
         - 支持嵌套事务（通过线程本地计数器实现）
+        - 自动处理连接上残留的未提交事务（脏连接恢复）
         """
         if self._transaction_count == 0:
             # 获取全局写入锁（阻塞直到获取成功）
@@ -473,6 +474,25 @@ class DBManager:
                 # BEGIN IMMEDIATE 立即获取写入锁，避免后续锁升级失败
                 conn.execute('BEGIN IMMEDIATE')
                 logger.debug("事务开始（已获取写入锁）")
+            except sqlite3.OperationalError as e:
+                # 可能是连接上残留了未提交的事务（脏连接），尝试回滚后重试
+                if 'cannot start a transaction within a transaction' in str(e):
+                    logger.warning(
+                        f"检测到脏连接（残留未提交事务），自动回滚后重试: {e}"
+                    )
+                    try:
+                        self._tx_connection.rollback()
+                        self._tx_connection.execute('BEGIN IMMEDIATE')
+                        logger.debug("脏连接恢复成功，事务开始")
+                    except sqlite3.Error as retry_e:
+                        # 恢复失败，释放写入锁并清空事务连接
+                        self._tx_connection = None
+                        self._has_write_lock = False
+                        self._write_lock.release()
+                        logger.error(f"脏连接恢复失败: {retry_e}")
+                        raise
+                else:
+                    raise
             except sqlite3.Error as e:
                 # 事务开始失败，释放写入锁并清空事务连接
                 self._tx_connection = None
@@ -490,6 +510,7 @@ class DBManager:
         - 只有最外层事务（计数器归零）才真正提交
         - 提交后清空事务专用连接
         - 释放全局写入锁
+        - 提交失败时自动回滚底层连接，避免产生脏连接
         """
         # 嵌套事务：计数器减1
         self._transaction_count -= 1
@@ -501,6 +522,12 @@ class DBManager:
                 logger.debug("事务提交成功")
             except sqlite3.Error as e:
                 logger.error(f"事务提交失败: {str(e)}")
+                # 提交失败时回滚底层连接，避免残留未提交事务（脏连接）
+                try:
+                    if self._tx_connection:
+                        self._tx_connection.rollback()
+                except Exception:
+                    pass
                 raise
             finally:
                 # 无论成功失败，都清空事务连接并释放写入锁
@@ -516,18 +543,31 @@ class DBManager:
         - 无论嵌套层级，立即回滚并重置计数器
         - 清空事务专用连接
         - 释放全局写入锁（仅当当前线程持有时）
+        - 回滚失败时强制关闭连接，确保后续操作拿到干净连接
         """
         # 记录是否需要释放锁
         had_lock = self._has_write_lock
         # 重置事务计数器
         self._transaction_count = 0
+        # 保存当前事务连接的引用（局部变量，不随属性变化）
+        tx_conn = self._tx_connection
         try:
             # 回滚事务
-            if self._tx_connection:
-                self._tx_connection.rollback()
+            if tx_conn:
+                tx_conn.rollback()
             logger.debug("事务回滚成功")
         except sqlite3.Error as e:
             logger.error(f"事务回滚失败: {str(e)}")
+            # 回滚失败意味着连接已处于不可恢复状态
+            # 关闭连接并从线程池中移除，确保下次 connect() 创建新连接
+            try:
+                if tx_conn:
+                    tx_conn.close()
+                thread_id = threading.get_ident()
+                self._connection_pool.pop(thread_id, None)
+                logger.warning("已关闭脏连接并从连接池移除")
+            except Exception as close_e:
+                logger.error(f"关闭脏连接失败: {close_e}")
         finally:
             # 清空事务连接
             self._tx_connection = None
@@ -729,15 +769,20 @@ class DBManager:
             return False
         
         try:
+            # 统一日期格式为 YYYY-MM-DD
+            from utils.date_utils import normalize_date
+            
             # 去重：按日期去重，保留最后出现的
             df = df.drop_duplicates(subset=['date'], keep='last')
             
             # 准备数据列表
             data_list = []
             for _, row in df.iterrows():
+                # 统一日期格式为 YYYY-MM-DD
+                normalized_date = normalize_date(row['date'])
                 data = {
                     'code': stock_code,
-                    'date': str(row['date']).split()[0] if hasattr(row['date'], '__str__') else row['date'],
+                    'date': normalized_date,
                     'open': float(row.get('open', 0)) if pd.notna(row.get('open')) else None,
                     'high': float(row.get('high', 0)) if pd.notna(row.get('high')) else None,
                     'low': float(row.get('low', 0)) if pd.notna(row.get('low')) else None,
@@ -816,71 +861,6 @@ class DBManager:
             logger.debug(f"列出所有股票失败: {str(e)}")
             return []
     
-    def read_all_stocks_batch(self, start_date: str = None, end_date: str = None) -> Dict[str, 'pd.DataFrame']:
-        """
-        批量读取所有股票K线数据（一次 SQL 查询替代逐只读取）
-        
-        将 stock_kline 表全量数据按 code 分组，返回 {code: DataFrame} 字典。
-        大幅减少数据库查询次数，从 N 次降低到 1 次。
-        
-        Args:
-            start_date: 开始日期（可选），格式 YYYY-MM-DD
-            end_date: 结束日期（可选），格式 YYYY-MM-DD
-        
-        Returns:
-            Dict[str, DataFrame]: {股票代码: K线DataFrame}，DataFrame 列含
-                date(已转datetime), open, high, low, close, volume,
-                market_cap, K, D, J
-        """
-        import pandas as pd
-
-        try:
-            # 使用列表构建条件，避免字符串替换导致的 SQL 语法错误
-            conditions = []
-            params = []
-
-            if start_date:
-                conditions.append("date >= ?")
-                params.append(start_date)
-            if end_date:
-                conditions.append("date <= ?")
-                params.append(end_date)
-
-            sql = """
-                SELECT code, date, open, high, low, close, volume,
-                       market_cap, K, D, J
-                FROM stock_kline
-            """
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
-
-            sql += " ORDER BY code, date ASC"
-
-            results = self.query(sql, tuple(params))
-            if not results:
-                logger.warning("批量读取：stock_kline 表无数据")
-                return {}
-
-            # 转为 DataFrame
-            df_all = pd.DataFrame(results)
-
-            # 确保 date 列为 datetime 类型
-            df_all['date'] = pd.to_datetime(df_all['date'])
-
-            # 按 code 分组
-            result = {}
-            for code, group in df_all.groupby('code'):
-                # 重置索引，保留 code 列
-                df = group.reset_index(drop=True)
-                result[code] = df
-
-            logger.info(f"批量读取完成：{len(result)} 只股票，{len(df_all)} 行数据")
-            return result
-
-        except Exception as e:
-            logger.error(f"批量读取股票数据失败: {str(e)}")
-            return {}
-
     def stock_exists(self, stock_code: str) -> bool:
         """
         检查股票数据是否存在（替代 CSVManager.stock_exists）
@@ -930,15 +910,13 @@ class DBManager:
             str: 最晚交易日期（YYYY-MM-DD格式），如果失败返回None
         """
         try:
+            from utils.date_utils import normalize_date
             sql = "SELECT MAX(date) as max_date FROM stock_kline"
             result = self.query_one(sql)
             max_date = result['max_date'] if result and result.get('max_date') else None
             if max_date:
-                if ' ' in str(max_date):
-                    max_date = str(max_date).split()[0]
-                # 转换为 YYYY-MM-DD 格式
-                if len(str(max_date)) == 8:  # 20260430 格式
-                    max_date = f"{str(max_date)[:4]}-{str(max_date)[4:6]}-{str(max_date)[6:8]}"
+                # 使用统一的日期转换工具
+                max_date = normalize_date(max_date)
             logger.debug(f"获取最晚交易日期成功: {max_date}")
             return max_date
         except Exception as e:
@@ -986,3 +964,82 @@ class DBManager:
         except Exception as e:
             logger.debug(f"获取所有股票名称失败: {str(e)}")
             return {}
+
+    def get_active_stock_codes(self, target_date: str) -> set:
+        """
+        批量获取指定日期有K线数据的股票代码集合（一次SQL替代逐个检查）
+
+        用于退市/停牌过滤：选股日无K线的股票会被排除在结果集外
+
+        Args:
+            target_date: 目标日期，格式YYYY-MM-DD
+
+        Returns:
+            set: 当日有K线数据的股票代码集合
+        """
+        try:
+            sql = "SELECT DISTINCT code FROM stock_kline WHERE date = ?"
+            results = self.query(sql, (target_date,))
+            codes = {row['code'] for row in results} if results else set()
+            logger.info(f"[批量] 获取 {target_date} 有效股票: {len(codes)} 只")
+            return codes
+        except Exception as e:
+            logger.error(f"获取有效股票代码失败: {str(e)}")
+            return set()
+
+    def read_all_stocks_kline(self, start_date: str, end_date: str,
+                              codes: Optional[set] = None) -> 'pd.DataFrame':
+        """
+        批量读取全市场K线数据（一次SQL替代逐只加载）
+
+        可通过 codes 参数限定股票范围，仅加载指定的股票代码。
+
+        Args:
+            start_date: 起始日期，格式YYYY-MM-DD
+            end_date: 结束日期，格式YYYY-MM-DD
+            codes: 可选，限定只加载这些股票代码的数据
+
+        Returns:
+            pd.DataFrame: 全市场K线数据，包含 code, date, open, high, low,
+                          close, volume, market_cap, K, D, J 列
+        """
+        import pandas as pd
+
+        try:
+            if codes:
+                # 仅加载指定股票：构建 IN (?, ?, ...) 子句
+                placeholders = ','.join('?' * len(codes))
+                sql = f"""
+                    SELECT code, date, open, high, low, close,
+                           volume, market_cap, K, D, J
+                    FROM stock_kline
+                    WHERE code IN ({placeholders})
+                      AND date BETWEEN ? AND ?
+                    ORDER BY code, date ASC
+                """
+                params = list(codes) + [start_date, end_date]
+            else:
+                sql = """
+                    SELECT code, date, open, high, low, close,
+                           volume, market_cap, K, D, J
+                    FROM stock_kline
+                    WHERE date BETWEEN ? AND ?
+                    ORDER BY code, date ASC
+                """
+                params = (start_date, end_date)
+
+            results = self.query(sql, params)
+            if not results:
+                logger.warning(f"[批量] 日期范围 {start_date}~{end_date} 无K线数据")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(results)
+            logger.info(
+                f"[批量] 加载K线数据 {start_date}~{end_date}: "
+                f"{len(df)} 行, {df['code'].nunique()} 只股票"
+                + (f" (限定{len(codes)}只)" if codes else "")
+            )
+            return df
+        except Exception as e:
+            logger.error(f"批量读取全市场K线失败: {str(e)}")
+            return pd.DataFrame()

@@ -7,8 +7,13 @@
 from datetime import datetime, timedelta
 from typing import Tuple, Dict, Any
 import logging
+import json
+import os
 
 logger = logging.getLogger(__name__)
+
+# 本地日志目录
+UPDATE_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'logs', 'update_log')
 
 
 class TradingTimeValidator:
@@ -24,15 +29,90 @@ class TradingTimeValidator:
     TRADING_END_HOUR = 15
     TRADING_END_MINUTE = 0
     
-    def __init__(self, db_manager):
+    def __init__(self):
         """
         初始化交易时间验证器
-        
-        Args:
-            db_manager: 数据库管理器实例
+
+        所有 update_log 数据仅存储在本地文件中，
+        不再依赖数据库。
         """
-        self.db_manager = db_manager
-    
+
+    @staticmethod
+    def _save_update_log_to_file(update_date: str, data: Dict[str, Any]):
+        """
+        将 update_log 记录写入本地 JSON 文件
+
+        每次写入一个以日期命名的独立文件，
+        同时追加到 data/logs/update_log/_all.jsonl 汇总文件中。
+
+        参数：
+            update_date: 更新日期 YYYY-MM-DD
+            data:       update_log 字段字典
+        """
+        try:
+            os.makedirs(UPDATE_LOG_DIR, exist_ok=True)
+            # 单日独立文件
+            day_file = os.path.join(UPDATE_LOG_DIR, f'update_log_{update_date}.json')
+            with open(day_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            # 追加到汇总文件（JSONL 格式，每行一条）
+            all_file = os.path.join(UPDATE_LOG_DIR, '_all.jsonl')
+            with open(all_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(data, ensure_ascii=False) + '\n')
+            logger.debug(f"update_log 已写入本地文件: {day_file}")
+        except Exception as e:
+            logger.warning(f"写入 update_log 本地文件失败: {e}")
+
+    @staticmethod
+    def _read_update_log_file(update_date: str) -> Dict[str, Any]:
+        """
+        读取指定日期的 update_log 本地文件
+
+        参数：
+            update_date: 更新日期 YYYY-MM-DD
+        返回：
+            update_log 字典，不存在则返回 {}
+        """
+        try:
+            day_file = os.path.join(UPDATE_LOG_DIR, f'update_log_{update_date}.json')
+            if not os.path.exists(day_file):
+                return {}
+            with open(day_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"读取 update_log 本地文件失败: {e}")
+            return {}
+
+    @staticmethod
+    def _get_last_completed_from_files() -> str:
+        """
+        从本地文件中获取最后一次 completed 状态的更新日期
+
+        返回：
+            最后成功更新的日期 YYYY-MM-DD，没有则返回空字符串
+        """
+        try:
+            if not os.path.isdir(UPDATE_LOG_DIR):
+                return ""
+            # 遍历目录下所有 json 文件（排除 _all.jsonl）
+            latest_date = ""
+            for fname in os.listdir(UPDATE_LOG_DIR):
+                if fname.startswith('update_log_') and fname.endswith('.json'):
+                    fpath = os.path.join(UPDATE_LOG_DIR, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        if data.get('status') == 'completed':
+                            date_str = data.get('update_date', '')
+                            if date_str > latest_date:
+                                latest_date = date_str
+                    except Exception:
+                        continue
+            return latest_date
+        except Exception as e:
+            logger.warning(f"从本地文件获取最后更新日期失败: {e}")
+            return ""
+
     def validate_update_time(self) -> Tuple[bool, str, str]:
         """
         验证当前时间是否允许更新
@@ -49,30 +129,44 @@ class TradingTimeValidator:
         current_minute = now.minute
         current_time_minutes = current_hour * 60 + current_minute
         
+        # 先判断今天是否为交易日
+        today_str = now.strftime("%Y-%m-%d")
+        is_today_trading_day = self._is_trading_day(today_str)
+        
         # 计算交易时间的分钟数
         trading_start_minutes = self.TRADING_START_HOUR * 60 + self.TRADING_START_MINUTE
         trading_end_minutes = self.TRADING_END_HOUR * 60 + self.TRADING_END_MINUTE
         
-        # 判断当前时间段
-        if trading_start_minutes <= current_time_minutes < trading_end_minutes:
+        # 判断当前时间段（仅交易日才限制交易时段内不可更新）
+        if is_today_trading_day and trading_start_minutes <= current_time_minutes < trading_end_minutes:
             # 在交易时间内，不允许更新
             return False, "交易时间不允许更新", ""
         
         # 确定目标更新日期
-        if current_time_minutes < trading_start_minutes:
-            # 交易前（00:00-09:30），更新到前一天数据
-            target_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        if is_today_trading_day:
+            # 交易日：按时间划分
+            if current_time_minutes < trading_start_minutes:
+                # 交易前（00:00-09:30），更新到前一天数据
+                target_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                # 收盘后（15:00-23:59），更新到当天数据
+                target_date = today_str
         else:
-            # 收盘后（15:00-23:59），更新到当天数据
-            target_date = now.strftime("%Y-%m-%d")
+            # 非交易日：目标日期为最近一个交易日
+            target_date = self._get_last_trading_day(today_str)
+            if not target_date:
+                return False, "无法确定有效的目标更新日期", ""
+            logger.info(f"今天非交易日，目标更新日期为最近交易日: {target_date}")
+            # 非交易日跳过已更新检查，直接允许
+            return True, "", target_date
         
-        # 检查目标日期是否为交易日
+        # 检查目标日期是否为交易日（交易日，目标日期可能不是交易日如凌晨时段）
         if not self._is_trading_day(target_date):
             # 如果目标日期不是交易日，找到最近的一个交易日
             target_date = self._get_last_trading_day(target_date)
             if not target_date:
                 return False, "无法确定有效的目标更新日期", ""
-            logger.info(f"当前日期非交易日，调整目标更新日期为: {target_date}")
+            logger.info(f"目标日期非交易日，调整目标更新日期为: {target_date}")
         
         # 检查是否已在目标日期更新过
         is_updated, error_msg = self._check_if_updated(target_date)
@@ -132,35 +226,23 @@ class TradingTimeValidator:
     
     def _check_if_updated(self, target_date: str) -> Tuple[bool, str]:
         """
-        检查是否已在目标日期更新过
+        检查是否已在目标日期更新过（从本地文件读取）
 
         检查逻辑：
-        1. 如果 update_log 表中有 'completed' 记录，则已更新
-        2. 否则允许更新
+        1. 读取本地文件 data/logs/update_log/update_log_{date}.json
+        2. 如果文件存在且 status 为 'completed'，则已更新
 
         Args:
             target_date: 目标更新日期（YYYY-MM-DD格式）
 
         返回值:
             (is_updated, error_message)
-            - is_updated: 是否已更新
-            - error_message: 错误信息
         """
         try:
-            cursor = self.db_manager.connect().cursor()
-
-            # 第1步：检查 update_log 表中是否有 'completed' 记录
-            cursor.execute(
-                "SELECT id FROM update_log WHERE update_date = ? AND status = 'completed'",
-                (target_date,)
-            )
-            if cursor.fetchone():
-                # 已存在完成的更新记录
+            log_data = self._read_update_log_file(target_date)
+            if log_data and log_data.get('status') == 'completed':
                 return True, f"目标日期 {target_date} 已更新过"
-
-            # 没有完成的更新记录，允许更新
             return False, ""
-
         except Exception as e:
             logger.error(f"检查更新日志失败: {str(e)}")
             return False, ""
@@ -184,159 +266,87 @@ class TradingTimeValidator:
     
     def record_update_complete(self, target_date: str, stats: Dict[str, Any]) -> bool:
         """
-        记录更新完成
-        
-        只在更新成功完成后才记录。如果记录不存在则创建，存在则更新。
-        
+        记录更新完成（仅写入本地文件，不再使用数据库）
+
         Args:
             target_date: 目标更新日期（YYYY-MM-DD格式）
             stats: 更新统计信息
-        
+
         返回值:
             是否成功记录
         """
         try:
-            cursor = self.db_manager.connect().cursor()
-            
-            # 检查是否已存在记录
-            cursor.execute(
-                "SELECT id FROM update_log WHERE update_date = ?",
-                (target_date,)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                # 更新现有记录
-                cursor.execute(
-                    """UPDATE update_log 
-                    SET status = ?, 
-                        update_time = ?,
-                        new_stock_detected = ?,
-                        new_stock_initialized = ?,
-                        kline_added = ?,
-                        kline_updated = ?,
-                        fund_flow_added = ?,
-                        fund_flow_updated = ?
-                    WHERE update_date = ?""",
-                    (
-                        'completed',
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        stats.get('new_stock_detected', 0),
-                        stats.get('new_stock_initialized', 0),
-                        stats.get('kline_added', 0),
-                        stats.get('kline_updated', 0),
-                        stats.get('fund_flow_added', 0),
-                        stats.get('fund_flow_updated', 0),
-                        target_date
-                    )
-                )
-            else:
-                # 创建新记录（只在更新成功时创建）
-                cursor.execute(
-                    """INSERT INTO update_log 
-                    (update_date, update_time, status, new_stock_detected, new_stock_initialized, 
-                     kline_added, kline_updated, fund_flow_added, fund_flow_updated) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        target_date,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'completed',
-                        stats.get('new_stock_detected', 0),
-                        stats.get('new_stock_initialized', 0),
-                        stats.get('kline_added', 0),
-                        stats.get('kline_updated', 0),
-                        stats.get('fund_flow_added', 0),
-                        stats.get('fund_flow_updated', 0)
-                    )
-                )
-            
-            self.db_manager.connect().commit()
+            log_data = {
+                'update_date': target_date,
+                'update_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'status': 'completed',
+                'new_stock_detected': stats.get('new_stock_detected', 0),
+                'new_stock_initialized': stats.get('new_stock_initialized', 0),
+                'kline_added': stats.get('kline_added', 0),
+                'kline_updated': stats.get('kline_updated', 0),
+                'fund_flow_added': stats.get('fund_flow_added', 0),
+                'fund_flow_updated': stats.get('fund_flow_updated', 0),
+                'market_cap_updated': stats.get('market_cap_updated', 0),
+                'market_cap_failed': stats.get('market_cap_failed', 0),
+            }
+            self._save_update_log_to_file(target_date, log_data)
             return True
-        
         except Exception as e:
             logger.error(f"记录更新完成失败: {str(e)}")
             return False
     
     def record_update_failed(self, target_date: str, error_message: str) -> bool:
         """
-        记录更新失败
-        
-        如果更新失败，不记录任何信息。这样下次可以重新尝试更新。
-        
+        记录更新失败（仅写入本地文件，不再使用数据库）
+
         Args:
             target_date: 目标更新日期（YYYY-MM-DD格式）
             error_message: 错误信息
-        
+
         返回值:
             是否成功处理
         """
         try:
-            cursor = self.db_manager.connect().cursor()
-            
-            # 删除失败的记录（如果存在）
-            # 这样下次可以重新尝试更新
-            cursor.execute(
-                "DELETE FROM update_log WHERE update_date = ? AND status != 'completed'",
-                (target_date,)
-            )
-            
-            self.db_manager.connect().commit()
-            logger.info(f"更新失败，已清除 {target_date} 的未完成记录。错误: {error_message}")
+            log_data = {
+                'update_date': target_date,
+                'update_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'status': 'failed',
+                'error_message': error_message,
+                'new_stock_detected': 0,
+                'new_stock_initialized': 0,
+                'kline_added': 0,
+                'kline_updated': 0,
+                'fund_flow_added': 0,
+                'fund_flow_updated': 0,
+            }
+            self._save_update_log_to_file(target_date, log_data)
+            logger.info(f"更新失败已记录: {target_date}，错误: {error_message}")
             return True
-        
         except Exception as e:
             logger.error(f"处理更新失败失败: {str(e)}")
             return False
     
-    def get_last_update_date(self) -> str:
+    @staticmethod
+    def get_last_update_date() -> str:
         """
-        获取上次成功更新的日期（以实际数据为准）
-        
-        优先级：
-        1. 从 stock_kline 表中获取最后一根 K 线的日期（优先使用实际数据日期）
-        2. 如果 stock_kline 表中没有记录，则从 update_log 表中获取最后一次成功更新的日期
-        3. 如果都没有，则返回空字符串
-        
-        注意：优先使用 stock_kline 表是为了避免 update_log 记录了更新但实际数据未更新的情况
-        例如：更新任务执行了，但API没有返回新数据，此时 update_log 日期会大于实际数据日期
-        
+        获取上次成功更新的日期（仅从本地文件读取）
+
+        从本地 data/logs/update_log/ 目录中获取最后 completed 状态的更新日期。
+
         返回值:
             上次更新日期（YYYY-MM-DD格式），如果没有则返回空字符串
         """
         try:
-            cursor = self.db_manager.connect().cursor()
-            
-            # 第1步：优先从 stock_kline 表中获取最后一根 K 线的日期
-            cursor.execute(
-                "SELECT MAX(date) FROM stock_kline"
-            )
-            result = cursor.fetchone()
-            
-            if result and result[0]:
-                kline_date = result[0]
-                logger.debug(f"从 stock_kline 表中获取最后 K 线日期: {kline_date}")
-                
-                # 转换日期格式：如果是 YYYYMMDD 格式，转换为 YYYY-MM-DD
-                if len(kline_date) == 8 and kline_date.isdigit():
-                    kline_date = f"{kline_date[:4]}-{kline_date[4:6]}-{kline_date[6:8]}"
-                
-                return kline_date
-            
-            # 第2步：如果 stock_kline 表中没有记录，则从 update_log 表中获取
-            logger.debug("stock_kline 表中没有数据，尝试从 update_log 表中获取...")
-            cursor.execute(
-                "SELECT update_date FROM update_log WHERE status = 'completed' ORDER BY update_date DESC LIMIT 1"
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                logger.debug(f"从 update_log 表中获取最后更新日期: {result[0]}")
-                return result[0]
-            
-            # 第3步：都没有记录
-            logger.warning("无法获取最后更新日期：update_log 和 stock_kline 表中都没有记录")
+            # 从本地 update_log 文件获取最后成功更新的日期
+            last_date = TradingTimeValidator._get_last_completed_from_files()
+
+            if last_date:
+                logger.debug(f"从本地 update_log 文件获取最后更新日期: {last_date}")
+                return last_date
+
+            logger.warning("无法获取最后更新日期：本地 update_log 无记录")
             return ""
-        
+
         except Exception as e:
             logger.error(f"获取上次更新日期失败: {str(e)}")
             return ""

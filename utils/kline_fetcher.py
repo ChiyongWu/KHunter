@@ -234,8 +234,9 @@ class KlineFetcher:
                     try:
                         for idx_row, row in df.iterrows():
                             try:
-                                # 将日期转换为字符串格式
-                                date_str = str(row['date']).split(' ')[0]
+                                # 统一日期格式为 YYYY-MM-DD
+                                from utils.date_utils import normalize_date
+                                date_str = normalize_date(row['date'])
                                 
                                 # 使用 UPSERT 语句
                                 self.db_manager.execute_with_retry(upsert_sql, (

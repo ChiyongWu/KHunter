@@ -863,10 +863,8 @@ def run_backtest():
         result = engine.run_backtest(english_strategy_name, config)
         
         # 构建保存到数据库的结果格式
-        # 计算final_capital
-        final_capital = config.get('initial_capital', 300000)
-        if 'capital_history' in result and result['capital_history']:
-            final_capital = result['capital_history'][-1]
+        # 使用引擎返回的 final_capital（引擎内已确保 capital_history 与其一致）
+        final_capital = result.get('final_capital', config.get('initial_capital', 300000))
         
         # 使用中文策略名称保存到数据库，每次都创建新记录
         save_result = {

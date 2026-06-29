@@ -592,8 +592,31 @@ class SelectionRecordManager:
             
             where_sql = " AND ".join(where_clauses)
             
-            # 策略名称筛选需要特殊处理，因为我们需要先分组再筛选
+            # 策略名称筛选：使用子查询筛选包含指定策略的记录
             strategy_name_filter = filters.get('strategy_name', '')
+            if strategy_name_filter:
+                # 处理策略名称筛选（兼容有无"策略"二字的情况）
+                filter_text = strategy_name_filter.replace('策略', '')
+                # 使用子查询筛选包含指定策略的股票+日期组合
+                where_clauses.append("""
+                    (stock_code, selection_date) IN (
+                        SELECT DISTINCT stock_code, selection_date 
+                        FROM stock_selection_record 
+                        WHERE is_active = 1 AND (
+                            strategy_name LIKE ? OR 
+                            strategy_name LIKE ? OR
+                            REPLACE(strategy_name, '策略', '') LIKE ?
+                        )
+                    )
+                """)
+                # 添加三种匹配模式的参数
+                params.extend([
+                    f'%{strategy_name_filter}%',  # 原始匹配
+                    f'%{filter_text}%',           # 移除"策略"后匹配
+                    f'%{filter_text}%'            # REPLACE后匹配
+                ])
+                # 重新构建where_sql
+                where_sql = " AND ".join(where_clauses)
             
             # 查询分组后的总数
             total = 0
@@ -612,107 +635,54 @@ class SelectionRecordManager:
             
             # 转换为字典列表并计算价格指标
             data = []
-            filtered_total = 0
             
             # 计算偏移量
             offset = (page - 1) * limit
-            current_offset = offset
             
-            while len(data) < limit:
-                # 构建查询SQL，使用strategy_count字段
-                query_sql = f"""
-                SELECT DISTINCT stock_code, stock_name, selection_date, MIN(selection_price) as selection_price, 
-                       MIN(industry) as industry, MIN(sector) as sector, 
-                       MIN(selection_time) as selection_time, 
-                       MAX(strategy_count) as strategy_count
+            # 构建查询SQL，使用strategy_count字段
+            query_sql = f"""
+            SELECT DISTINCT stock_code, stock_name, selection_date, MIN(selection_price) as selection_price, 
+                   MIN(industry) as industry, MIN(sector) as sector, 
+                   MIN(selection_time) as selection_time, 
+                   MAX(strategy_count) as strategy_count
+            FROM stock_selection_record 
+            WHERE {where_sql}
+            GROUP BY stock_code, selection_date
+            ORDER BY selection_date DESC, strategy_count DESC, selection_time DESC
+            LIMIT ? OFFSET ?
+            """
+            
+            # 执行查询
+            cursor = self.db_manager.execute_with_retry(query_sql, params + [limit, offset])
+            batch_rows = [dict(row) for row in cursor.fetchall()]
+            
+            for record in batch_rows:
+                stock_code = record['stock_code']
+                selection_date = record['selection_date']
+                
+                # 获取该股票在该日期的所有策略
+                strategies_sql = """
+                SELECT strategy_name 
                 FROM stock_selection_record 
-                WHERE {where_sql}
-                GROUP BY stock_code, selection_date
-                ORDER BY selection_date DESC, strategy_count DESC, selection_time DESC
-                LIMIT ? OFFSET ?
+                WHERE stock_code = ? AND selection_date = ? AND is_active = 1
                 """
+                strategies_cursor = self.db_manager.execute_with_retry(strategies_sql, (stock_code, selection_date))
+                strategies = [row[0] for row in strategies_cursor.fetchall()]
                 
-                # 执行查询
-                cursor = self.db_manager.execute_with_retry(query_sql, params + [limit * 2, current_offset])
-                batch_rows = [dict(row) for row in cursor.fetchall()]
+                # 实时计算价格指标
+                performance = self.calculate_performance(
+                    stock_code,
+                    record['selection_price'],
+                    selection_date
+                )
                 
-                if not batch_rows:
-                    break
-                
-                current_offset += len(batch_rows)
-                
-                for record in batch_rows:
-                    stock_code = record['stock_code']
-                    selection_date = record['selection_date']
-                    
-                    # 获取该股票在该日期的所有策略
-                    strategies_sql = """
-                    SELECT strategy_name 
-                    FROM stock_selection_record 
-                    WHERE stock_code = ? AND selection_date = ? AND is_active = 1
-                    """
-                    strategies_cursor = self.db_manager.execute_with_retry(strategies_sql, (stock_code, selection_date))
-                    strategies = [row[0] for row in strategies_cursor.fetchall()]
-                    
-                    # 如果有策略名称筛选，检查是否包含该策略
-                    if strategy_name_filter:
-                        # 检查是否有策略名称包含筛选条件（兼容有无"策略"二字的情况）
-                        filter_text = strategy_name_filter
-                        # 移除"策略"二字进行比较
-                        filter_text_no_strategy = filter_text.replace('策略', '')
-                        
-                        matched = False
-                        for strategy in strategies:
-                            # 检查原始策略名称是否包含筛选条件
-                            if filter_text in strategy:
-                                matched = True
-                                break
-                            # 检查移除"策略"二字后的策略名称是否包含筛选条件
-                            strategy_no_strategy = strategy.replace('策略', '')
-                            if filter_text_no_strategy in strategy_no_strategy:
-                                matched = True
-                                break
-                        
-                        if not matched:
-                            continue
-                    
-                    # 实时计算价格指标
-                    performance = self.calculate_performance(
-                        stock_code,
-                        record['selection_price'],
-                        selection_date
-                    )
-                    
-                    # 合并价格指标和策略信息
-                    record.update(performance)
-                    record['strategy_name'] = "，".join(strategies)  # 用中文逗号连接策略名称
-                    record['strategies'] = strategies  # 添加策略列表
-                    data.append(record)
-                    filtered_total += 1
-                    
-                    if len(data) >= limit:
-                        break
+                # 合并价格指标和策略信息
+                record.update(performance)
+                record['strategy_name'] = "，".join(strategies)  # 用中文逗号连接策略名称
+                record['strategies'] = strategies  # 添加策略列表
+                data.append(record)
             
-            # 计算实际的总记录数（如果有筛选）
-            if strategy_name_filter:
-                # 重新查询符合筛选条件的总记录数
-                filtered_count_sql = f"""
-                SELECT COUNT(*) as total 
-                FROM (
-                    SELECT DISTINCT stock_code, selection_date 
-                    FROM stock_selection_record 
-                    WHERE {where_sql}
-                ) as distinct_records
-                """
-                cursor = self.db_manager.execute_with_retry(filtered_count_sql, params)
-                row = cursor.fetchone()
-                if row and row[0]:
-                    total = row[0]
-            else:
-                # 使用之前查询的总记录数
-                pass
-            
-            logger.info(f"查询选股历史 - 总数: {total}, 筛选后: {filtered_total}, 页码: {page}, 每页: {limit}")
+            logger.info(f"查询选股历史 - 总数: {total}, 返回数据: {len(data)}, 页码: {page}, 每页: {limit}")
             
             return {
                 'success': True,

@@ -32,6 +32,27 @@ SCORE_WEIGHTS = {
 # 一票否决时的固定得分
 VETO_SCORE = -100
 
+# 策略类名到中文名称的映射
+STRATEGY_CLASS_NAME_MAP = {
+    'BottomTrendInflectionStrategy': '底部趋势拐点',
+    'TrendAccelerationInflectionStrategy': '趋势加速拐点',
+    'TrendResonanceReversalStrategy': '趋势共振反转策略',
+    'ResistanceBreakoutStrategy': '阻力位突破策略',
+    'WBottomStrategy': 'W底策略',
+    'MultiGoldenCrossStrategy': '多金叉共振策略',
+    'MorningStarStrategy': '启明星策略',
+    'MultiPartyCannonStrategy': '多方炮策略',
+    'MultiDeathCrossStrategy': '多死叉共振策略',
+    'MTopStrategy': 'M头策略',
+    'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
+    'LimitUpPullbackStrategy': '涨停回马枪策略',
+    'LimitUpSidewaysStrategy': '涨停横盘策略',
+    'GoldenTriangleStrategy': '金三角策略',
+    'Strategy2560': '2560战法',
+    'TrendStartStrategy': '趋势起点策略',
+    'ImmortalGuidanceStrategy': '仙人指路策略'
+}
+
 
 class TechnicalDetail:
     """

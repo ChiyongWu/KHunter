@@ -15,8 +15,8 @@ from typing import Dict, List, Tuple
 
 # 导入数据库管理器
 from utils.db_manager import DBManager
-# 导入技术面详情模型
-from trading.stock_score_models import TechnicalDetail
+# 导入技术面详情模型和策略类名映射
+from trading.stock_score_models import TechnicalDetail, STRATEGY_CLASS_NAME_MAP
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
@@ -323,22 +323,8 @@ class TechnicalScorer:
             strategy_list = []
             total_score = 0.0
             
-            # 完整的策略类名到中文名称的映射
-            class_name_map = {
-                'BottomTrendInflectionStrategy': '底部趋势拐点',
-                'TrendAccelerationInflectionStrategy': '趋势加速拐点',
-                'TrendResonanceReversalStrategy': '趋势共振反转策略',
-                'ResistanceBreakoutStrategy': '阻力位突破策略',
-                'WBottomStrategy': 'W底策略',
-                'MultiGoldenCrossStrategy': '多金叉共振策略',
-                'MorningStarStrategy': '启明星策略',
-                'MultiPartyCannonStrategy': '多方炮策略',
-                'MultiDeathCrossStrategy': '多死叉共振策略',
-                'MTopStrategy': 'M头策略',
-                'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
-                'LimitUpPullbackStrategy': '涨停回马枪策略',
-                'LimitUpSidewaysStrategy': '涨停横盘策略'
-            }
+            # 使用全局策略类名到中文名称的映射
+            class_name_map = STRATEGY_CLASS_NAME_MAP
             
             # 构建策略名称映射列表，用于一票否决检查
             mapped_strategies = []
@@ -418,25 +404,8 @@ class TechnicalScorer:
                         weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
                     # 如果仍然失败，尝试使用策略类名映射
                     if weight == 0:
-                        # 完整的策略类名到中文名称的映射
-                        class_name_map = {
-                            'BottomTrendInflectionStrategy': '底部趋势拐点',
-                            'TrendAccelerationInflectionStrategy': '趋势加速拐点',
-                            'TrendResonanceReversalStrategy': '趋势共振反转策略',
-                            'ResistanceBreakoutStrategy': '阻力位突破策略',
-                            'WBottomStrategy': 'W底策略',
-                            'MultiGoldenCrossStrategy': '多金叉共振策略',
-                            'MorningStarStrategy': '启明星策略',
-                            'MultiPartyCannonStrategy': '多方炮策略',
-                            'MultiDeathCrossStrategy': '多死叉共振策略',
-                            'MTopStrategy': 'M头策略',
-                            'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
-                            'LimitUpPullbackStrategy': '涨停回马枪策略',
-                            'LimitUpSidewaysStrategy': '涨停横盘策略',
-                            'GoldenTriangleStrategy': '金三角策略'
-                        }
-                        if strategy in class_name_map:
-                            chinese_name = class_name_map[strategy]
+                        if strategy in STRATEGY_CLASS_NAME_MAP:
+                            chinese_name = STRATEGY_CLASS_NAME_MAP[strategy]
                             weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
                     total_score += weight
                     strategy_list.append({"name": strategy, "weight": weight})
@@ -500,24 +469,8 @@ class TechnicalScorer:
                             weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
                         # 如果仍然失败，尝试使用策略类名映射
                         if weight == 0:
-                            # 完整的策略类名到中文名称的映射
-                            class_name_map = {
-                                'BottomTrendInflectionStrategy': '底部趋势拐点',
-                                'TrendAccelerationInflectionStrategy': '趋势加速拐点',
-                                'TrendResonanceReversalStrategy': '趋势共振反转策略',
-                                'ResistanceBreakoutStrategy': '阻力位突破策略',
-                                'WBottomStrategy': 'W底策略',
-                                'MultiGoldenCrossStrategy': '多金叉共振策略',
-                                'MorningStarStrategy': '启明星策略',
-                                'MultiPartyCannonStrategy': '多方炮策略',
-                                'MultiDeathCrossStrategy': '多死叉共振策略',
-                                'MTopStrategy': 'M头策略',
-                                'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
-                                'LimitUpPullbackStrategy': '涨停回马枪策略',
-                                'LimitUpSidewaysStrategy': '涨停横盘策略'
-                            }
-                            if strategy in class_name_map:
-                                chinese_name = class_name_map[strategy]
+                            if strategy in STRATEGY_CLASS_NAME_MAP:
+                                chinese_name = STRATEGY_CLASS_NAME_MAP[strategy]
                                 weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
                         total_score += weight
                         strategy_list.append({"name": strategy, "weight": weight})
@@ -576,24 +529,8 @@ class TechnicalScorer:
                             weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
                         # 如果仍然失败，尝试使用策略类名映射
                         if weight == 0:
-                            # 完整的策略类名到中文名称的映射
-                            class_name_map = {
-                                'BottomTrendInflectionStrategy': '底部趋势拐点',
-                                'TrendAccelerationInflectionStrategy': '趋势加速拐点',
-                                'TrendResonanceReversalStrategy': '趋势共振反转策略',
-                                'ResistanceBreakoutStrategy': '阻力位突破策略',
-                                'WBottomStrategy': 'W底策略',
-                                'MultiGoldenCrossStrategy': '多金叉共振策略',
-                                'MorningStarStrategy': '启明星策略',
-                                'MultiPartyCannonStrategy': '多方炮策略',
-                                'MultiDeathCrossStrategy': '多死叉共振策略',
-                                'MTopStrategy': 'M头策略',
-                                'StrongWashWeakToStrongStrategy': '强势洗盘弱转强策略',
-                                'LimitUpPullbackStrategy': '涨停回马枪策略',
-                                'LimitUpSidewaysStrategy': '涨停横盘策略'
-                            }
-                            if strategy in class_name_map:
-                                chinese_name = class_name_map[strategy]
+                            if strategy in STRATEGY_CLASS_NAME_MAP:
+                                chinese_name = STRATEGY_CLASS_NAME_MAP[strategy]
                                 weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
                         total_score += weight
                         strategy_list.append({"name": strategy, "weight": weight})
@@ -702,13 +639,22 @@ class TechnicalScorer:
                     
                     # 从配置中提取每个策略的 display_name
                     strategies_config = config.get('strategies', {})
+                    
+                    # 尝试匹配策略名称
+                    matched = False
                     for strategy_key, strategy_config in strategies_config.items():
-                        # 将策略标识符转换为策略类名（如'morning_star' -> 'MorningStarStrategy'）
+                        # 情况1: 策略名称带下划线（如 'golden_triangle'）
                         if '_' in name:
                             strategy_class_name = ''.join(word.capitalize() for word in name.split('_')) + 'Strategy'
                             if strategy_class_name == strategy_key:
                                 strategy_display_name = strategy_config.get('display_name', name)
+                                matched = True
                                 break
+                        # 情况2: 策略名称已经是类名格式（如 'GoldenTriangleStrategy'）
+                        elif name == strategy_key:
+                            strategy_display_name = strategy_config.get('display_name', name)
+                            matched = True
+                            break
                 except Exception as e:
                     logger.warning(f"读取策略配置失败: {e}")
             

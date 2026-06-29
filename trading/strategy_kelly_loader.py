@@ -274,15 +274,6 @@ class KellyCalculator:
         if amount < min_invest_amount:
             amount = 0
         
-        # 向下取整为100的整数倍
-        amount = int(amount // 100 * 100)
-        
-        logger.info(f"【凯莉公式计算】策略:{strategy_name} | 胜率:{win_rate} | 盈亏比:{profit_loss_ratio} | "
-                    f"败率:{1-win_rate:.2f} | 凯莉比例:({win_rate:.2f}×{profit_loss_ratio:.2f}-{1-win_rate:.2f})÷{profit_loss_ratio:.2f}={kelly_ratio:.4f} | "
-                    f"约束:min={min_kelly_ratio},max={max_kelly_ratio},最大仓位={max_position_ratio} | "
-                    f"总资金:¥{total_capital:.2f} | 可用资金:¥{available_cash:.2f} | "
-                    f"凯莉金额:¥{amount_by_kelly:.2f} | 最终金额:¥{amount:.2f}")
-        
         return {
             'amount': amount,
             'win_rate': win_rate,

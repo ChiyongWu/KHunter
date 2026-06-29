@@ -7,12 +7,14 @@
 
 import logging
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import List, Optional
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=256)
 def is_trading_day(date_str: str) -> bool:
     """
     判断指定日期是否为交易日
@@ -78,11 +80,13 @@ def is_trading_day(date_str: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=256)
 def get_trading_days(start_date: str, end_date: str) -> List[str]:
     """
-    获取指定日期范围内的交易日列表（批量优化版）
+    获取指定日期范围内的交易日列表（批量优化版 + LRU 缓存）
 
     一次性获取整个区间的交易日历，避免逐日调用 API。
+    加 LRU 缓存：同一日期范围的查询只走一次 Tushare API。
 
     参数:
         start_date: 开始日期，支持 YYYY-MM-DD 或 YYYYMMDD 格式

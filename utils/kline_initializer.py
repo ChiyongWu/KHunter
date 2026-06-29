@@ -241,11 +241,9 @@ class KlineInitializer:
         
         for _, row in df.iterrows():
             try:
-                # 转换日期格式
-                if isinstance(row['date'], pd.Timestamp):
-                    date_str = row['date'].strftime('%Y-%m-%d')
-                else:
-                    date_str = str(row['date'])
+                # 统一日期格式为 YYYY-MM-DD
+                from utils.date_utils import normalize_date
+                date_str = normalize_date(row['date'])
                 
                 # 构建记录
                 record = {

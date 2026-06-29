@@ -46,3 +46,96 @@ reports/
 # Configuration files (local)
 config/config.yaml
 config/tushare_config.json
+
+# 备份文件
+*.bak
+
+# 媒体文件（产品介绍、演示视频等）
+*.mp4
+*.pptx
+
+# 根目录临时测试/验证脚本
+_*.py
+_*.txt
+check_*.py
+verify_*.py
+
+# 临时输出文件
+_tmp_*
+_verify_output*
+_output*.txt
+_step_reinit.py
+
+# 回测批次运行时文件（自动生成的临时批处理文件）
+data/backtest_batch/progress_batch_*
+data/backtest_batch/queue_batch_*
+data/backtest_batch/single_*
+data/backtest_batch/daily_*
+data/backtest_batch/reports_*
+data/backtest_batch/backtest_kline_*
+
+# 验证临时数据
+data/_verify_*
+
+# 自动生成的交易脚本
+trading/ptrade/test_khunter_auto_trade.py
+trading/strategy_runner_exdividend_fix.py
+
+# 运行时缓存
+data/risk_cache/
+
+# running 目录的备份副本
+data/running - 副本*/
+
+# PPT 和演示文稿生成
+ppt/
+scripts/generate_ppt.py
+scripts/generate_video.py
+
+# 根目录一次性运行脚本
+quick_scan_*.py
+remove_*.py
+run_golden_*.py
+scan_*.py
+calc_temp_risk_*.py
+
+# 临时测试脚本（非正式测试）
+test/calc_temp_risk_*.py
+test/check_*.py
+test/verify_*.py
+
+# 文档中的自动生成文件
+doc/*.html
+doc/video/
+
+# running 目录的备份文件
+data/running/*.json.bak
+data/running/buy_candidate_pool*.json.bak*
+
+# running 目录运行时产出数据（每日生成，不纳入版本控制）
+data/running/daily_*.md
+data/running/portfolio_*.json
+data/running/signals_*.json
+data/running/trades_*.json
+data/running/task_history.json
+data/running/last_exdividend_date.json
+data/running/ptrade_feedback/
+data/running/KHunter*.md
+
+# 根目录其他一次性脚本
+fix_*.py
+full_fix_*.py
+golden_triangle_*.csv
+
+# config 本地配置
+config/backtest_engine_config.yaml
+
+# running 运行时输出目录
+data/running/to_ptrade/
+
+# 测试用的音频/媒体文件
+data/test_tts*.mp3
+
+# 根目录更多一次性脚本
+delete_stocks.py
+detect_exdividend_*.py

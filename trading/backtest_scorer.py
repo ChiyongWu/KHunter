@@ -21,7 +21,7 @@ from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
 
 from trading.stock_score_models import (
-    StockScore, SCORE_WEIGHTS, VETO_SCORE
+    StockScore, SCORE_WEIGHTS, VETO_SCORE, STRATEGY_CLASS_NAME_MAP
 )
 from trading.technical_scorer import (
     STRATEGY_WEIGHTS, VETO_STRATEGIES as TECH_VETO_STRATEGIES,
@@ -56,18 +56,23 @@ class BacktestScoreCalculator:
     5. 使用与StockScoreCalculator相同的评分器，确保评分逻辑一致
     """
 
-    def __init__(self, db_manager=None):
+    def __init__(self, db_manager=None, tushare_token=None):
         """
         初始化回测评分器
         
         参数:
             db_manager: 数据库管理器实例
+            tushare_token: Tushare API token，为 None 时从配置文件读取
         """
         self.db = db_manager
         # 日期级缓存：{date: {stock_code: scores_dict}}
         self.date_cache: Dict[str, Dict[str, Dict]] = {}
         
-        # 初始化评分器（与StockScoreCalculator保持一致）
+        # 如果未传入 token，从配置文件加载
+        if tushare_token is None:
+            tushare_token = self._load_tushare_token()
+        
+        # 初始化评分器（与StockScoreCalculator保持完全一致）
         from trading.technical_scorer import TechnicalScorer
         from trading.moneyflow_scorer import MoneyflowScorer
         from trading.fundamental_scorer import FundamentalScorer
@@ -75,12 +80,31 @@ class BacktestScoreCalculator:
         from trading.event_scorer import EventScorer
         
         self.technical_scorer = TechnicalScorer(db_manager=db_manager)
-        self.moneyflow_scorer = MoneyflowScorer(db_manager=db_manager)
-        self.fundamental_scorer = FundamentalScorer()
-        self.sector_scorer = SectorScorer(db_manager=db_manager)
-        self.event_scorer = EventScorer()
+        self.moneyflow_scorer = MoneyflowScorer(db_manager=db_manager, tushare_token=tushare_token)
+        self.fundamental_scorer = FundamentalScorer(tushare_token=tushare_token)
+        self.sector_scorer = SectorScorer(tushare_token=tushare_token, db_manager=db_manager)
+        self.event_scorer = EventScorer(tushare_token=tushare_token)
         
         logger.info("回测评分器初始化完成")
+    
+    @staticmethod
+    def _load_tushare_token() -> str:
+        """
+        从配置文件加载 Tushare token
+        
+        返回:
+            str: Tushare API token，加载失败返回空字符串
+        """
+        try:
+            import json
+            with open("config/tushare_config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            token = config.get("token") or config.get("api_key", "")
+            logger.debug("回测评分器: Tushare token 加载成功")
+            return token
+        except Exception as e:
+            logger.warning(f"回测评分器: Tushare token 加载失败: {e}")
+            return ""
     
     def clear_cache(self):
         """清空评分缓存"""
@@ -89,7 +113,7 @@ class BacktestScoreCalculator:
     def is_tushare_available(self) -> bool:
         """检查Tushare数据源是否可用"""
         try:
-            token = self.moneyflow_scorer._load_tushare_token()
+            token = self.moneyflow_scorer._token
             return bool(token)
         except Exception:
             return False
@@ -470,12 +494,19 @@ class BacktestScoreCalculator:
                     strategy_weight = 0
                     for s in hit_strategies:
                         weight = STRATEGY_WEIGHTS.get(s, 0)
+                        # 如果直接匹配失败，尝试添加策略后缀
                         if weight == 0 and not s.endswith('策略'):
                             name_with_suffix = s + '策略'
                             weight = STRATEGY_WEIGHTS.get(name_with_suffix, 0)
+                        # 如果仍然失败，尝试去掉策略后缀
                         if weight == 0 and s.endswith('策略'):
                             name_without_suffix = s[:-2]
                             weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
+                        # 如果仍然失败，尝试使用类名映射
+                        if weight == 0:
+                            chinese_name = STRATEGY_CLASS_NAME_MAP.get(s, '')
+                            if chinese_name:
+                                weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
                         strategy_weight += weight
                     
                     # 综合评分 = 技术面评分（策略权重）
@@ -490,7 +521,18 @@ class BacktestScoreCalculator:
                     stock['veto_reason'] = ''
                     stock['veto_dimension'] = ''
                     stock['score_level'] = '中性'
-                    stock['strategy_details'] = [{'name': s, 'weight': STRATEGY_WEIGHTS.get(s, 0) if STRATEGY_WEIGHTS.get(s, 0) != 0 else (STRATEGY_WEIGHTS.get(s + '策略', 0) if not s.endswith('策略') else STRATEGY_WEIGHTS.get(s[:-2], 0))} for s in hit_strategies]
+                    stock['strategy_details'] = []
+                    for s in hit_strategies:
+                        weight = STRATEGY_WEIGHTS.get(s, 0)
+                        if weight == 0 and not s.endswith('策略'):
+                            weight = STRATEGY_WEIGHTS.get(s + '策略', 0)
+                        if weight == 0 and s.endswith('策略'):
+                            weight = STRATEGY_WEIGHTS.get(s[:-2], 0)
+                        if weight == 0:
+                            chinese_name = STRATEGY_CLASS_NAME_MAP.get(s, '')
+                            if chinese_name:
+                                weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
+                        stock['strategy_details'].append({'name': s, 'weight': weight})
                     stock['total_strategy_weight'] = strategy_weight
                     scored_stocks.append(stock)
                     continue
@@ -524,7 +566,18 @@ class BacktestScoreCalculator:
                         name_without_suffix = s[:-2]
                         weight = STRATEGY_WEIGHTS.get(name_without_suffix, 0)
                     strategy_weight += weight
-                stock['strategy_details'] = [{'name': s, 'weight': STRATEGY_WEIGHTS.get(s, 0) if STRATEGY_WEIGHTS.get(s, 0) != 0 else (STRATEGY_WEIGHTS.get(s + '策略', 0) if not s.endswith('策略') else STRATEGY_WEIGHTS.get(s[:-2], 0))} for s in hit_strategies]
+                stock['strategy_details'] = []
+                for s in hit_strategies:
+                    weight = STRATEGY_WEIGHTS.get(s, 0)
+                    if weight == 0 and not s.endswith('策略'):
+                        weight = STRATEGY_WEIGHTS.get(s + '策略', 0)
+                    if weight == 0 and s.endswith('策略'):
+                        weight = STRATEGY_WEIGHTS.get(s[:-2], 0)
+                    if weight == 0:
+                        chinese_name = STRATEGY_CLASS_NAME_MAP.get(s, '')
+                        if chinese_name:
+                            weight = STRATEGY_WEIGHTS.get(chinese_name, 0)
+                    stock['strategy_details'].append({'name': s, 'weight': weight})
                 stock['total_strategy_weight'] = strategy_weight
                 
                 # 记录每只股票的各维度评分

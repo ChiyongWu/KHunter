@@ -285,19 +285,33 @@ function showUpdateCompleted(data) {
         if (completedState) completedState.style.display = 'block';
         
         // 根据状态显示不同的完成信息
-        if (data.status === 'completed') {
+        if (data.skipped === true) {
+            // 数据源尚未就绪，跳过本次更新
+            document.getElementById('update-result-icon').textContent = '⏸️';
+            document.getElementById('update-result-text').textContent = data.message || '数据源尚未就绪，已跳过本次更新';
+            document.getElementById('update-result-text').style.color = '#d97706';
+            
+            // 隐藏统计卡片（无数据）
+            const statsCards = document.querySelector('#update-completed-state div[style*=\"grid-template-columns\"]');
+            if (statsCards) statsCards.style.display = 'none';
+            
+            console.log('更新被跳过:', data.message);
+        } else if (data.status === 'completed') {
             // 成功完成
             const stats = data.totalStats || {};
             
             // 提取统计数据
             const klineAdded = stats.kline_added || 0;
             const klineUpdated = stats.kline_updated || 0;
+            const klineFailed = stats.kline_failed || 0;
             const fundFlowAdded = stats.fund_flow_added || 0;
             const fundFlowUpdated = stats.fund_flow_updated || 0;
+            const fundFlowFailed = stats.fund_flow_failed || 0;
             
             // 计算总数
             const totalAdded = klineAdded + fundFlowAdded;
             const totalUpdated = klineUpdated + fundFlowUpdated;
+            const totalFailed = klineFailed + fundFlowFailed;
             const total = totalAdded + totalUpdated;
             
             // 更新统计数据
@@ -308,12 +322,29 @@ function showUpdateCompleted(data) {
             console.log('更新完成，统计信息:', {
                 klineAdded,
                 klineUpdated,
+                klineFailed,
                 fundFlowAdded,
                 fundFlowUpdated,
+                fundFlowFailed,
                 totalAdded,
                 totalUpdated,
+                totalFailed,
                 total
             });
+            
+            // 如果有失败数量，显示警告
+            if (totalFailed > 0) {
+                const statsDiv = document.getElementById('update-result-stats');
+                if (statsDiv) {
+                    let warningHtml = '';
+                    if (totalFailed > 1000) {
+                        warningHtml = `<div style="color: #dc2626; padding: 10px; background: #fef2f2; border-radius: 4px; margin-top: 10px;">⚠️ 警告: 失败股票数量(${totalFailed})超过1000，当日数据可能不完整，请重新更新!</div>`;
+                    } else {
+                        warningHtml = `<div style="color: #d97706; padding: 10px; background: #fffbeb; border-radius: 4px; margin-top: 10px;">⚠️ 提示: 部分数据更新失败 (K线: ${klineFailed}, 资金流向: ${fundFlowFailed})</div>`;
+                    }
+                    statsDiv.innerHTML += warningHtml;
+                }
+            }
             
             // 刷新首页统计信息
             loadStats();

@@ -121,32 +121,22 @@ class TimingStrategyFactory:
         """
         logger.info(f"开始创建择时策略: {strategy_name}")
         
-        # 顺势宝策略检查功能配置（可通过 config 关闭）
+        # 顺势宝策略需要检查功能配置
         if strategy_name == "macd_bollinger":
-            # 检查是否启用功能配置验证（默认关闭，避免开发环境阻断）
-            feature_check = config.get('feature_config_check', {})
-            if isinstance(feature_check, bool):
-                check_enabled = feature_check
-            else:
-                check_enabled = feature_check.get('enabled', False)
-
-            if check_enabled:
-                logger.info("检测到顺势宝策略，开始检查功能配置")
-                checker = FeatureConfigChecker()
-                try:
-                    valid_files, expire_date = checker.check_config()
-                    logger.info(f"配置检查结果: 有效文件={valid_files}, 过期日期={expire_date}")
-                    # 没有有效配置文件时必须阻止创建策略
-                    if not valid_files:
-                        logger.error("顺势宝策略创建失败：未找到有效的功能配置文件")
-                        raise ValueError("顺势宝策略创建失败：未找到有效的功能配置文件")
-                    logger.info("顺势宝策略配置检查通过")
-                except ValueError:
-                    raise  # 直接重新抛出 ValueError
-                except Exception as e:
-                    logger.error(f"顺势宝策略：检查功能配置失败: {e}")
-            else:
-                logger.info("功能配置检查已关闭（feature_config_check.enabled=false），跳过验证")
+            logger.info("检测到顺势宝策略，开始检查功能配置")
+            checker = FeatureConfigChecker()
+            try:
+                valid_files, expire_date = checker.check_config()
+                logger.info(f"配置检查结果: 有效文件={valid_files}, 过期日期={expire_date}")
+                # 没有有效配置文件时必须阻止创建策略
+                if not valid_files:
+                    logger.error("顺势宝策略创建失败：未找到有效的功能配置文件")
+                    raise ValueError("顺势宝策略创建失败：未找到有效的功能配置文件")
+                logger.info("顺势宝策略配置检查通过")
+            except ValueError:
+                raise  # 直接重新抛出 ValueError
+            except Exception as e:
+                logger.error(f"顺势宝策略：检查功能配置失败: {e}")
         
         if strategy_name == "turtle":
             logger.info("创建海龟策略实例")

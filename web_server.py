@@ -3608,14 +3608,34 @@ def get_portfolio():
         if not runner:
             return jsonify({"success": True, "data": {"positions": {}, "cash": 300000, "total_asset": 300000, "initial_capital": 300000, "run_mode": "manual", "ptrade_enabled": False}})
         
-        # 获取当前工作日期
+        # 获取当前工作日期和运行模式
         working_date = runner.get_working_date()
+        run_mode = getattr(runner, 'run_mode', 'manual')
         
-        # 查找工作日的 portfolio 文件
+        # 查找工作日的 portfolio 文件（自动模式下已由 initialize_daily_data 通过 PTrade 写入）
+        # 整个过程 PTrade 反馈数据只在 initialize_daily_data 中读取一次
         portfolio_path, found_date, _ = runner.find_latest_portfolio_file(working_date)
         if portfolio_path is None:
-            logger.warning(f"未找到 {working_date} 及之前 30 个交易日内的 portfolio 文件")
             portfolio_path = str(runner.running_dir / f"portfolio_{working_date}.json")
+        
+        # 自动模式下，portfolio 文件必须由 initialize_daily_data 的 PTrade 同步写入
+        # 如果文件不存在，说明 PTrade 同步失败，直接返回错误
+        if run_mode == 'auto' and (not portfolio_path or not os.path.exists(portfolio_path)):
+            logger.error(
+                f"【前端-持仓】自动模式下 {working_date} 的 portfolio 文件不存在，PTrade 同步可能失败")
+            return jsonify({
+                "success": False,
+                "error": "PTrade反馈数据未就绪，无法获取持仓信息",
+                "data": {
+                    "positions": {},
+                    "cash": 0,
+                    "total_asset": 0,
+                    "initial_capital": getattr(runner, 'initial_capital', 300000),
+                    "run_mode": "auto",
+                    "ptrade_enabled": True,
+                    "message": "请等待PTrade反馈文件生成后刷新页面"
+                }
+            })
         
         # 先读取文件数据，获取资金和持仓
         file_data = {}

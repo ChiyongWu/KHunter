@@ -21,12 +21,6 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-
-class PTradeFeedbackError(Exception):
-    """PTrade 反馈处理异常，用于终止执行并提示用户检查反馈文件"""
-    pass
-
-
 # 默认反馈文件目录（相对于项目根目录）
 DEFAULT_FEEDBACK_DIR = "data/running/ptrade_feedback"
 
@@ -119,13 +113,11 @@ class PTradeFeedbackHandler:
     def check_feedback_exists(self, date_str: str) -> bool:
         """检查指定日期的 PTrade 反馈文件是否都存在
 
-        当文件不完整时，会通过日志和 stderr 输出告警信息，告诉用户缺失了哪些文件。
-
         Args:
             date_str: 日期，格式 YYYYMMDD
 
         Returns:
-            Fund 和 Hold 两个文件都存在返回 True，否则返回 False
+            Fund 和 Hold 两个文件都存在返回 True
         """
         fund_file = os.path.join(
             self.feedback_dir, f"Fund_{date_str}.csv")
@@ -133,21 +125,10 @@ class PTradeFeedbackHandler:
             self.feedback_dir, f"Hold_{date_str}.csv")
         fund_exists = os.path.isfile(fund_file)
         hold_exists = os.path.isfile(hold_file)
-        # 文件不完整时告警用户
-        if not fund_exists or not hold_exists:
-            missing = []
-            if not fund_exists:
-                missing.append(f"Fund_{date_str}.csv")
-            if not hold_exists:
-                missing.append(f"Hold_{date_str}.csv")
-            alert_msg = (
-                f"【PTrade 反馈告警】日期 {date_str} 的反馈文件不完整，"
-                f"缺失文件: {', '.join(missing)}"
-                f"\n  期望目录: {self.feedback_dir}"
-                f"\n  请检查 PTrade 系统是否在 15:05 正常导出文件，"
-                f"确认文件存在后重新运行。"
-            )
-            logger.warning(alert_msg)
+        if not fund_exists:
+            logger.info(f"PTrade 反馈: Fund 文件不存在: {fund_file}")
+        if not hold_exists:
+            logger.info(f"PTrade 反馈: Hold 文件不存在: {hold_file}")
         return fund_exists and hold_exists
 
     def find_latest_feedback_date(self) -> Optional[str]:
@@ -344,54 +325,10 @@ class PTradeFeedbackHandler:
 
     # ========== Portfolio 生成 ==========
 
-    def _load_existing_portfolio(self, date_dash: str) -> Dict:
-        """加载已有的 portfolio 文件，按 stock_code 索引返回 positions 字典
-
-        若文件不存在或解析失败，返回空字典（新持仓将使用 feedback_date 作为 buy_date 兜底）
-
-        Args:
-            date_dash: 日期 YYYY-MM-DD
-
-        Returns:
-            {stock_code: position_dict}，用于继承 buy_date / holding_days
-        """
-        portfolio_file = os.path.join(self.running_dir, f"portfolio_{date_dash}.json")
-        try:
-            if not os.path.isfile(portfolio_file):
-                return {}
-            with open(portfolio_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data.get('positions', {})
-        except Exception as e:
-            logger.warning(f"PTrade 反馈: 读取旧 portfolio 失败 ({portfolio_file}): {e}")
-            return {}
-
-    @staticmethod
-    def _calc_holding_days(buy_date: str, today_str: str) -> int:
-        """计算持有天数（自然日天数）
-
-        从 buy_date 到 today_str 的自然日差值。
-        注意：这里计算的是自然日天数，前端展示'持有天'以此为准。
-
-        Args:
-            buy_date: 买入日期 YYYY-MM-DD
-            today_str: 当前日期 YYYY-MM-DD
-
-        Returns:
-            持有天数（非负整数）
-        """
-        try:
-            buy_dt = datetime.strptime(buy_date, '%Y-%m-%d')
-            today_dt = datetime.strptime(today_str, '%Y-%m-%d')
-            return max(0, (today_dt - buy_dt).days)
-        except Exception:
-            return 0
-
     def build_portfolio(self, feedback_date: str) -> Dict:
-        """根据 PTrade 反馈构建 portfolio 数据
+        """根据 PTrade 反馈构建 portfolio 数据（完全覆盖，不继承旧数据）
 
-        自动模式下 PTrade 数据是唯一真实数据源，以 PTrade 的价格/数量/市值覆盖。
-        同时从已有 portfolio 文件继承 buy_date 和 holding_days（PTrade 不提供这些字段）。
+        自动模式下 PTrade 数据就是唯一真实数据源，不需要从旧 portfolio 继承任何字段。
 
         Args:
             feedback_date: PTrade 反馈日期 YYYYMMDD
@@ -399,20 +336,10 @@ class PTradeFeedbackHandler:
         Returns:
             portfolio 字典，可直接写入 JSON
         """
-        from datetime import datetime as dt
-
         # 读取 PTrade 资金和持仓数据
         fund = self.read_fund(feedback_date)
         ptrade_holdings = self.read_holdings(feedback_date)
-
-        # 读取已有 portfolio 文件，用于继承 buy_date / holding_days 等 PTrade 不提供的字段
-        pf_date_dash = self._ymd_to_dash(feedback_date)
-        existing_portfolio = self._load_existing_portfolio(pf_date_dash)
-
-        # 当天日期（用于计算持有天数）
-        today_str = dt.now().strftime('%Y-%m-%d')
-
-        # 构建 positions（PTrade 数据覆盖价格/数量/市值，继承 buy_date）
+        # 构建 positions（只包含 PTrade 导出的真实字段）
         # 过滤 quantity <= 0 的空仓位，避免生成无意义的卖出信号
         new_positions = {}
         for h in ptrade_holdings:
@@ -427,20 +354,12 @@ class PTradeFeedbackHandler:
             profit_loss = h["profit_loss"]
             profit_rate = round(profit_loss / (buy_amount + 0.01), 4) \
                 if buy_amount > 0 else 0.0
-
-            # 从旧 portfolio 继承 buy_date（PTrade 无法提供真实买入日期）
-            old_pos = existing_portfolio.get(code, {})
-            buy_date = old_pos.get('buy_date', pf_date_dash)
-
-            # 计算持有天数（从买入日期到今天的交易日数）
-            holding_days = self._calc_holding_days(buy_date, today_str)
-
-            # 合并 PTrade 真实数据 + 继承字段
+            # 只使用 PTrade 数据构造持仓条目
             position = {
                 "stock_name": h["stock_name"],
                 "quantity": quantity,
                 "buy_price": buy_price,
-                "buy_date": buy_date,
+                "buy_date": self._ymd_to_dash(feedback_date),
                 "current_price": h["current_price"],
                 "buy_amount": buy_amount,
                 "buy_fee": 0.0,
@@ -449,7 +368,6 @@ class PTradeFeedbackHandler:
                 "profit_loss": profit_loss,
                 "profit_rate": profit_rate,
                 "available_volume": h.get("available_volume", quantity),
-                "holding_days": holding_days,
             }
             new_positions[code] = position
         # 构建 portfolio
@@ -460,7 +378,6 @@ class PTradeFeedbackHandler:
             "total_asset": fund["total_asset"],
             "market_value": fund["market_value"],
             "initial_capital": self.initial_capital,
-            "source": "ptrade_feedback",  # 标记数据来源为 PTrade 反馈
             "positions": new_positions,
         }
         logger.info(
@@ -474,7 +391,7 @@ class PTradeFeedbackHandler:
         """完整反馈处理流程（自动模式，PTrade 数据完全覆盖）
 
         步骤:
-          1. 检查 PTrade 反馈文件是否存在（不完整则抛异常终止）
+          1. 检查 PTrade 反馈文件是否存在
           2. 解析 Fund + Hold → 构建新 portfolio
           3. 保存 portfolio JSON
 
@@ -483,32 +400,13 @@ class PTradeFeedbackHandler:
 
         Returns:
             处理结果 {success, portfolio_file, fund_data, holdings}
-
-        Raises:
-            PTradeFeedbackError: 反馈文件不完整时抛出，终止执行
         """
-        # 步骤1: 检查文件完整性，不完整则终止执行
+        # 步骤1: 检查文件
         if not self.check_feedback_exists(feedback_date):
-            # 构建详细的错误信息告知用户
-            fund_file = os.path.join(
-                self.feedback_dir, f"Fund_{feedback_date}.csv")
-            hold_file = os.path.join(
-                self.feedback_dir, f"Hold_{feedback_date}.csv")
-            fund_exists = os.path.isfile(fund_file)
-            hold_exists = os.path.isfile(hold_file)
-            missing = []
-            if not fund_exists:
-                missing.append(f"Fund_{feedback_date}.csv")
-            if not hold_exists:
-                missing.append(f"Hold_{feedback_date}.csv")
-            err_msg = (
-                f"PTrade 反馈文件不完整，无法继续执行。"
-                f"缺失文件: {', '.join(missing)}。"
-                f"请检查 {self.feedback_dir} 目录，"
-                f"确认 PTrade 系统在 15:05 已正常导出 Fund 和 Hold CSV 文件后重新运行。"
-            )
-            logger.error(err_msg)
-            raise PTradeFeedbackError(err_msg)
+            return {
+                "success": False,
+                "error": f"PTrade 反馈文件不存在: {feedback_date}",
+            }
         # 步骤2: 构建新 portfolio（自动模式不继承旧数据，内部读取 fund+holdings）
         portfolio = self.build_portfolio(feedback_date)
         # 步骤3: 保存（按交易日日期命名）

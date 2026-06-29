@@ -69,8 +69,8 @@ strategies:
     description: 趋势起点策略
 
   GoldenTriangleStrategy:
-    win_rate: 0.28
-    profit_loss_ratio: 3.3
+    win_rate: 0.33
+    profit_loss_ratio: 3.5
     description: 金三角策略
 
   _default_:

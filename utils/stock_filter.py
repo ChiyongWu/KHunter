@@ -233,6 +233,9 @@ class StockFilter:
         Returns:
             tuple: (过滤后的结果, 过滤统计信息)
         """
+        # 临时禁用所有过滤条件（代码保留）
+        return results, {'enabled': False, 'message': '过滤条件已临时禁用'}
+
         if not self.config.get('enabled', True):
             return results, {'enabled': False}
         

@@ -252,6 +252,9 @@ class BacktestEngine:
             
             # 回测配置：同一只股票最大买入次数
             max_buy_count_per_stock = config.get('max_buy_count_per_stock', 6)
+            # 回测配置：买入股票池遍历顺序（0=正序老股票优先，1=倒序新加入股票优先）
+            engine_config = self._load_engine_config()
+            reverse_pool_order = engine_config.get('reverse_pool_order', 0)
             # 股票累计买入次数计数器 {stock_code: buy_count}
             stock_buy_count = {}
             
@@ -392,7 +395,14 @@ class BacktestEngine:
                 # 记录当日已买入的股票代码
                 today_bought_stocks = set()
                 
-                for candidate in self.buy_candidate_pool:
+                # 根据配置决定股票池遍历顺序
+                # 正序（reverse_pool_order=0）：老股票优先，新加入股票后处理
+                # 倒序（reverse_pool_order=1）：新加入股票优先，老股票后处理
+                pool_iter = reversed(self.buy_candidate_pool) if reverse_pool_order else self.buy_candidate_pool
+                if reverse_pool_order:
+                    logger.info("买入顺序：倒序处理（新加入股票优先）")
+                
+                for candidate in pool_iter:
                     stock = candidate['stock']
                     stock_code = stock['stock_code']
                     added_date = candidate['added_date']
@@ -521,6 +531,12 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
+                    # 停牌/退市检查：确认当日有真实行情数据（防止使用前一日收盘价兜底）
+                    if not self._has_trading_data_on_date(stock_code, current_date):
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 当日{current_date}无行情数据（停牌/退市），跳过")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
                     # 获取买入价格（以开盘价为准）
                     buy_price = self._get_stock_price(stock_code, current_date, 'open')
                     logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格: {buy_price}")
@@ -556,9 +572,18 @@ class BacktestEngine:
                             strategy_name=strategy_name
                         )
                         kelly_amount = kelly_result['amount']
-                        position_amount = min(kelly_amount, current_capital)
-                        reserve_fee = position_amount % 100
-                        position_amount = position_amount // 100 * 100
+                        
+                        # 确定最终可用金额
+                        if current_capital >= kelly_amount:
+                            # 可用资金充足，用凯利金额，不预留费用
+                            position_amount = kelly_amount
+                            reserve_fee = 0.0
+                        else:
+                            # 可用资金不足，用可用资金，预留交易费用
+                            position_amount = current_capital
+                            reserve_fee = position_amount % 100
+                            position_amount = position_amount // 100 * 100
+                        
                         quantity = KellyCalculator.calculate_buy_quantity(
                             position_amount=position_amount,
                             price=buy_price,
@@ -707,6 +732,9 @@ class BacktestEngine:
                     logger.info(f"剩余持仓: {position['stock_code']} {position['stock_name']}, "
                                f"买入价={position['buy_price']:.2f}, 当前价={current_price:.2f}, "
                                f"市值={current_value:.2f}")
+                # 同步 capital_history 最后一个值为最终结算值，确保资金曲线与 total_return 使用相同基准
+                if capital_history:
+                    capital_history[-1] = current_capital
             
             # 5. 计算绩效指标
             final_capital = current_capital
@@ -1232,6 +1260,33 @@ class BacktestEngine:
 
     # YAML配置文件缓存
     _pool_removal_config_cache = None
+    _engine_config_cache = None
+
+    def _load_engine_config(self) -> Dict:
+        """加载回测引擎行为配置
+        
+        配置文件路径: config/backtest_engine_config.yaml
+        
+        Returns:
+            引擎配置字典
+        """
+        # 使用类级别缓存，避免重复读取文件
+        if BacktestEngine._engine_config_cache is not None:
+            return BacktestEngine._engine_config_cache
+        
+        config_path = Path(__file__).parent.parent / "config" / "backtest_engine_config.yaml"
+        
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                yaml_config = yaml.safe_load(f) or {}
+            BacktestEngine._engine_config_cache = yaml_config
+            logger.info(f"加载回测引擎配置: reverse_pool_order={yaml_config.get('reverse_pool_order', 0)}")
+            return yaml_config
+        else:
+            logger.warning(f"回测引擎配置文件不存在: {config_path}，使用默认配置")
+            default_config = {'reverse_pool_order': 0}
+            BacktestEngine._engine_config_cache = default_config
+            return default_config
 
     def _load_pool_removal_config(self) -> Dict[str, Dict]:
         """从YAML配置文件加载股票池移除策略配置
@@ -1583,8 +1638,12 @@ class BacktestEngine:
         required_days = buffer_days
         
         if strategy_name:
-            # 获取策略参数
-            strategy = self.strategy_registry.get_strategy(strategy_name)
+            # 获取策略参数 - 需中英文名称映射（与 _execute_selection 保持一致）
+            from utils.strategy_name_mapper import get_english_name
+            mapped_name = get_english_name(strategy_name)
+            strategy = self.strategy_registry.get_strategy(mapped_name)
+            if not strategy:
+                strategy = self.strategy_registry.get_strategy(strategy_name)
             if strategy and hasattr(strategy, 'params'):
                 params = strategy.params
                 max_value = 0
@@ -1602,7 +1661,8 @@ class BacktestEngine:
                 ]
                 period_keys = ['ma_period', 'ma_short_period', 'ma_long_period', 'kdj_n', 'kdj_m1', 'kdj_m2',
                               'macd_short', 'macd_long', 'macd_signal', 'volume_ma_period', 'short_ma_period', 
-                              'long_ma_period', 'period', 'min_pattern_days', 'max_break_days']
+                              'long_ma_period', 'period', 'min_pattern_days', 'max_break_days',
+                              'short_period', 'mid_period', 'long_period', 'super_long_period']
                 
                 # 获取回溯天数
                 for key in lookback_keys:
@@ -1621,63 +1681,64 @@ class BacktestEngine:
                 required_days = max_value + buffer_days
                 logger.info(f"策略 {strategy_name} 需要 {max_value} 天历史数据 + {buffer_days} 天缓冲")
         
-        # 扩展开始日期
-        extended_start = (start_dt - timedelta(days=required_days)).strftime('%Y-%m-%d')
-        
-        logger.info(f"预加载股票数据: {extended_start} ~ {end_date} (原始: {start_date} ~ {end_date}, 加载历史: {required_days}天)")
-        
-        # 获取所有股票代码
-        stock_codes = self.db_manager.list_all_stocks()
-        total = len(stock_codes)
+        # SQL 查询起始日期：仅加载回测所需数据（start_date - required_days）
+        # required_days 由策略参数 + buffer_days 计算得出，精确反映策略需要的历史数据量
+        sql_start_dt = start_dt - timedelta(days=required_days)
+        sql_start = sql_start_dt.strftime('%Y-%m-%d')
+
+        logger.info(f"预加载股票数据: {sql_start} ~ {end_date} (需要历史: {required_days}天)")
+
+        import pandas as pd
+
+        # 第1步：一次SQL批量加载全市场K线（全部股票，不过滤ST/退市/数据量）
+        step1_start = datetime.now()
+        all_kline_df = self.db_manager.read_all_stocks_kline(sql_start, end_date)
+        step1_time = (datetime.now() - step1_start).total_seconds()
+
+        if all_kline_df.empty:
+            logger.warning("批量K线数据为空，跳过预加载")
+            return 0
+
+        # 统一日期格式为字符串（SQL返回已是YYYY-MM-DD字符串，确保格式一致）
+        if not pd.api.types.is_string_dtype(all_kline_df['date']):
+            all_kline_df['date'] = pd.to_datetime(all_kline_df['date']).dt.strftime('%Y-%m-%d')
+        # 按code和date正序排列
+        all_kline_df = all_kline_df.sort_values(['code', 'date'])
+
+        total_codes = all_kline_df['code'].nunique()
+        logger.info(f"[预加载-第1步] 批量K线: {len(all_kline_df)} 行, {total_codes} 只股票, 耗时 {step1_time:.1f}s")
+
+        # 第2步：批量获取股票名称
+        step2_start = datetime.now()
+        all_stock_names = self.db_manager.get_all_stock_names()
+        self.stock_name_cache.update(all_stock_names)
+        step2_time = (datetime.now() - step2_start).total_seconds()
+        logger.info(f"[预加载-第2步] 批量名称: {len(all_stock_names)} 只, 耗时 {step2_time:.1f}s")
+
+        # 第3步：按code分组构建缓存（全部加载，不做任何过滤）
+        # 数据不足、ST、退市等过滤统一在选股时处理
+        step3_start = datetime.now()
         loaded = 0
-        skipped = 0
-        
-        for i, code in enumerate(stock_codes):
-            try:
-                # 读取股票数据
-                df = self.db_manager.read_stock(code)
-                
-                if df is None or (hasattr(df, 'empty') and df.empty) or len(df) < 60:
-                    skipped += 1
-                    continue
-                
-                # 缓存原始数据
-                df_copy = df.copy()
-                # 统一日期格式为字符串，避免后续比较时类型不一致
-                df_copy['date'] = df_copy['date'].dt.strftime('%Y-%m-%d')
-                self.stock_data_cache[code] = df_copy
-                
-                # 获取并缓存股票名称
-                name = self._get_stock_name(code)
-                
-                # 过滤ST股票和退市股票
-                invalid = name.startswith('ST') or name.startswith('*ST')
-                if not invalid:
-                    for kw in ['退', '未知', '退市', '已退']:
-                        if kw in name:
-                            invalid = True
-                            break
-                
-                if invalid:
-                    skipped += 1
-                    continue
-                
-                # 缓存有效股票
-                df_filtered = df.copy()
-                # 统一日期格式为字符串，避免后续比较时类型不一致
-                df_filtered['date'] = df_filtered['date'].dt.strftime('%Y-%m-%d')
-                self.stock_filtered_cache[code] = df_filtered
-                loaded += 1
-                
-            except Exception as e:
-                logger.debug(f"预加载股票 {code} 失败: {str(e)}")
-                skipped += 1
-            
+        processed = 0
+
+        grouped = all_kline_df.groupby('code')
+        for code, group_df in grouped:
+            # 缓存原始数据（含退市、ST，用于价格查询和移动止损计算）
+            self.stock_data_cache[code] = group_df.copy()
+            # 缓存有效股票（全部入池，选股时再做数据量/ST/退市过滤）
+            self.stock_filtered_cache[code] = group_df.copy()
+            loaded += 1
+
             # 每500只显示一次进度
-            if (i + 1) % 500 == 0:
-                logger.info(f"预加载进度: {i + 1}/{total}, 有效股票: {loaded}, 跳过: {skipped}")
-        
-        logger.info(f"预加载完成: 有效股票 {loaded}, 跳过 {skipped}, 总计 {total}")
+            processed += 1
+            if processed % 500 == 0:
+                logger.info(f"预加载进度: {processed}/{total_codes}, 已加载: {loaded}")
+
+        step3_time = (datetime.now() - step3_start).total_seconds()
+
+        total_time = step1_time + step2_time + step3_time
+        logger.info(f"预加载完成: 全部加载 {loaded} 只股票, 总耗时 {total_time:.1f}s "
+                    f"(步骤: SQL={step1_time:.1f}s 名称={step2_time:.1f}s 分组={step3_time:.1f}s)")
         return loaded
     
     def _execute_selection(self, strategy_name: str, date: date) -> List[Dict]:
@@ -1710,25 +1771,34 @@ class BacktestEngine:
             # 标准化返回格式
             standardized_stocks = []
             
-            # 从缓存遍历有效股票
+            # 从缓存遍历全部股票，选股时做过滤
             for code, df in self.stock_filtered_cache.items():
                 try:
                     # 日期切片：只取到目标日期为止的数据
                     date_str = date.strftime('%Y-%m-%d')
                     df_to_date = df[df['date'] <= date_str].copy()
                     
-                    # 检查数据是否为空（预加载时已检查过至少60条，这里只检查是否有数据）
+                    # 过滤1：数据为空 → 跳过
                     if df_to_date.empty:
                         continue
                     
+                    # 过滤2：ST/退市股票 → 跳过（不选入标的池）
+                    # 注意：数据行数检查由策略自身的 quick_filter 处理，不在此处硬编码
+                    name = self.stock_name_cache.get(code, "未知")
+                    if name.startswith('ST') or name.startswith('*ST'):
+                        continue
+                    skip_for_delisted = False
+                    for kw in ['退', '未知', '退市', '已退']:
+                        if kw in name:
+                            skip_for_delisted = True
+                            break
+                    if skip_for_delisted:
+                        continue
+                    
                     # 反转数据为倒序（最新的在前），供策略使用
-                    # 注意：read_stock默认返回倒序数据，截断后仍为倒序，无需反转
                     # 仅当数据为升序时才反转
                     if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
                         df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
-                    
-                    # 获取股票名称
-                    name = self.stock_name_cache.get(code, "未知")
                     
                     # 使用标准的 execute_selection 流程，确保指标被正确计算
                     # execute_selection 包含：数据验证 -> 快速过滤 -> 计算指标 -> 选股条件检查
@@ -1848,6 +1918,40 @@ class BacktestEngine:
         
         return candidate_stocks
     
+    def _has_trading_data_on_date(self, stock_code: str, date: date) -> bool:
+        """检查股票在指定日期是否有真实行情数据（非停牌、非退市）
+        
+        回测时通过股票缓存判断：如果缓存中该股票没有指定日期的任何数据，
+        说明该股票在当日停牌或已退市，不可交易。
+        
+        Args:
+            stock_code: 股票代码
+            date: 检查日期
+            
+        Returns:
+            True: 有真实行情数据，可交易
+            False: 无数据（停牌/退市），不可交易
+        """
+        date_str = date.strftime('%Y-%m-%d')
+        
+        # 从缓存中查找该日期是否有数据
+        df = self.stock_data_cache.get(stock_code)
+        if df is None or df.empty:
+            return False
+        
+        # 检查当日是否有数据行
+        df_date = df[df['date'] == date_str]
+        if df_date.empty:
+            return False
+        
+        # 检查关键价格字段是否有效（open > 0 表示有真实交易）
+        if 'open' in df_date.columns:
+            open_val = df_date.iloc[0]['open']
+            if open_val is None or (hasattr(open_val, '__float__') and float(open_val) <= 0):
+                return False
+        
+        return True
+
     def _get_stock_price(self, stock_code: str, date: date, price_type: str) -> float:
         """获取股票价格
         
@@ -2057,6 +2161,12 @@ class BacktestEngine:
             open_price = self._get_stock_price(stock_code, current_date, 'open')
             high_price = self._get_stock_price(stock_code, current_date, 'high')
             
+            # 停牌/退市检查：当日无行情数据时不可卖出，保留持仓
+            if not self._has_trading_data_on_date(stock_code, current_date):
+                logger.info(f"  {stock_code} {stock_name} - 当日{current_date}无行情数据（停牌/退市），保留持仓")
+                remaining_positions.append(position)
+                continue
+            
             # 计算含成本的收益率
             # 买入成本
             buy_commission = position.get('buy_commission', 0)
@@ -2119,19 +2229,19 @@ class BacktestEngine:
                     sell_type = 'take_profit'
                     logger.info(f"  {stock_code} {stock_name} - 触发止盈: 收益率 {return_rate:.2f}% >= {take_profit}%")
                 else:
-                    # 计算当前止损线（支持移动止损，简化版）
+                    # 计算当前止损线
                     current_stop = base_stop_level  # 默认使用基础止损-6%
                     stop_price = buy_price * (1 + base_stop_level / 100)
                     
                     if enable_trailing_stop:
-                        # 简化的移动止损逻辑：
+                        # 移动止损逻辑：
                         # - 最高收益 < 5%：使用固定止损 -6%
-                        # - 最高收益 >= 5%：移动止损 = 最高收益率 - 8%
+                        # - 最高收益 >= 5%：移动止损 = 截至前一日的最高价 × 92%
                         if highest_price_return >= trailing_trigger_threshold:
-                            current_stop = highest_price_return - 8
-                            stop_price = buy_price * (1 + current_stop / 100)
+                            stop_price = current_highest_price * 0.92
+                            current_stop = (stop_price - buy_price) / buy_price * 100
                         
-                        logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损线={current_stop:.2f}%, 止损价={stop_price:.2f}")
+                        logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
                     
                     # 检查是否触发止损（包括移动止损）
                     if open_price <= stop_price:

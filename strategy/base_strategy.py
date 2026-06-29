@@ -3,7 +3,6 @@
 """
 from abc import ABC, abstractmethod
 import pandas as pd
-from utils.trade_date_utils import is_trading_day
 
 
 class BaseStrategy(ABC):
@@ -33,7 +32,10 @@ class BaseStrategy(ABC):
     
     def _validate_data(self, df) -> bool:
         """
-        通用数据验证：检查数据完整性、长度、是否为已退市股票和ST股票
+        通用数据验证：检查数据完整性和长度
+        
+        注意：退市/停牌检查已统一移到 _is_suspended，通过当日K线有无来判断，
+        无需逐只调用 Tushare API，且能同时覆盖退市和停牌两种情况。
         
         :param df: 股票数据DataFrame（倒序，最新在前）
         :return: True表示数据有效，False表示数据无效
@@ -51,30 +53,13 @@ class BaseStrategy(ABC):
             if field not in df.columns:
                 return False
         
-        # 检查是否为已退市股票：最新数据日期距今超过5年
-        # df是倒序的，最新数据在第一行
-        try:
-            from datetime import datetime
-            latest_date_str = str(df.iloc[0]['date']).split()[0]  # 只取日期部分
-            latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
-            current_date = datetime.now()
-            days_diff = (current_date - latest_date).days
-            # 如果最新数据超过5年前，认为是已退市股票
-            if days_diff > 365 * 5:
-                return False
-        except Exception:
-            pass
-        
         return True
     
     def _is_suspended(self, df, selection_date):
         """
         检查股票是否停牌
 
-        逻辑：
-        1. 先判断选股日期是否是交易日
-        2. 如果是交易日，检查股票是否有当天的数据
-        3. 如果没有当天的数据，则认为是停牌
+        逻辑：如果选股日期当天的数据不存在（最新数据日期 < 选股日期），则认为是停牌
 
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param selection_date: 选股日期（YYYY-MM-DD格式）
@@ -84,18 +69,9 @@ class BaseStrategy(ABC):
             return True
 
         try:
-            # 先判断选股日期是否是交易日
-            if not is_trading_day(selection_date):
-                # 非交易日不认为是停牌
-                return False
-            
-            # 获取最新数据日期
             latest_date = str(df.iloc[0]['date']).split()[0]
-            
-            # 如果是交易日，但最新数据日期小于选股日期，则认为是停牌
             if latest_date < selection_date:
                 return True
-            
         except Exception:
             return True
 
@@ -153,8 +129,8 @@ class BaseStrategy(ABC):
         标准化的选股执行过程
 
         执行流程：
-            1. 数据验证（包括检查已退市股票）
-            2. 停牌股检查（当天没有K线数据的股票被过滤）
+            1. 数据验证（完整性、长度、必要字段）
+            2. 当日K线检查（退市/停牌股票一并过滤，无Tushare API调用）
             3. 快速过滤（优先使用带lookback的版本）
             4. 计算指标
             5-N. 选股条件检查
@@ -162,13 +138,14 @@ class BaseStrategy(ABC):
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param stock_code: 股票代码
         :param stock_name: 股票名称
-        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则使用今天
+        :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则跳过当日K线检查
         :return: 选股信号列表
         """
         if not self._validate_data(df):
             return []
 
-        # 停牌股检查：过滤在交易日没有最新数据的股票
+        # 检查当日是否有K线数据（退市/停牌股票一并过滤）
+        # selection_date 为 None 时跳过，避免非交易日（周末/节假日）误判
         if selection_date and self._is_suspended(df, selection_date):
             return []
 
@@ -193,18 +170,19 @@ class BaseStrategy(ABC):
 
         return self.select_stocks(df, stock_name)
     
-    def analyze_stock(self, stock_code, stock_name, df):
+    def analyze_stock(self, stock_code, stock_name, df, selection_date=None):
         """
         分析单只股票 - 专注于流程处理
         
         :param stock_code: 股票代码
         :param stock_name: 股票名称
         :param df: 股票数据DataFrame
+        :param selection_date: 选股日期，用于当日K线检查（退市/停牌过滤）
         :return: 标准化的选股结果或None
         """
         try:
-            # 使用标准化的选股执行过程
-            signals = self.execute_selection(df, stock_code, stock_name)
+            # 使用标准化的选股执行过程，传入 selection_date 以启用当日K线检查
+            signals = self.execute_selection(df, stock_code, stock_name, selection_date=selection_date)
             
             # 结果过滤和标准化
             if signals:

@@ -93,7 +93,8 @@ NEGATIVE_SCORES = {
 
 # Tushare API 重试配置
 MAX_RETRIES = 3        # 最大重试次数
-RETRY_INTERVALS = [5, 15, 30]  # 指数退避重试间隔（秒）
+RETRY_INTERVALS = [1, 2, 3]  # 指数退避重试间隔（秒）- 缩短间隔
+API_CALL_TIMEOUT = 10   # API调用超时时间（秒）
 
 # API调用限流配置
 API_CALL_INTERVAL = 0.5  # API调用最小间隔（秒），避免请求过快
@@ -280,7 +281,7 @@ class EventScorer:
             func: Tushare API 调用函数
             **kwargs: API 参数
         返回:
-            DataFrame: API 返回的数据，失败返回 None
+            DataFrame: API 返回的数据，失败返回 None（由调用方使用默认值继续处理）
         """
         global _last_api_call_time
 
@@ -294,9 +295,16 @@ class EventScorer:
             try:
                 # 记录API调用时间
                 _last_api_call_time = time.time()
-                # 调用 Tushare API
-                result = func(**kwargs)
-                return result
+                # 设置超时
+                import socket
+                original_timeout = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(API_CALL_TIMEOUT)
+                try:
+                    # 调用 Tushare API
+                    result = func(**kwargs)
+                    return result
+                finally:
+                    socket.setdefaulttimeout(original_timeout)
             except Exception as e:
                 last_error = e
                 # 记录重试日志
@@ -308,8 +316,9 @@ class EventScorer:
                     wait_time = RETRY_INTERVALS[attempt] if attempt < len(RETRY_INTERVALS) else RETRY_INTERVALS[-1]
                     logger.info(f"等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
-        # 所有重试都失败
+        # 所有重试都失败，返回 None，由调用方使用默认值继续处理
         logger.error(f"Tushare API 调用失败（已重试 {MAX_RETRIES} 次）: {last_error}")
+        logger.info("将使用默认值继续处理...")
         return None
 
     # ============================================================

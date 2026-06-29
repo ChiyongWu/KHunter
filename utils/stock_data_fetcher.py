@@ -10,6 +10,8 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime, timedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -105,16 +107,64 @@ class StockDataFetcher:
             data_dir: 数据目录路径
         """
         self.data_dir = Path(data_dir)
-        # 设置请求会话
+        # 设置请求会话（启用连接池、Gzip 压缩、自动重试）
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json, text/javascript, */*',
+            'Accept-Encoding': 'gzip, deflate',  # 启用压缩，JSON 可压缩 80%+
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             'Referer': 'https://quote.eastmoney.com/',
             'Connection': 'keep-alive',
         })
-    
+        # 挂载 HTTPAdapter：连接池 10 个，支持连接复用
+        # 注意：total=0 表示 urllib3 层不自动重试，防止与 Python 级重试叠加放大耗时
+        # 所有重试策略统一由 _fetch_stock_batch_tickflow 内部管理（有日志、区分错误类型）
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=Retry(
+                total=0,                # 禁用 urllib3 层自动重试
+                allowed_methods=["GET"],
+            ),
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+    def clear_session_pool(self):
+        """
+        清空 Session 连接池，释放所有 TCP 连接
+
+        长时间连续请求同一 API 时，Session 的连接池会累积连接，
+        服务端可能对旧连接限流或关闭，导致后续请求变慢。
+        调用此方法关闭旧连接并重建连接池，确保每次请求使用新连接。
+        """
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        # 重建 Session（保持相同的 headers 和 adapter 配置）
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json, text/javascript, */*',
+            'Accept-Encoding': 'gzip, deflate',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://quote.eastmoney.com/',
+            'Connection': 'keep-alive',
+        })
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=Retry(
+                total=0,
+                allowed_methods=["GET"],
+            ),
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        logger.debug("Session 连接池已重建")
+
     # ==================== 股票列表管理 ====================
     
     def _load_local_stock_names(self) -> dict:
@@ -703,8 +753,10 @@ class StockDataFetcher:
                         raw_vol = int(float(item[5]))
                         # 科创板成交量从"股"转换为"手"（÷100）
                         volume = raw_vol // 100 if is_kcb else raw_vol
+                        # 统一日期格式为 YYYY-MM-DD
+                        from utils.date_utils import normalize_date
                         records.append({
-                            'date': str(item[0]),
+                            'date': normalize_date(str(item[0])),
                             'open': float(item[1]),
                             'close': float(item[2]),
                             'high': float(item[3]),
@@ -874,8 +926,10 @@ class StockDataFetcher:
                 raw_vol = int(float(item[5]))
                 # 科创板成交量从"股"转换为"手"
                 volume = raw_vol // 100 if is_kcb else raw_vol
+                # 统一日期格式为 YYYY-MM-DD
+                from utils.date_utils import normalize_date
                 records.append({
-                    'date': str(item[0]),
+                    'date': normalize_date(str(item[0])),
                     'open': float(item[1]),
                     'close': float(item[2]),
                     'high': float(item[3]),
@@ -1085,6 +1139,7 @@ class StockDataFetcher:
         使用 TickFlow 免费 API 批量获取K线数据（前复权）
 
         一次 HTTP 请求获取所有股票的K线，大幅减少网络开销。
+        内置 2 次指数退避重试 + Session 连接复用 + Gzip 压缩 + 自适应超时。
 
         参数：
             stock_codes: 6位纯数字股票代码列表，如 ['600000', '000001']
@@ -1103,8 +1158,11 @@ class StockDataFetcher:
         tf_symbols = [_code_to_tf_symbol(c) for c in stock_codes]
         symbols_str = ",".join(tf_symbols)
 
-        # 确保有足够的缓冲天数
-        count = max(days + 10, 60)
+        # 直接按需要的天数请求，节假日无K线数据无需额外缓冲
+        count = days
+
+        # 自适应超时：基础 15s + 每只股票 0.15s（响应更小，超时随之下调）
+        timeout = max(10, 15 + len(stock_codes) * 0.15)
 
         url = f"{TICKFLOW_FREE_API}/v1/klines/batch"
         params = {
@@ -1114,56 +1172,89 @@ class StockDataFetcher:
             "adjust": "forward",
         }
 
-        try:
-            resp = requests.get(url, params=params, timeout=60, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+        # 可重试的错误类型（瞬态故障）
+        RETRYABLE_EXCEPTIONS = (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        )
+        # 最大重试次数（指数退避：1s, 2s）
+        MAX_RETRIES = 2
 
-            # API 调用失败（限流/服务器错误等），整批需要降级
-            if resp.status_code != 200:
-                logger.warning(f"TickFlow batch API失败 HTTP {resp.status_code}，整批需降级")
+        last_error = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                # 使用 session 复用连接，利用连接池 + Keep-Alive + Gzip 压缩
+                resp = self.session.get(url, params=params, timeout=timeout)
+
+                # 429 限流：不重试（等待只会加重限流）
+                if resp.status_code == 429:
+                    logger.warning("TickFlow batch 触发限流(429)，整批需降级")
+                    return ({}, False)
+                # 4xx 客户端错误：不重试
+                if 400 <= resp.status_code < 500:
+                    logger.warning(f"TickFlow batch API失败 HTTP {resp.status_code}，整批需降级")
+                    return ({}, False)
+                # 5xx 服务端错误：如还有重试配额则重试
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"TickFlow batch HTTP {resp.status_code}(尝试{attempt+1}/{MAX_RETRIES+1})"
+                    )
+                    if attempt < MAX_RETRIES:
+                        backoff = 2 ** attempt  # 1s, 2s
+                        time.sleep(backoff)
+                        continue
+                    return ({}, False)
+
+                data = resp.json()
+                raw_data = data.get("data", {}) if isinstance(data, dict) else {}
+
+                # API 返回成功但 data 为空，视为 API 异常需降级
+                if not raw_data:
+                    logger.warning("TickFlow batch 返回空data，整批需降级")
+                    return ({}, False)
+
+                # 解析每只股票的K线数据（数组格式 → DataFrame）
+                results = {}
+                empty_count = 0
+                for symbol, kline_obj in raw_data.items():
+                    if not kline_obj or not kline_obj.get("close"):
+                        empty_count += 1
+                        continue
+
+                    code = _tf_symbol_to_code(symbol)
+                    df = self._tickflow_arrays_to_df(kline_obj, days)
+                    # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
+                    if df is not None and len(df) > 0:
+                        results[code] = df
+
+                if empty_count > 0:
+                    logger.debug(
+                        f"TickFlow batch: {len(results)}只有数据, {empty_count}只无数据（正常，不需降级）"
+                    )
+                # API 成功，返回 (有数据的股票, api_ok=True)
+                return (results, True)
+
+            except RETRYABLE_EXCEPTIONS as e:
+                # 超时或连接错误：指数退避重试
+                last_error = e
+                err_type = "超时" if isinstance(e, requests.exceptions.Timeout) else "连接失败"
+                if attempt < MAX_RETRIES:
+                    backoff = 2 ** attempt  # 1s, 2s
+                    logger.warning(
+                        f"TickFlow batch {err_type}(尝试{attempt+1}/{MAX_RETRIES+1})，{backoff}s后重试…"
+                    )
+                    time.sleep(backoff)
+                else:
+                    logger.error(
+                        f"TickFlow batch {err_type}，已重试{MAX_RETRIES}次全部失败，整批需降级"
+                    )
+            except Exception as e:
+                # 未知异常：不重试，直接降级
+                logger.error(f"TickFlow batch 请求异常: {e}，整批需降级")
                 return ({}, False)
-            # 429 限流也归为 API 失败
-            if resp.status_code == 429:
-                logger.warning("TickFlow batch 触发限流(429)，整批需降级")
-                return ({}, False)
 
-            data = resp.json()
-            raw_data = data.get("data", {}) if isinstance(data, dict) else {}
-
-            # API 返回成功但 data 为空，视为 API 异常需降级
-            if not raw_data:
-                logger.warning("TickFlow batch 返回空data，整批需降级")
-                return ({}, False)
-
-            # 解析每只股票的K线数据（数组格式 → DataFrame）
-            results = {}
-            empty_count = 0
-            for symbol, kline_obj in raw_data.items():
-                if not kline_obj or not kline_obj.get("close"):
-                    empty_count += 1
-                    continue
-
-                code = _tf_symbol_to_code(symbol)
-                df = self._tickflow_arrays_to_df(kline_obj, days)
-                # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
-                if df is not None and len(df) > 0:
-                    results[code] = df
-
-            if empty_count > 0:
-                logger.debug(f"TickFlow batch: {len(results)}只有数据, {empty_count}只无数据（正常，不需降级）")
-            # API 成功，返回 (有数据的股票, api_ok=True)
-            return (results, True)
-
-        except requests.exceptions.Timeout:
-            logger.error("TickFlow batch 请求超时，整批需降级")
-            return ({}, False)
-        except requests.exceptions.ConnectionError:
-            logger.error("TickFlow batch 连接失败，整批需降级")
-            return ({}, False)
-        except Exception as e:
-            logger.error(f"TickFlow batch 请求异常: {e}，整批需降级")
-            return ({}, False)
+        # 所有重试耗尽
+        return ({}, False)
 
     def _tickflow_arrays_to_df(self, kline_obj: dict, days: int = None) -> Optional[pd.DataFrame]:
         """
@@ -1221,11 +1312,57 @@ class StockDataFetcher:
             logger.debug(f"TickFlow 数据转换失败: {e}")
             return None
 
+    # ==================== 腾讯财经批量K线获取（降级方案） ====================
+
+    def _fetch_stock_batch_tencent(self, stock_codes: list, years: int = 3,
+                                    concurrency: int = 2) -> dict:
+        """
+        批量使用腾讯财经接口并发获取K线数据（降级方案）
+
+        当 TickFlow 不可用时使用。通过线程池低并发获取，避免触发反爬。
+
+        参数：
+            stock_codes: 6位纯数字股票代码列表
+            years: 获取数据的年份数
+            concurrency: 并发线程数（默认2，避免触发腾讯财经反爬/限流）
+
+        返回：
+            {stock_code: DataFrame} 字典，仅包含成功获取且有数据的股票
+        """
+        import time as time_module
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 线程安全地收集结果
+        results = {}
+        failed_count = 0
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            # 提交所有任务（每提交一个任务间隔0.3秒，避免瞬间并发冲击）
+            future_map = {}
+            for code in stock_codes:
+                future_map[executor.submit(self._fetch_stock_history_http, code, years)] = code
+                time_module.sleep(0.3)  # 提交间隔：降低对腾讯财经的瞬时并发压力
+
+            # 收集结果
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    df = future.result()
+                    if df is not None and len(df) > 0:
+                        results[code] = df
+                except Exception as e:
+                    failed_count += 1
+                    # WARNING 级别暴露错误原因，便于排查限流/反爬
+                    if failed_count <= 3:
+                        logger.warning(f"腾讯财经获取 {code} 失败: {e}")
+                    elif failed_count == 4:
+                        logger.warning(f"腾讯财经批量获取持续失败（已省略后续日志）...")
+
+        return results
+
     def _fetch_stock_history_tickflow(self, stock_code: str, years: int = 6) -> Optional[pd.DataFrame]:
         """
         使用 TickFlow 免费 API 获取单只股票完整历史数据（前复权）
 
-        用于除权后的历史数据重建。
+        用于除权后的历史数据重建。内置重试 + Session 连接复用 + Gzip 压缩。
 
         参数：
             stock_code: 6位纯数字股票代码
@@ -1246,30 +1383,58 @@ class StockDataFetcher:
             "adjust": "forward",
         }
 
-        try:
-            resp = requests.get(url, params=params, timeout=30, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+        # 单只股票查询，超时 30s 即可
+        MAX_RETRIES = 2
+        RETRYABLE_EXCEPTIONS = (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        )
 
-            if resp.status_code != 200:
-                logger.warning(f"TickFlow history 请求失败: HTTP {resp.status_code}")
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                # 使用 session 复用连接，利用 Gzip 压缩
+                resp = self.session.get(url, params=params, timeout=30)
+
+                if resp.status_code == 429:
+                    logger.warning(f"TickFlow history ({stock_code}) 触发限流(429)")
+                    return None
+                if 400 <= resp.status_code < 500:
+                    logger.warning(f"TickFlow history ({stock_code}) HTTP {resp.status_code}")
+                    return None
+                if resp.status_code != 200:
+                    if attempt < MAX_RETRIES:
+                        time.sleep(2 ** attempt)
+                        continue
+                    logger.warning(f"TickFlow history ({stock_code}) HTTP {resp.status_code}")
+                    return None
+
+                data = resp.json()
+                raw_data = data.get("data", {}) if isinstance(data, dict) else {}
+                kline_obj = raw_data.get(tf_symbol)
+
+                if not kline_obj:
+                    logger.warning(f"TickFlow history: {stock_code} 无数据")
+                    return None
+
+                df = self._tickflow_arrays_to_df(kline_obj)
+                # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
+                return df
+
+            except RETRYABLE_EXCEPTIONS as e:
+                err_type = "超时" if isinstance(e, requests.exceptions.Timeout) else "连接失败"
+                if attempt < MAX_RETRIES:
+                    backoff = 2 ** attempt
+                    logger.warning(
+                        f"TickFlow history ({stock_code}) {err_type}，{backoff}s后重试(尝试{attempt+1}/{MAX_RETRIES+1})…"
+                    )
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"TickFlow history ({stock_code}) {err_type}，重试{MAX_RETRIES}次全部失败")
+            except Exception as e:
+                logger.error(f"TickFlow history ({stock_code}) 请求异常: {e}")
                 return None
 
-            data = resp.json()
-            raw_data = data.get("data", {}) if isinstance(data, dict) else {}
-            kline_obj = raw_data.get(tf_symbol)
-
-            if not kline_obj:
-                logger.warning(f"TickFlow history: {stock_code} 无数据")
-                return None
-
-            df = self._tickflow_arrays_to_df(kline_obj)
-            # TickFlow 返回 volume 单位是「手」，DB统一以「手」存储，无需转换
-            return df
-
-        except Exception as e:
-            logger.error(f"TickFlow history 请求异常 ({stock_code}): {e}")
-            return None
+        return None
 
     def check_exdividend_by_factor(self, stock_codes: list, trade_date: str, start_date: str = None) -> dict:
         """
@@ -1327,12 +1492,28 @@ class StockDataFetcher:
                 else:
                     ts_codes.append(code + '.SZ')
 
-            # 检测需要至少2个交易日数据，如果 start_date == trade_date 则向前扩展一天
-            if query_start_date >= trade_date:
-                prev_day = self._get_previous_trading_date(trade_date)
-                if prev_day:
-                    query_start_date = prev_day
-                    logger.info(f"【除权检测】start_date 与 trade_date 相同，自动扩展至前一交易日: {query_start_date}")
+            # 确保查询范围至少覆盖 5 个交易日（约一周），保证能获取到多条复权因子记录
+            # Tushare adj_factor 接口仅返回区间内有记录的日期，区间过短可能只有 1 条/股
+            from datetime import datetime, timedelta
+            MIN_TRADING_DAYS = 5
+            expanded = 0
+            ref_dt = datetime.strptime(trade_date, '%Y%m%d')
+            cursor_dt = datetime.strptime(query_start_date, '%Y%m%d')
+            # 向前跳过非交易日并计算交易日数
+            trading_days = 0
+            check_dt = ref_dt
+            while check_dt >= cursor_dt:
+                if check_dt.weekday() < 5:  # 周一到周五
+                    trading_days += 1
+                check_dt -= timedelta(days=1)
+            while trading_days < MIN_TRADING_DAYS:
+                cursor_dt -= timedelta(days=1)
+                if cursor_dt.weekday() < 5:
+                    trading_days += 1
+                    expanded += 1
+            if expanded > 0:
+                query_start_date = cursor_dt.strftime('%Y%m%d')
+                logger.info(f"【除权检测】自动扩展至前一交易日，保证 {MIN_TRADING_DAYS} 个交易日覆盖: {query_start_date}")
 
             # 分批获取复权因子（Tushare adj_factor 接口限制每批最多约500只）
             BATCH_SIZE = 500
@@ -1378,12 +1559,16 @@ class StockDataFetcher:
                 # 按日期排序
                 stock_df = stock_df.sort_values('trade_date', ascending=True).reset_index(drop=True)
 
-                # 检测整个时间段内的所有变化
+                # 检测时间段内的变化，仅保留目标日期当天的除权
                 stock_factor_changes = []
                 for i in range(1, len(stock_df)):
                     prev_factor = stock_df.iloc[i-1]['adj_factor']
                     curr_factor = stock_df.iloc[i]['adj_factor']
                     change_date = stock_df.iloc[i]['trade_date']
+
+                    # 只检测目标日期当天的除权
+                    if change_date != trade_date:
+                        continue
 
                     # 对比因子是否变化（浮点数比较，使用相对误差）
                     if abs(curr_factor - prev_factor) > 0.0001 * prev_factor:

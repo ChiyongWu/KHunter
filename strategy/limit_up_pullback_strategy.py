@@ -38,6 +38,9 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'volume_shrinkage_ratio': 0.5,      # 成交量萎缩比例
             'support_ratio': 0.95,             # 支撑比例（不破涨停收盘价的95%）
             'resistance_ratio': 1.05,           # 阻力比例（不超过涨停收盘价的105%）
+            # 选股日条件参数
+            'selection_day_rise_threshold': 0.02,   # 选股日涨幅阈值（2%）
+            'selection_day_volume_ratio': 1.5,       # 选股日量能比前一天放大比例（50%）
         }
 
         # 合并用户参数 - params 中的值覆盖默认值
@@ -292,6 +295,36 @@ class LimitUpPullbackStrategy(BaseStrategy):
         if pullback_days < pullback_days_min or pullback_days > pullback_days_max:
             return None
 
+        # ========== 选股日条件检查 ==========
+        # 选股日是 index=0（最新一天），数据倒序
+        if len(df) < 2:
+            return None
+
+        today_data = df.iloc[0]
+        yesterday_data = df.iloc[1]
+
+        # 条件1：选股日涨幅 > 2%
+        rise_threshold = self.params['selection_day_rise_threshold']
+        if yesterday_data['close'] > 0:
+            today_rise = (today_data['close'] - yesterday_data['close']) / yesterday_data['close']
+        else:
+            today_rise = 0
+        if today_rise <= rise_threshold:
+            return None
+
+        # 条件2：量能比前一天放大50%（当日成交量 >= 前一日成交量 × 1.5）
+        volume_ratio = self.params['selection_day_volume_ratio']
+        if yesterday_data['volume'] > 0:
+            today_volume_ratio = today_data['volume'] / yesterday_data['volume']
+        else:
+            today_volume_ratio = 0
+        if today_volume_ratio < volume_ratio:
+            return None
+
+        # 条件3：收盘 > 5日线
+        if today_data['close'] <= today_data['ma5']:
+            return None
+
         return {
             'pullback_days': pullback_days,
             'pullback_range': pullback_range,
@@ -300,7 +333,9 @@ class LimitUpPullbackStrategy(BaseStrategy):
             'limit_up_open': lu_open,
             'limit_up_close': lu_close,
             'support_price': support_price,
-            'has_volume_shrinkage': has_volume_shrinkage
+            'has_volume_shrinkage': has_volume_shrinkage,
+            'today_rise': today_rise,
+            'today_volume_ratio': today_volume_ratio
         }
 
     def get_selection_criteria(self):
@@ -328,6 +363,11 @@ class LimitUpPullbackStrategy(BaseStrategy):
         # 条件3：成交量萎缩
         volume_shrinkage_ratio = self.params['volume_shrinkage_ratio'] * 100
         criteria.append(f"3. 成交量萎缩：回调期间至少一日成交量 <= 涨停日成交量的{volume_shrinkage_ratio:.0f}%")
+
+        # 条件4：选股日条件
+        rise_threshold = self.params['selection_day_rise_threshold'] * 100
+        volume_ratio = self.params['selection_day_volume_ratio'] * 100
+        criteria.append(f"4. 选股日条件：当日涨幅>{rise_threshold:.0f}%，量能比前一天放大{volume_ratio-100:.0f}%，收盘价>5日线")
 
         return criteria
 
@@ -408,7 +448,9 @@ class LimitUpPullbackStrategy(BaseStrategy):
                             f"涨停价格: {float(lu_info[2]):.2f}",
                             f"回调天数: {pullback_info['pullback_days']}",
                             f"回调幅度: {pullback_info['pullback_range']:.2%}",
-                            f"支撑位: {pullback_info['support_price']:.2f}（涨停收盘×{support_ratio:.0f}%）"
+                            f"支撑位: {pullback_info['support_price']:.2f}（涨停收盘×{support_ratio:.0f}%）",
+                            f"选股日涨幅: {pullback_info['today_rise']:.2%}",
+                            f"选股日量能比: {pullback_info['today_volume_ratio']:.2f}倍"
                         ]
                     }
                     return [signal]

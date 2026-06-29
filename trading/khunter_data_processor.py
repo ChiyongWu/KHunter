@@ -443,18 +443,8 @@ class KHunterDataProcessor:
                 )
                 return None
             
-            # 6a. 海龟策略额外过滤：狩猎日收盘价超过关键日收盘价105%则舍弃
-            # 避免选入已经涨太多的股票，保留距离关键日涨幅不大的首次买点机会
+            # 提取关键日（用于结果记录）
             key_date = self._extract_key_date(record) if timing_strategy_name == 'turtle' else None
-            if timing_strategy_name == 'turtle' and key_date:
-                key_date_close = self._get_key_date_close(stock_code, key_date)
-                if key_date_close and current_price > key_date_close * 1.05:
-                    price_ratio = round((current_price / key_date_close - 1) * 100, 2)
-                    logger.info(
-                        f"{stock_code} 海龟策略过滤: 狩猎日收盘价={current_price} "
-                        f"关键日收盘价={key_date_close} 涨幅={price_ratio}% > 5%，舍弃"
-                    )
-                    return None
             
             # 7. 获取支撑位（如果有）
             support_level = timing_result.support_level if timing_result.support_level > 0 else current_price
@@ -754,6 +744,7 @@ class KHunterDataProcessor:
             # 根据择时策略过滤缓存数据
             sql = """
             SELECT stock_code, stock_name, industry, sector,
+                   key_date, hunting_date,
                    support_level, current_price, price_diff, price_diff_percent,
                    buy_range, strategy_name, score, score_date,
                    timing_strategy, timing_signal

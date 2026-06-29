@@ -371,26 +371,27 @@ export function closeModal() {
 
 /**
  * 加载策略列表到历史记录下拉框
+ * 与策略回测页面使用统一的数据源 /api/trading/backtest/strategies
  */
 export async function loadHistoryStrategyOptions() {
     const strategySelect = document.getElementById('history-strategy-filter');
     if (!strategySelect) return;
     
     try {
-        const response = await fetch('/api/strategies');
+        // 使用与策略回测一致的API端点
+        const response = await fetch('/api/trading/backtest/strategies');
         const data = await response.json();
         
-        if (data.success && data.data) {
+        if (data.success && data.data && data.data.strategies) {
             // 保留第一个选项（全部策略）
             strategySelect.innerHTML = '<option value="">全部策略</option>';
             
-            data.data.forEach(strategy => {
+            data.data.strategies.forEach(strategy => {
                 const option = document.createElement('option');
-                // 使用display_name作为value，因为数据库中存储的是中文名称
-                option.value = strategy.display_name || strategy.name;
-                option.textContent = strategy.display_name || strategy.name;
-                // 保存英文名称用于其他用途
-                option.dataset.name = strategy.name;
+                // 使用中文名称作为value和显示文本，与策略回测页面保持一致
+                const chineseName = strategy.display_name || strategy.name;
+                option.value = chineseName;
+                option.textContent = chineseName;
                 strategySelect.appendChild(option);
             });
         }

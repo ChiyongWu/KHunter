@@ -95,10 +95,11 @@ function initKlineChart(containerId, rawData) {
  * @param {number} candleSpacing - K线间距
  */
 function drawMovingAverages(ctx, formattedData, padding, chartHeight, adjustedMin, adjustedRange, candleSpacing) {
-    // 定义均线配置（只保留MA5和MA10）
+    // 定义均线配置（MA5、MA10和MA20）
     const maConfigs = [
         { data: formattedData.ma5Data, color: '#2962FF', label: 'MA5', lineWidth: 1.5 },
-        { data: formattedData.ma10Data, color: '#FF6D00', label: 'MA10', lineWidth: 1.5 }
+        { data: formattedData.ma10Data, color: '#FF6D00', label: 'MA10', lineWidth: 1.5 },
+        { data: formattedData.ma20Data, color: '#FFD700', label: 'MA20', lineWidth: 1.5 }
     ];
     
     // 计算Y坐标的辅助函数
@@ -502,13 +503,15 @@ function formatKlineData(rawData) {
         }
     });
     
-    // 计算均线（只保留MA5和MA10）
+    // 计算均线（计算MA5、MA10和MA20）
     const ma5 = calculateSMA(closePrices, 5);
     const ma10 = calculateSMA(closePrices, 10);
+    const ma20 = calculateSMA(closePrices, 20);
     
     // 转换均线数据格式
     const ma5Data = [];
     const ma10Data = [];
+    const ma20Data = [];
     
     candleData.forEach((candle, index) => {
         if (ma5[index] !== null) {
@@ -523,6 +526,12 @@ function formatKlineData(rawData) {
                 value: ma10[index]
             });
         }
+        if (ma20[index] !== null) {
+            ma20Data.push({
+                time: candle.time,
+                value: ma20[index]
+            });
+        }
     });
     
     return {
@@ -532,7 +541,8 @@ function formatKlineData(rawData) {
         dData,
         jData,
         ma5Data,
-        ma10Data
+        ma10Data,
+        ma20Data
     };
 }
 

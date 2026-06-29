@@ -32,8 +32,11 @@ class BuyPreFilter:
         # 规则1: 前20日最低点到今日开盘涨幅限制
         'max_rise_from_low': 0.50,  # 50%
         
-        # 规则2: 开盘涨幅限制
+        # 规则2: 开盘涨幅限制（上限）
         'max_open_rise': 0.03,  # 3%
+        
+        # 规则2: 开盘跌幅限制（下限）
+        'min_open_rise': -0.03,  # -3%
         
         # 规则3: BIAS5上限
         'max_bias5': 7.0,
@@ -163,21 +166,22 @@ class BuyPreFilter:
     @classmethod
     def _check_open_rise(cls, df: pd.DataFrame, stock_code: str) -> Dict:
         """
-        规则2: 检查当日开盘涨幅
+        规则2: 检查当日开盘涨跌幅
         
         计算方法:
         1. 获取今日开盘价和昨日收盘价
         2. 计算 (今日开盘 - 昨日收盘) / 昨日收盘
-        3. 如果涨幅超过3%，不买入
+        3. 如果涨幅超过3%或跌幅超过-3%，不买入
         """
         max_open_rise = cls.CONFIG['max_open_rise']
+        min_open_rise = cls.CONFIG['min_open_rise']
         
         if len(df) < 2:
             return {
                 'passed': True,
                 'reason': '',
                 'value': None,
-                'threshold': max_open_rise
+                'threshold': f'{min_open_rise*100:.0f}% ~ {max_open_rise*100:.0f}%'
             }
         
         try:
@@ -196,19 +200,27 @@ class BuyPreFilter:
                     'passed': True,
                     'reason': '',
                     'value': None,
-                    'threshold': max_open_rise
+                    'threshold': f'{min_open_rise*100:.0f}% ~ {max_open_rise*100:.0f}%'
                 }
             
             # 计算开盘涨幅
             open_rise = (today_open - yesterday_close) / yesterday_close
             
-            passed = open_rise <= max_open_rise
+            passed = min_open_rise <= open_rise <= max_open_rise
+            
+            if not passed:
+                if open_rise > max_open_rise:
+                    reason = f'开盘涨幅{open_rise*100:.2f}%过大'
+                else:
+                    reason = f'开盘跌幅{open_rise*100:.2f}%过大'
+            else:
+                reason = ''
             
             return {
                 'passed': passed,
-                'reason': f'开盘涨幅{open_rise*100:.2f}%过大' if not passed else '',
+                'reason': reason,
                 'value': open_rise,
-                'threshold': max_open_rise,
+                'threshold': f'{min_open_rise*100:.0f}% ~ {max_open_rise*100:.0f}%',
                 'today_open': today_open,
                 'yesterday_close': yesterday_close
             }
@@ -434,8 +446,31 @@ if __name__ == '__main__':
         r = result3['details']['open_rise']
         print(f"  详情: 开盘涨幅={r.get('value')*100:.2f}%")
     
-    # 测试4: BIAS5 > 7 - 应该不通过
-    print("\n【测试4】BIAS5 > 7 - 应该不通过")
+    # 测试4: 开盘跌幅超过-3% - 应该不通过
+    print("\n【测试4】开盘跌幅超-3% - 应该不通过")
+    # 昨天收盘10元，今日开盘9.5元，跌幅5%
+    base_prices4 = [9.5]  # 今天开盘低开5%
+    for i in range(29):
+        base_prices4.append(10.0)  # 之前都是10元
+    
+    data4 = {
+        'date': [str(d.date()) for d in dates][::-1],
+        'open': base_prices4,
+        'high': [p + 0.5 for p in base_prices4],
+        'low': [p - 0.5 for p in base_prices4],
+        'close': [p + 0.1 for p in base_prices4],
+        'volume': [1000000] * 30
+    }
+    df4 = pd.DataFrame(data4)
+    result4 = BuyPreFilter.check_filters(df4, '000004')
+    print(f"  结果: {'通过' if result4['passed'] else '不通过'}")
+    print(f"  原因: {result4['reason']}")
+    if 'open_rise' in result4['details']:
+        r = result4['details']['open_rise']
+        print(f"  详情: 开盘涨跌幅={r.get('value')*100:.2f}%")
+    
+    # 测试5: BIAS5 > 7 - 应该不通过
+    print("\n【测试5】BIAS5 > 7 - 应该不通过")
     # 构造数据：今日收盘12元，前5日价格在10元附近
     # MA5 ≈ 10.2，BIAS5 = (12-10.2)/10.2*100 ≈ 18% > 7
     # 确保前20日最低点到今日开盘涨幅<50%（最低点=10元，今日开盘=10.1，涨幅=1%）

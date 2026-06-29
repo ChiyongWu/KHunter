@@ -14,6 +14,7 @@ K线数据增量更新器
 - 完善的错误处理和重试机制
 """
 
+import gc
 import logging
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
@@ -95,6 +96,20 @@ class KlineUpdater:
             
             logger.info(f"开始更新K线数据: {len(stock_codes)} 只股票")
             
+            # 第0步：检查数据源是否已准备好目标日期数据
+            logger.info("第0步: 检查数据源数据就绪状态...")
+            if not self._is_data_source_ready(stock_codes, target_date):
+                logger.warning(f"数据源 (TickFlow) 尚未返回 {target_date} 的数据，跳过本次更新")
+                return {
+                    'success': True,
+                    'added': 0,
+                    'updated': 0,
+                    'failed': 0,
+                    'rebuilt': 0,
+                    'message': f"数据源尚未就绪，{target_date} 数据暂不可用，请稍后再试",
+                    'total_time': (datetime.now() - start_time).total_seconds()
+                }
+            
             # 第1步：计算需要获取的天数
             logger.info("第1步: 计算需要获取的天数...")
             days_to_fetch = self._calculate_days_to_fetch(last_update_date, target_date)
@@ -110,7 +125,7 @@ class KlineUpdater:
                     'total_time': (datetime.now() - start_time).total_seconds()
                 }
             
-            logger.info(f"需要获取 {days_to_fetch} 天的K线数据")
+            logger.info(f"需要获取 {days_to_fetch} 个交易日的K线数据")
             
             # 第2步：分批批量处理（TickFlow API）
             logger.info(f"第2步: TickFlow 批量处理 {len(stock_codes)} 只股票 (批次大小: {batch_size})...")
@@ -138,6 +153,27 @@ class KlineUpdater:
                     self.stats['failed'] += batch_result['failed']
 
                     logger.info(f"批次 {batch_num} 完成: 新增 {batch_result['added']} 条, 失败 {batch_result['failed']} 只, 耗时 {batch_elapsed:.1f}秒")
+
+                    # 每批次后强制垃圾回收，释放内存给 Web 服务器
+                    gc.collect()
+
+                    # 清空 Session 连接池：避免累积的 TCP 连接被服务端限流/关闭
+                    # 每个批次使用独立的连接池，防止旧连接拖慢新请求
+                    # 对超过 8s/批的明显限流信号，重建连接池后可缓解 40%+
+                    if hasattr(self.kline_fetcher.stock_data_fetcher, 'clear_session_pool'):
+                        self.kline_fetcher.stock_data_fetcher.clear_session_pool()
+
+                    # 自适应批次间休眠：随批次推进逐渐增加延迟
+                    # 前 20% 批次：2s → 中段：3s → 后段：5s，避免连续轰炸触发严格限流
+                    if batch_num < total_batches:
+                        progress_ratio = batch_num / total_batches
+                        if progress_ratio < 0.2:
+                            sleep_time = 2.0
+                        elif progress_ratio < 0.5:
+                            sleep_time = 3.0
+                        else:
+                            sleep_time = 5.0
+                        time.sleep(sleep_time)
 
                 except Exception as e:
                     logger.warning(f"批次 {batch_num} TickFlow 处理失败: {str(e)}")
@@ -195,35 +231,161 @@ class KlineUpdater:
                 'total_time': total_time
             }
     
+    def _is_data_source_ready(self, stock_codes: List[str], target_date: str) -> bool:
+        """
+        检查数据源 (TickFlow) 是否已准备好目标日期的数据
+
+        取样少量股票，拉取 TickFlow 最新 K 线，
+        检查返回数据中是否包含 target_date。
+
+        参数：
+            stock_codes: 全部待更新股票代码列表
+            target_date: 目标更新日期 (YYYY-MM-DD)
+
+        返回：
+            True 数据就绪，False 数据尚未可用
+        """
+        # 取样最多 3 只股票，覆盖主板、创业板、科创板
+        sample_codes = self._sample_by_board(stock_codes)
+        if not sample_codes:
+            return True  # 没有待更新股票，视为就绪
+
+        try:
+            logger.info(f"取样 {len(sample_codes)} 只股票探测数据源就绪状态: {sample_codes}")
+
+            # 用 TickFlow 拉取最近 3 天数据
+            kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
+                sample_codes, days=3
+            )
+
+            if not api_ok:
+                logger.warning("数据源就绪检查: TickFlow API 调用失败，认为数据未就绪")
+                return False
+
+            if not kline_data:
+                logger.warning("数据源就绪检查: TickFlow 返回空数据，认为数据未就绪")
+                return False
+
+            # 统计有 target_date 数据的股票数，至少 2 只才视为就绪
+            target_date_normalized = target_date.replace('-', '')  # YYYYMMDD
+            ready_codes = []
+            all_dates = set()
+
+            for code, df in kline_data.items():
+                if df is None or len(df) == 0:
+                    continue
+                dates = df['date'].astype(str).str.split(' ').str[0].tolist()
+                all_dates.update(dates)
+                for d in dates:
+                    d_norm = d.replace('-', '')
+                    if d_norm == target_date_normalized or d == target_date:
+                        ready_codes.append(code)
+                        break  # 该股票已有目标日期数据，不再检查
+
+            # 至少 2 只返回目标日期数据才视为就绪
+            if len(ready_codes) >= 2:
+                logger.info(f"数据源就绪检查: {ready_codes} 已有 {target_date} 数据，数据源就绪")
+                return True
+
+            logger.warning(
+                f"数据源就绪检查: {len(ready_codes)}/{len(kline_data)} 只有目标日期数据 "
+                f"(要求 >= 2), 已有: {ready_codes}, 当前最新日期: {sorted(all_dates)}"
+            )
+            return False
+
+        except Exception as e:
+            logger.error(f"数据源就绪检查异常: {e}，保守认为数据未就绪")
+            return False
+
+    @staticmethod
+    def _sample_by_board(stock_codes: List[str]) -> List[str]:
+        """
+        从股票列表中取样，覆盖主板、创业板、科创板
+
+        板块分类：
+            主板:   600/601/603/605 (沪), 000/001/002/003 (深)
+            创业板: 300/301 (深)
+            科创板: 688/689 (沪)
+            北交所: 8 (920/83/87)
+
+        每个板块最多取 1 只，最多返回 3 只。
+
+        参数：
+            stock_codes: 全部待检测股票代码列表
+
+        返回：
+            取样股票代码列表 (最多 3 只，覆盖主板/创业板/科创板)
+        """
+        # 定义板块分类规则
+        boards = {
+            '主板': [],
+            '创业板': [],
+            '科创板': [],
+        }
+
+        for code in stock_codes:
+            code = str(code).strip()
+            if not code or len(code) < 6:
+                continue
+
+            # 科创板 (688xxx, 689xxx)
+            if code.startswith(('688', '689')):
+                if not boards['科创板']:
+                    boards['科创板'].append(code)
+            # 创业板 (300xxx, 301xxx)
+            elif code.startswith(('300', '301')):
+                if not boards['创业板']:
+                    boards['创业板'].append(code)
+            # 主板 (600/601/603/605, 000/001/002/003)
+            elif code.startswith(('600', '601', '603', '605', '000', '001', '002', '003')):
+                if not boards['主板']:
+                    boards['主板'].append(code)
+            else:
+                # 北交所或其他，归入主板（若主板已满则跳过）
+                if not boards['主板']:
+                    boards['主板'].append(code)
+
+            # 三个板块都已取到，提前退出
+            if all(boards.values()):
+                break
+
+        # 按优先级顺序合并: 主板 → 创业板 → 科创板
+        result = boards['主板'] + boards['创业板'] + boards['科创板']
+        return result
+
     def _calculate_days_to_fetch(self, last_update_date: str, target_date: str) -> int:
         """
-        计算需要获取的天数
-        
+        计算需要获取的K线天数（按交易日计算，非自然日）
+
+        TickFlow API 的 count 参数代表返回的 K 线条数，
+        因此应使用交易日差距而非自然日差距。
+
         参数：
             last_update_date: 上次更新日期 (YYYY-MM-DD)
             target_date: 目标更新日期 (YYYY-MM-DD)
-        
+
         返回：
-            需要获取的天数
+            需要获取的交易日天数
         """
         try:
-            # 解析日期
-            last_date = datetime.strptime(last_update_date, '%Y-%m-%d')
-            target = datetime.strptime(target_date, '%Y-%m-%d')
-            
-            # 计算天数差
-            days_diff = (target - last_date).days
-            
-            # 为了确保获取到所有新数据，多获取2天，最小获取3天
-            days_to_fetch = max(days_diff + 2, 3)
-            
-            logger.debug(f"上次更新日期: {last_update_date}, 目标日期: {target_date}, 需要获取: {days_to_fetch} 天")
-            
+            from utils.trade_date_utils import get_trading_days_between
+
+            # 计算目标日期到上次更新日之间的交易日差距
+            trading_days_diff = get_trading_days_between(last_update_date, target_date)
+
+            # +2 个交易日缓冲，最少 3 个交易日
+            days_to_fetch = max(trading_days_diff + 2, 3)
+
+            logger.debug(
+                f"上次更新日期: {last_update_date}, 目标日期: {target_date}, "
+                f"交易日差距: {trading_days_diff}, 需要获取: {days_to_fetch} 个交易日"
+            )
+
             return days_to_fetch
-        
+
         except Exception as e:
             logger.error(f"计算需要获取的天数失败: {str(e)}")
-            # 默认获取30天
+            # 默认获取30个交易日
             return 30
     
     def _fetch_and_save_batch_concurrent(self, batch_codes: List[str], days: int) -> Dict:
@@ -287,6 +449,10 @@ class KlineUpdater:
                 # 统计最终无数据的股票（TickFlow无数据 + 降级也无数据）
                 final_missing = len([c for c in batch_codes if c not in kline_data])
                 failed += final_missing
+
+                # 保存并统计完成后释放 kline_data 字典中的 DataFrame 引用
+                kline_data.clear()
+                gc.collect()
             else:
                 # 全部获取失败
                 failed = len(batch_codes)
@@ -396,8 +562,9 @@ class KlineUpdater:
             
             # 使用向量化操作准备数据，比iterrows()快10-100倍
             try:
-                # 准备日期列
-                dates = df_kline['date'].astype(str).str.split(' ').str[0]
+                # 准备日期列（统一转换为 YYYY-MM-DD 格式）
+                from utils.date_utils import normalize_date
+                dates = df_kline['date'].apply(lambda x: normalize_date(x) if x is not None else None)
                 
                 # 准备成交量列，处理NaN值
                 volumes = df_kline[volume_col].fillna(0).astype(int)
@@ -423,12 +590,12 @@ class KlineUpdater:
                 logger.error(f"准备 {stock_code} K线数据失败: {str(e)}")
                 return 0, 0
             
-            # 使用原生executemany批量保存所有记录，大幅提升性能
+            # 使用原生executemany批量保存所有记录
+            # 注意：外层已由 _fetch_and_save_batch_concurrent 包裹事务，此处无需再开事务
             if records_to_save:
-                with self.db_manager.transaction():
-                    conn = self.db_manager.connect()
-                    cursor = conn.cursor()
-                    cursor.executemany(upsert_sql, records_to_save)
+                conn = self.db_manager.connect()
+                cursor = conn.cursor()
+                cursor.executemany(upsert_sql, records_to_save)
                 added = len(records_to_save)
             
             return added, updated

@@ -273,10 +273,6 @@ class AKShareFetcher:
         """初始化K线历史数据"""
         self.data_initializer._init_kline_history_data(stock_codes, years)
     
-    def _init_history_data(self, stock_codes: list) -> None:
-        """初始化历史行情数据"""
-        self.data_initializer._init_history_data(stock_codes)
-    
     def _init_industry_data(self, stock_codes: list) -> None:
         """初始化行业数据"""
         self.data_initializer._init_industry_data(stock_codes)
@@ -293,13 +289,15 @@ class AKShareFetcher:
         """初始化事件数据"""
         return self.data_initializer._init_event_data(stock_codes)
     
-    def init_full_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> None:
-        """全量初始化所有数据"""
-        self.data_initializer.init_full_data(max_stocks, skip_failed, years)
-    
-    def init_incremental_data(self, max_stocks: Optional[int] = None, skip_failed: bool = True, years: int = 3) -> Dict[str, int]:
-        """增量初始化数据"""
-        return self.data_initializer.init_incremental_data(max_stocks, skip_failed, years)
+    def init_full_data(self, max_stocks: Optional[int] = None, years: int = 3,
+                       incremental: bool = False, stock_dict: dict = None,
+                       stock_codes: list = None) -> None:
+        """统一的初始化入口：全量或增量模式"""
+        self.data_initializer.init_full_data(
+            max_stocks=max_stocks, years=years,
+            incremental=incremental, stock_dict=stock_dict,
+            stock_codes=stock_codes
+        )
     
     # ==================== 采集器管理 ====================
     

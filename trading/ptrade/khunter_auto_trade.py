@@ -6,17 +6,23 @@ KHunter 自动交易策略 (PTrade 云端部署脚本)
   2. PTrade 云端:   /home/fly/notebook/khunter_auto_trade.py (策略执行)
 
 功能:
-  1. 9:25 开盘读取 KHunter 信号文件并提交委托（含开盘涨跌幅过滤）
-  2. 15:05 收盘返回执行结果和持仓给 KHunter
+  9:31 开盘读取 KHunter 信号文件并提交委托（通过 run_daily 定时触发，等第一笔行情落地）
 
-处理顺序:
-  - KHunter 端保证 CSV 中卖出信号排在买入信号前面
-  - PTrade 端按 CSV 行顺序逐条处理，自然实现先卖后买
-  - 卖出释放资金后再买入，避免资金不足
+处理顺序（两阶段）:
+  阶段一: 收集全部信号，分类为卖出/买入
+  阶段二: 先提交全部卖出委托，轮询等待成交到账
+  阶段三: 卖出资金到账后，再处理买入委托（卖出未成交，但是等待时间已过，仍然执行买入）
+  - 卖出未成交时买入不会被执行，确保资金到位后再买
 
 买入过滤规则:
-  - 开盘涨幅 > 2% → 不买入（追高风险）
+  - 开盘涨幅 > 3% → 不买入（追高风险）
   - 开盘跌幅 > 3% → 不买入（强势下跌风险）
+  - 当前价偏离信号价 > 3% → 不买入（价格波动风险）
+  - 买入时按当前价下单（limit_price = 当前价）
+
+反馈机制:
+  - PTrade 原生自动导出 Fund_/Hold_ CSV 文件（不需要策略中手动生成）
+  - KHunter 端 PTradeFeedbackHandler 读取 Fund_/Hold_ 文件更新 portfolio
 
 在 PTrade 策略模块中配置:
   策略类型: 股票
@@ -25,18 +31,22 @@ KHunter 自动交易策略 (PTrade 云端部署脚本)
 """
 
 import pandas as pd
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 
 # ============ 全局常量 ============
-# 信号文件（固定文件名，KHunter 每天覆盖上传）
-SIGNAL_FILE = "KHunter_signals.csv"
+# 信号文件模板（{} 填入执行日期 YYYYMMDD，与 KHunter 端命名一致）
+SIGNAL_FILE = "KHunter_signals_{}.csv"
 
-# 买入过滤阈值
-MAX_OPEN_GAIN_PCT = 3.0    # 开盘涨幅超过此值不买入
-MAX_OPEN_LOSS_PCT = 3.0    # 开盘跌幅超过此值不买入
+# 定时触发时间
+MORNING_EXEC_TIME = '9:31'    # 开盘信号处理时间（9:31，等行情落地后再执行）
+
+# 买入价格阈值（当前价偏离信号价 ±3% 以内才下单，信号价=昨收）
+MAX_PRICE_UP_DEVIATION = 0.03    # 当前价高于信号价3%不买入（追高风险）
+MAX_PRICE_DOWN_DEVIATION = 0.03  # 当前价低于信号价3%不买入（强势下跌风险）
 
 # PTrade 研究模块 upload_files 目录名（相对研究模块路径）
-UPLOAD_DIRNAME = "upload_files"
+UPLOAD_DIRNAME = "upload_file"
 
 
 def _join_path(*parts):
@@ -78,47 +88,55 @@ def _file_exists(filepath):
 
 def initialize(context):
     """
-    策略初始化
+    策略初始化（PTrade 生命周期入口）
 
-    在策略启动时调用一次，初始化全局变量
+    初始化全局变量并注册定时任务：
+    - 9:31 run_daily 开盘处理信号（等行情数据到位）
+    - PTrade 原生自动导出 Fund_/Hold_ 文件（15:05 后），无需策略处理
     """
     g.executed_signals = {}         # 当日已提交的信号记录 {signal_id: {...}}
+
+    # 注册定时任务（PTrade 仅支持一个 run_daily）
+    run_daily(context, morning_event, time=MORNING_EXEC_TIME)
+    log.info(f"[KHunter] 策略初始化完成, 开盘处理={MORNING_EXEC_TIME}")
 
 
 def before_trading_start(context, data):
     """
     PTrade 盘前事件（每个交易日约 9:25 触发一次）
 
-    功能: 读取 KHunter 信号文件并提交委托
+    重置当日状态，信号处理由 run_daily(9:31) 定时触发
     """
     # 重置当日信号记录
     g.executed_signals = {}
 
+
+def morning_event(context):
+    """
+    开盘处理事件（run_daily 定时触发，9:31 执行，等第一笔行情落地）
+
+    功能: 读取 KHunter 信号文件，获取当前价，
+          检查价格阈值后提交委托（按当前价下单）
+
+    参照 ptradesample 的 daily_event 模式:
+      - 使用 get_position(sec).last_sale_price 获取当前价
+      - 使用 order(sec, vol, limit_price=current_price) 按当前价下单
+    """
     today_str = context.current_dt.strftime('%Y%m%d')
-    log.info(f"[KHunter] 盘前开始处理信号, 日期={today_str}")
+    log.info(f"[KHunter] 开盘处理开始, 日期={today_str}")
     process_khunter_signals(context, today_str)
+
 
 
 def handle_data(context, data):
     """
     PTrade 盘中事件（9:30-15:00 每分钟触发）
 
-    本策略信号处理在 before_trading_start 完成，
-    结果导出在 after_trading_end 完成，
-    handle_data 无需额外操作。
+    本策略通过 run_daily 定时触发完成所有操作，
+    handle_data 无需额外操作。PTrade 原生会在 15:05 后
+    自动导出 Fund_/Hold_ 文件供 KHunter 读取。
     """
     pass
-
-
-def after_trading_end(context, data):
-    """
-    PTrade 盘后事件（每个交易日约 15:05 触发一次）
-
-    功能: 导出执行结果和持仓快照到 upload_files/
-    """
-    today_str = context.current_dt.strftime('%Y%m%d')
-    log.info(f"[KHunter] 盘后开始导出结果, 日期={today_str}")
-    export_execution_results(context, today_str)
 
 
 def _normalize_symbol(symbol):
@@ -132,29 +150,124 @@ def _normalize_symbol(symbol):
 
     Returns:
         str: PTrade 标准代码，如 "688147.SS" 或 "301314.SZ"
+
+    Raises:
+        ValueError: 若 symbol 无效（NaN/None/空字符串/非字符串类型）
     """
+    # 防御：NaN 是 float 类型，不是 str
+    if symbol is None or not isinstance(symbol, str) or pd.isna(symbol):
+        raise ValueError(f"无效的股票代码: {symbol} (类型: {type(symbol).__name__})")
+    symbol = str(symbol).strip()
+    if not symbol:
+        raise ValueError("股票代码为空字符串")
     if symbol.endswith('.SH'):
         return symbol[:-3] + '.SS'
     return symbol  # .SZ 已正确，或无后缀时保留原样
 
 
+def _wait_sell_orders_filled(sell_orders, max_wait=120, poll_interval=3):
+    """
+    等待卖出委托全部成交后再继续处理买入
+
+    PTrade 中卖出委托是异步的，order() 后不会立即成交。
+    本函数轮询 get_order() 检查成交状态，确保卖出资金到账后再买入。
+
+    处理逻辑:
+      - 轮询每笔卖出订单的 filled 数量，>= 委托量即视为成交
+      - canceled/rejected 状态视为不再等待（部分成交也算完成）
+      - 超时后继续执行买入，依赖 context.portfolio.cash 获取最新可用资金
+
+    Args:
+        sell_orders: list of (signal_id, order_id, symbol, volume) 元组
+        max_wait: 最大等待秒数（默认 120 秒）
+        poll_interval: 轮询间隔秒数（默认 3 秒）
+
+    Returns:
+        int: 成功成交的订单数
+    """
+    if not sell_orders:
+        return 0
+
+    filled_count = 0
+    pending = sell_orders[:]  # 待检查的订单列表
+    elapsed = 0
+
+    while pending and elapsed < max_wait:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+        still_pending = []
+        for signal_id, order_id, symbol, volume in pending:
+            try:
+                ord_info = get_order(order_id)
+                if ord_info is None:
+                    log.warning(f"[KHunter] 订单 {order_id} 查询返回 None，继续等待")
+                    still_pending.append((signal_id, order_id, symbol, volume))
+                    continue
+
+                # 获取成交数量和状态（兼容 PTrade API 不同字段名）
+                # 注意: 显式检查 None 而非用 or 短路，避免 filled=0 被误判为 falsy
+                filled_qty = getattr(ord_info, 'filled', None)
+                if filled_qty is None:
+                    filled_qty = getattr(ord_info, 'filled_amount', None)
+                if filled_qty is None:
+                    filled_qty = 0
+                status = getattr(ord_info, 'status', None)
+                if status is None:
+                    status = getattr(ord_info, 'order_status', None) or ''
+
+                # 已完全成交
+                if filled_qty >= volume:
+                    log.info(f"[KHunter] 卖出成交: {symbol} {filled_qty}股 order_id={order_id} "
+                             f"(耗时 {elapsed}s)")
+                    filled_count += 1
+                # 已取消或被拒绝（不再等待）
+                elif status in ('canceled', 'rejected', 'cancelled'):
+                    log.warning(f"[KHunter] 卖出被{status}: {symbol} order_id={order_id} "
+                                f"已成交 {filled_qty}/{volume}")
+                    filled_count += 1  # 也算完成（不再等待）
+                else:
+                    # 仍在等待成交
+                    still_pending.append((signal_id, order_id, symbol, volume))
+            except Exception as e:
+                log.warning(f"[KHunter] 查询订单 {order_id} 失败: {e}，继续等待")
+                still_pending.append((signal_id, order_id, symbol, volume))
+
+        pending = still_pending
+        if pending:
+            symbols_left = [s for _, _, s, _ in pending]
+            log.info(f"[KHunter] 等待 {len(pending)} 笔卖出成交: {symbols_left} (已等待 {elapsed}s)")
+
+    if pending:
+        log.warning(f"[KHunter] 等待超时 ({max_wait}s)，{len(pending)} 笔卖出未完全成交，"
+                     f"将继续处理买入（可用资金以 context.portfolio.cash 为准）")
+
+    return filled_count
+
+
 def process_khunter_signals(context, today_str):
     """
-    读取 KHunter 信号文件并提交委托
+    读取 KHunter 信号文件并提交委托（两阶段处理：先卖后买）
 
-    执行规则:
-      1. 开盘涨幅>3% 不买入（用 get_history 获取昨收今开）
-      2. 开盘跌幅>3% 不买入
-      3. 买入前检查可用资金是否充足
-      4. 卖出前检查持仓是否足够
+    两阶段处理流程:
+      阶段一: 收集所有信号，先提交全部卖出委托，等待成交到账
+      阶段二: 卖出资金到账后，再处理买入委托
+
+    买入规则:
+      1. 获取当前价
+      2. 当前价偏离信号价（昨收）±3% 不买入
+      3. 买入前检查可用资金是否充足（此时已包含卖出回款）
+      4. 买入时按当前价下单
 
     Args:
         context: PTrade 上下文
         today_str: 当日日期字符串 YYYYMMDD
     """
     # 构造信号文件完整路径（用 get_research_path 获取研究模块路径）
+    # 按执行日期匹配文件: KHunter_signals_YYYYMMDD.csv
     research_dir = get_research_path()
-    file_path = _join_path(research_dir, UPLOAD_DIRNAME, SIGNAL_FILE)
+    signal_filename = SIGNAL_FILE.format(today_str)
+    file_path = _join_path(research_dir, UPLOAD_DIRNAME, signal_filename)
     log.info(f"[KHunter] 查找信号文件: {file_path}")
 
     # 检查文件是否存在
@@ -162,232 +275,167 @@ def process_khunter_signals(context, today_str):
         log.warning(f"[KHunter] 信号文件不存在: {file_path}，跳过今日交易")
         return
 
-    # 读取信号文件
-    try:
-        df = pd.read_csv(file_path, encoding='utf-8')
-        log.info(f"[KHunter] 读取到 {len(df)} 条信号")
-    except Exception as e:
-        log.error(f"[KHunter] 读取信号文件失败: {e}")
+    # 读取信号文件（容错多种编码，优先 UTF-8）
+    df = None
+    # 尝试编码列表：UTF-8 优先，GBK/GB18030 作为回退（Windows 生成中文文件常见）
+    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1']:
+        try:
+            df = pd.read_csv(file_path, encoding=enc)
+            log.info(f"[KHunter] 读取到 {len(df)} 条信号 (编码: {enc})")
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except Exception as e:
+            log.error(f"[KHunter] 编码 {enc} 读取失败: {e}")
+            continue
+    if df is None:
+        log.error(f"[KHunter] 所有编码尝试均失败，无法读取信号文件")
         return
 
-    # 校验信号日期：T日出信号，T+1日执行，signal_date 必须为前一个交易日
-    if 'signal_date' in df.columns and len(df) > 0:
-        csv_date = str(df.iloc[0]['signal_date']).strip()
-        # 字符串直接比较 YYYYMMDD，signal_date 不能 >= 执行日
-        if csv_date >= today_str:
-            log.error(f"[KHunter] 信号日期 {csv_date} >= 执行日期 {today_str}，"
-                      f"T日信号应在T+1日执行，跳过全部信号")
+    # 防御：清理列名首尾空格（CSV 生成方可能引入尾随空格）
+    df.columns = df.columns.str.strip()
+
+    # 校验执行日期：exec_date 必须与当日相同（KHunter端已计算好T+1交易日）
+    # 防御处理：去掉连字符（兼容 2026-06-16 和 20260616 两种格式）
+    if 'exec_date' in df.columns and len(df) > 0:
+        csv_exec_date = str(df.iloc[0]['exec_date']).strip().replace('-', '')
+        if csv_exec_date != today_str:
+            log.error(f"[KHunter] 信号执行日期 {csv_exec_date} ≠ 当日 {today_str}，"
+                      f"信号不属于当日，跳过全部信号")
             return
-        # 计算前一个交易日（跳过周末）
-        try:
-            today_dt = datetime.strptime(today_str, '%Y%m%d')
-            weekday = today_dt.weekday()  # 0=周一, 6=周日
-            # 前一个交易日：周一→上周五(-3)，周日→上周五(-2)，周六→上周五(-1)，其他→昨天(-1)
-            if weekday == 0:    # 周一
-                prev_trading_day = (today_dt - timedelta(days=3)).strftime('%Y%m%d')
-            elif weekday == 6:  # 周日
-                prev_trading_day = (today_dt - timedelta(days=2)).strftime('%Y%m%d')
-            elif weekday == 5:  # 周六
-                prev_trading_day = (today_dt - timedelta(days=1)).strftime('%Y%m%d')
-            else:               # 周二~周五
-                prev_trading_day = (today_dt - timedelta(days=1)).strftime('%Y%m%d')
-
-            if csv_date != prev_trading_day:
-                log.error(f"[KHunter] 信号日期 {csv_date} ≠ 前交易日 {prev_trading_day}，"
-                          f"信号可能过期，跳过全部信号")
-                return
-        except ValueError:
-            log.warning(f"[KHunter] 日期格式异常，跳过日期校验")
+        log.info(f"[KHunter] 信号执行日期校验通过: {csv_exec_date} == {today_str}")
     else:
-        log.warning("[KHunter] 信号文件缺少 signal_date 列，无法校验日期，继续处理（兼容旧格式）")
+        log.warning("[KHunter] 信号文件缺少 exec_date 列，无法校验日期，继续处理（兼容旧格式）")
 
-    # 逐条处理信号
-    buy_count = 0
-    sell_count = 0
-    skip_count = 0
+    # ========== 阶段一：收集所有信号，分类为卖出/买入 ==========
+    sell_signals = []   # (idx, signal_id, symbol, volume) - 卖出信号
+    buy_signals = []    # (idx, signal_id, symbol, volume, price) - 买入信号
+    parse_skip_count = 0
 
     for idx, row in df.iterrows():
-        signal_id = row.get('signal_id', f'unknown_{idx}')
-        # 转换 KHunter 格式 → PTrade 格式: .SH → .SS
-        symbol = _normalize_symbol(row['symbol'])
-        side = row['side']
-        volume = int(row['order_volume'])
-        price = float(row['order_price'])
-        price_type = row.get('price_type', 'limit')
+        try:
+            signal_id = row.get('signal_id', f'unknown_{idx}')
+            # 转换 KHunter 格式 → PTrade 格式: .SH → .SS
+            symbol = _normalize_symbol(row['symbol'])
+            side = row['side']
+            volume = int(row['order_volume'])
+            price = float(row['order_price'])
+        except (KeyError, ValueError, TypeError) as e:
+            log.error(f"[KHunter] 信号行#{idx} 数据解析失败: {e}，跳过该信号")
+            parse_skip_count += 1
+            continue
 
         # 防重复：检查是否已处理
         if signal_id in g.executed_signals:
             log.info(f"[KHunter] 信号 {signal_id} 已处理，跳过")
             continue
 
-        # ---- 买入委托 ----
-        if side == 'buy':
-            # 规则1: 开盘涨跌幅检查（用 get_history 获取前收和今开）
-            # PTrade 使用 get_history 而非 QMT 的 attribute_history
-            try:
-                # 获取2条日线：前日K线和今日K线
-                hist = get_history(2, frequency='1d', field=['close', 'open'],
-                                   security_list=symbol, fq=None, include=False)
-                if hist is not None and len(hist) >= 2:
-                    prev_close = float(hist['close'].iloc[-2])    # 昨收
-                    today_open = float(hist['open'].iloc[-1])     # 今开
-                    if prev_close > 0 and today_open > 0:
-                        open_pct = (today_open - prev_close) / prev_close * 100
-                        if open_pct > MAX_OPEN_GAIN_PCT:
-                            log.info(f"[KHunter] {symbol} 开盘涨幅 {open_pct:.2f}% > {MAX_OPEN_GAIN_PCT}%，跳过买入")
-                            skip_count += 1
-                            continue
-                        if open_pct < -MAX_OPEN_LOSS_PCT:
-                            log.info(f"[KHunter] {symbol} 开盘跌幅 {open_pct:.2f}% < -{MAX_OPEN_LOSS_PCT}%，跳过买入")
-                            skip_count += 1
-                            continue
-            except Exception as e:
-                log.warning(f"[KHunter] {symbol} 开盘涨跌检查失败: {e}，跳过过滤继续买入")
+        if side == 'sell':
+            sell_signals.append((idx, signal_id, symbol, volume))
+        elif side == 'buy':
+            buy_signals.append((idx, signal_id, symbol, volume, price))
 
-            # 规则2: 检查可用资金（PTrade 用 context.portfolio.cash）
-            available_cash = context.portfolio.cash
-            required_amount = volume * price * 1.001  # 预留手续费
-            if available_cash < required_amount:
-                log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，可用 {available_cash:.0f}，跳过")
-                skip_count += 1
-                continue
+    log.info(f"[KHunter] 信号分类: 卖出{len(sell_signals)}条, 买入{len(buy_signals)}条, "
+             f"解析跳过{parse_skip_count}条")
 
-            # 提交限价委托
-            order_id = order(symbol, volume, limit_price=price)
-            g.executed_signals[signal_id] = {
-                'order_id': order_id,
-                'symbol': symbol,
-                'side': side,
-                'volume': volume,
-                'price': price,
-                'price_type': price_type,
-                'signal_id': signal_id,
-                'submit_time': context.current_dt.strftime('%H:%M:%S')
-            }
-            buy_count += 1
-            log.info(f"[KHunter] 买入委托: {symbol} {volume}股 @{price:.2f} order_id={order_id}")
+    # ========== 阶段二：先提交全部卖出委托 ==========
+    sell_count = 0
+    sell_skip_count = 0
+    sell_orders = []  # (signal_id, order_id, symbol, volume) - 用于后续等待成交
 
-        # ---- 卖出委托 ----
-        elif side == 'sell':
-            # 检查持仓数量
-            pos = get_position(symbol)
-            if pos is None or pos.enable_amount < volume:
-                available = pos.enable_amount if pos else 0
-                log.warning(f"[KHunter] {symbol} 持仓不足，可用 {available}，需要 {volume}")
-                skip_count += 1
-                continue
-
-            # 市价卖出（负数量表示卖出）
-            order_id = order(symbol, -volume)
-            g.executed_signals[signal_id] = {
-                'order_id': order_id,
-                'symbol': symbol,
-                'side': side,
-                'volume': volume,
-                'price': 0,  # 市价单不设限价
-                'price_type': 'market',
-                'signal_id': signal_id,
-                'submit_time': context.current_dt.strftime('%H:%M:%S')
-            }
-            sell_count += 1
-            log.info(f"[KHunter] 卖出委托: {symbol} {volume}股 order_id={order_id}")
-
-    log.info(f"[KHunter] 信号处理完成: 买入{buy_count}条, 卖出{sell_count}条, 跳过{skip_count}条")
-
-
-def export_execution_results(context, today_str):
-    """
-    收盘后导出执行结果和持仓快照
-
-    生成3个文件（均保存到 PTrade upload_files/）:
-      PTrade_trades_{today_str}.csv      - 成交明细
-      PTrade_portfolio_{today_str}.csv   - 持仓快照
-      PTrade_account_{today_str}.csv     - 账户汇总
-
-    Args:
-        context: PTrade 上下文
-        today_str: 当日日期 YYYYMMDD
-    """
-    log.info("[KHunter] 开始导出执行结果...")
-
-    # ---- 1. 成交明细 ----
-    trades_data = []
-    for signal_id, info in g.executed_signals.items():
-        symbol = info['symbol']
+    for idx, signal_id, symbol, volume in sell_signals:
+        # 检查持仓数量
         pos = get_position(symbol)
+        if pos is None or pos.enable_amount < volume:
+            available = pos.enable_amount if pos else 0
+            log.warning(f"[KHunter] {symbol} 持仓不足，可用 {available}，需要 {volume}")
+            sell_skip_count += 1
+            continue
 
-        actual_price = pos.cost_basis if pos else info['price']
-        actual_volume = pos.total_amount if pos else 0
-
-        trades_data.append({
-            'trade_date': today_str,
-            'order_id': info.get('order_id', ''),
-            'signal_id': signal_id,
+        # 市价卖出（负数量表示卖出）
+        order_id = order(symbol, -volume)
+        g.executed_signals[signal_id] = {
+            'order_id': order_id,
             'symbol': symbol,
-            'side': info['side'],
-            'order_status': 'filled' if actual_volume > 0 else 'rejected',
-            'order_volume': info['volume'],
-            'filled_volume': actual_volume,
-            'order_price': info['price'],
-            'filled_price': round(actual_price, 2),
-            'filled_amount': round(actual_price * actual_volume, 2),
-            'order_time': info.get('submit_time', ''),
-            'filled_time': context.current_dt.strftime('%H:%M:%S'),
-            'reject_reason': '' if actual_volume > 0 else '未成交'
-        })
+            'side': 'sell',
+            'volume': volume,
+            'price': 0,  # 市价单不设限价
+            'price_type': 'market',
+            'signal_id': signal_id,
+            'submit_time': context.current_dt.strftime('%H:%M:%S')
+        }
+        sell_orders.append((signal_id, order_id, symbol, volume))
+        sell_count += 1
+        log.info(f"[KHunter] 卖出委托: {symbol} {volume}股 order_id={order_id}")
 
-    if trades_data:
-        df_trades = pd.DataFrame(trades_data)
-        trade_file = _join_path(get_research_path(), UPLOAD_DIRNAME,
-                                f"PTrade_trades_{today_str}.csv")
-        df_trades.to_csv(trade_file, index=False, encoding='utf-8')
-        log.info(f"[KHunter] 成交明细已导出: {trade_file} ({len(df_trades)}条)")
-    else:
-        log.info("[KHunter] 今日无成交")
+    log.info(f"[KHunter] 卖出阶段完成: 提交{sell_count}条, 跳过{sell_skip_count}条")
 
-    # ---- 2. 持仓快照 ----
-    all_positions = get_positions()
-    portfolio_data = []
-    for code, pos in all_positions.items():
-        portfolio_data.append({
-            'report_date': today_str,
-            'symbol': code,
-            'stock_name': pos.name if hasattr(pos, 'name') else '',
-            'position_volume': pos.total_amount,
-            'available_volume': pos.enable_amount,
-            'cost_price': round(pos.cost_basis, 2),
-            'current_price': round(pos.lastsaleprice, 2),
-            'market_value': round(pos.lastsaleprice * pos.total_amount, 2),
-            'profit_loss': round(pos.long_pnl, 2) if hasattr(pos, 'long_pnl') else 0,
-            'profit_rate': round(pos.long_pnl_rate, 2) if hasattr(pos, 'long_pnl_rate') else 0,
-            'holding_days': 0  # PTrade 侧无法精确获取
-        })
+    # ========== 阶段三：等待卖出成交到账 ==========
+    if sell_orders:
+        log.info(f"[KHunter] 等待 {len(sell_orders)} 笔卖出成交后继续买入...")
+        pre_sell_cash = context.portfolio.cash
+        filled = _wait_sell_orders_filled(sell_orders)
+        post_sell_cash = context.portfolio.cash
+        cash_change = post_sell_cash - pre_sell_cash
+        log.info(f"[KHunter] 卖出成交完成: {filled}/{len(sell_orders)} 笔, "
+                 f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
 
-    if portfolio_data:
-        df_portfolio = pd.DataFrame(portfolio_data)
-        portfolio_file = _join_path(get_research_path(), UPLOAD_DIRNAME,
-                                    f"PTrade_portfolio_{today_str}.csv")
-        df_portfolio.to_csv(portfolio_file, index=False, encoding='utf-8')
-        log.info(f"[KHunter] 持仓快照已导出: {portfolio_file} ({len(df_portfolio)}只)")
+    # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
+    buy_count = 0
+    buy_skip_count = 0
 
-    # ---- 3. 账户汇总 ----
-    # PTrade Portfolio 属性: cash=可用资金, portfolio_value=总资产,
-    #   positions_value=持仓市值, returns=累计收益率, pnl=浮动盈亏
-    account_data = [{
-        'report_date': today_str,
-        'total_asset': round(context.portfolio.portfolio_value, 2),
-        'available_cash': round(context.portfolio.cash, 2),
-        'market_value': round(context.portfolio.positions_value, 2),
-        'frozen_cash': 0.0,
-        'today_profit': round(context.portfolio.pnl, 2),
-        'total_profit': round(context.portfolio.returns, 2)
-    }]
+    for idx, signal_id, symbol, volume, price in buy_signals:
+        # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
+        try:
+            current_pos = get_position(symbol)
+            current_price = current_pos.last_sale_price if current_pos and current_pos.last_sale_price > 0 else price
+        except Exception as e:
+            log.warning(f"[KHunter] {symbol} 获取当前价失败: {e}，使用信号价 {price:.2f}")
+            current_price = price
 
-    if account_data:
-        df_account = pd.DataFrame(account_data)
-        account_file = _join_path(get_research_path(), UPLOAD_DIRNAME,
-                                  f"PTrade_account_{today_str}.csv")
-        df_account.to_csv(account_file, index=False, encoding='utf-8')
-        log.info(f"[KHunter] 账户汇总已导出: {account_file}")
+        # 规则2: 当前价偏离信号价（昨收）阈值检查，-3% ~ +3% 内才下单
+        if price > 0 and current_price > 0:
+            price_deviation = (current_price - price) / price
+            # 当前价过高（追高风险）
+            if price_deviation > MAX_PRICE_UP_DEVIATION:
+                log.info(f"[KHunter] {symbol} 当前价 {current_price:.2f} "
+                         f"高于信号价 {price:.2f} ({price_deviation:.1%}) "
+                         f"> {MAX_PRICE_UP_DEVIATION:.0%}，跳过买入")
+                buy_skip_count += 1
+                continue
+            # 当前价过低（强势下跌风险）
+            if price_deviation < -MAX_PRICE_DOWN_DEVIATION:
+                log.info(f"[KHunter] {symbol} 当前价 {current_price:.2f} "
+                         f"低于信号价 {price:.2f} ({price_deviation:.1%}) "
+                         f"< -{MAX_PRICE_DOWN_DEVIATION:.0%}，跳过买入")
+                buy_skip_count += 1
+                continue
 
-    log.info(f"[KHunter] 执行结果导出完成 (成交{len(trades_data)}条, 持仓{len(portfolio_data)}只)")
+        # 规则3: 检查可用资金（此时已包含卖出回款）
+        available_cash = context.portfolio.cash
+        required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
+        if available_cash < required_amount:
+            log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，可用 {available_cash:.0f}，跳过")
+            buy_skip_count += 1
+            continue
+
+        # 提交委托：按当前价下单
+        order_id = order(symbol, volume, limit_price=current_price)
+        g.executed_signals[signal_id] = {
+            'order_id': order_id,
+            'symbol': symbol,
+            'side': 'buy',
+            'volume': volume,
+            'price': current_price,        # 记录实际下单价格
+            'signal_price': price,         # 保留原始信号价供参考
+            'price_type': 'current',       # 标记为按当前价下单
+            'signal_id': signal_id,
+            'submit_time': context.current_dt.strftime('%H:%M:%S')
+        }
+        buy_count += 1
+        log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
+                 f"信号价={price:.2f} 当前价={current_price:.2f} "
+                 f"偏离={(current_price/price-1)*100:+.2f}% order_id={order_id}")
+
+    log.info(f"[KHunter] 信号处理完成: 卖出{sell_count}条, 买入{buy_count}条, "
+             f"跳过{parse_skip_count + sell_skip_count + buy_skip_count}条")

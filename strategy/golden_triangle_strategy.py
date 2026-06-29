@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from strategy.base_strategy import BaseStrategy
-from utils.trade_date_utils import is_trading_day
 
 
 class GoldenTriangleStrategy(BaseStrategy):
@@ -120,29 +119,14 @@ class GoldenTriangleStrategy(BaseStrategy):
         
         return True
 
-    def select_stocks(self, df, stock_name='', selection_date=None) -> list:
-        """选股逻辑
-        
-        参数:
-            df: 股票数据DataFrame
-            stock_name: 股票名称
-            selection_date: 选股日期（YYYY-MM-DD格式），用于停牌检查
-        """
+    def select_stocks(self, df, stock_name='') -> list:
+        """选股逻辑"""
         # 快速过滤：先排除明显不符合条件的股票
         if not self.quick_filter(df):
             return []
 
         if stock_name and not self._validate_stock_name(stock_name):
             return []
-        
-        # 停牌检查：如果提供了选股日期且是交易日，检查当天是否有K线数据
-        if selection_date:
-            # 先判断选股日期是否是交易日
-            if is_trading_day(selection_date):
-                latest_date = str(df.iloc[0]['date']).split()[0]
-                # 如果最新数据日期小于选股日期，则认为是停牌
-                if latest_date < selection_date:
-                    return []
 
         df = self.calculate_indicators(df.copy())
 

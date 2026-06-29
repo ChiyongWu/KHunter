@@ -314,10 +314,8 @@ class BacktestBatchQueue:
         try:
             backtest_dao = BacktestDAO(db_path="data/stock_selection.db")
 
-            # 计算final_capital
-            final_capital = config.get('initial_capital', 300000)
-            if 'capital_history' in result and result['capital_history']:
-                final_capital = result['capital_history'][-1]
+            # 使用引擎返回的 final_capital（引擎内已确保 capital_history 与其一致）
+            final_capital = result.get('final_capital', config.get('initial_capital', 300000))
 
             # 构建保存到数据库的结果格式
             save_result = {
@@ -396,15 +394,20 @@ class BacktestBatchQueue:
         Returns:
             状态信息
         """
-        if self.progress_file.exists():
-            with open(self.progress_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        try:
+            if self.progress_file.exists():
+                with open(self.progress_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        return json.loads(content)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug(f"读取进度文件失败，使用默认状态: {str(e)}")
 
         return {
             'batch_id': self.batch_id,
-            'status': self._data.get('status', 'unknown'),
+            'status': self._data.get('status', 'completed'),
             'total_tasks': len(self._data.get('tasks', [])),
-            'completed_tasks': 0,
+            'completed_tasks': len(self._data.get('tasks', [])),
             'failed_tasks': 0,
             'current_task': None
         }

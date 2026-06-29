@@ -319,10 +319,9 @@ class TurtleStrategy(TimingStrategy):
                             result.trade_type = 'add'
                             result.add_count = add_count + 1
                             result.indicators['last_add_price'] = latest['close']
-                            base_amount = position.get('base_position_amount', self.base_position_amount)
-                            add_amount = base_amount * 0.5
-                            buy_price = latest['open']
-                            add_quantity = int(add_amount / buy_price) // 100 * 100
+                            # 以持仓数量为基准，加仓比例递减：1/2, 1/3, 1/4, 1/5, 1/6
+                            add_ratio = 1.0 / (add_count + 2)
+                            add_quantity = int(current_quantity * add_ratio) // 100 * 100
                             result.buy_quantity = max(add_quantity, 100)
             
             # 减仓逻辑：已移除

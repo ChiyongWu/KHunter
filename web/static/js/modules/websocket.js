@@ -80,7 +80,27 @@ export function updateProgressUI(status) {
         
         // 显示完成信息
         setTimeout(() => {
-            alert(`Data update completed!\nSuccess: ${status.success}\nFailed: ${status.failed}`);
+            // 检查是否有详细统计信息
+            let message = `数据更新完成!\n成功: ${status.success}\n失败: ${status.failed}`;
+            
+            // 如果有详细统计，显示更多信息
+            if (status.totalStats) {
+                const stats = status.totalStats;
+                const klineFailed = stats.kline_failed || 0;
+                const fundFlowFailed = stats.fund_flow_failed || 0;
+                const totalFailed = klineFailed + fundFlowFailed;
+                
+                message = `数据更新${status.success ? '完成' : '失败'}!\n`;
+                message += `K线数据: 新增 ${stats.kline_added || 0} 条, 更新 ${stats.kline_updated || 0} 条, 失败 ${klineFailed} 条\n`;
+                message += `资金流向: 新增 ${stats.fund_flow_added || 0} 条, 更新 ${stats.fund_flow_updated || 0} 条, 失败 ${fundFlowFailed} 条\n`;
+                
+                // 如果失败数量超过1000，显示警告
+                if (totalFailed > 1000) {
+                    message += `\n⚠️ 警告: 失败股票数量(${totalFailed})超过1000，当日数据可能不完整，请重新更新!`;
+                }
+            }
+            
+            alert(message);
             progressCard.style.display = 'none';
             // 刷新统计信息
             import('./stocks.js').then(module => module.loadStats());
