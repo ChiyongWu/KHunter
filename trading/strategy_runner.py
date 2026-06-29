@@ -3892,26 +3892,12 @@ class StrategyRunner:
             working_date = self.get_working_date()
             logger.info(f"工作日期: {working_date}")
             
-            # 【自动模式】处理 PTrade 反馈文件生成 portfolio（仅盘后/非交易日）
-            if self._should_process_ptrade_feedback():
-                # 将 working_date (YYYY-MM-DD) 转为 PTrade 需要的格式 (YYYYMMDD)
-                feedback_date = working_date.replace("-", "")
-                try:
-                    # 传入主配置，让 Handler 从中读取 ptrade 和 trading 节
-                    handler = PTradeFeedbackHandler(
-                        config=getattr(self, 'main_config', None))
-                    result = handler.process(feedback_date)
-                    if result.get("success"):
-                        logger.info(f"【PTrade反馈】已从 PTrade 文件生成 portfolio: "
-                                    f"feedback_date={feedback_date}, "
-                                    f"holdings={len(result.get('holdings', []))} 条")
-                    else:
-                        logger.info(f"【PTrade反馈】处理跳过: {result.get('error', '未知')} "
-                                    f"(首次运行或 PTrade 文件未生成时正常)")
-                except Exception as e:
-                    logger.warning(f"【PTrade反馈】处理异常，继续使用本地 portfolio: {str(e)}")
+            # 确保当日数据已初始化（PTrade 同步、持仓继承等统一在此处理）
+            # initialize_daily_data 内置 _initialized_dates 和 _ptrade_synced_feedback_date 双重守卫，
+            # 同一日期多次调用不会重复处理
+            self.initialize_daily_data(working_date)
             
-            # 检查是否已处理
+            # 检查是否已处理（已有策略执行结果则跳过，避免重复跑策略）
             if self.check_if_processed(working_date):
                 logger.info(f"日期 {working_date} 已处理，直接返回结果")
                 StrategyRunner._is_running = False
