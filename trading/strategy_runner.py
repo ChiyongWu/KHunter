@@ -1582,7 +1582,7 @@ class StrategyRunner:
                 # 同步成功后，更新内存中的 self.portfolio
                 # PTrade 数据完全覆盖本地持仓，确保自动模式下持仓数据与实盘一致
                 ptrade_portfolio = result.get('portfolio', {})
-                self.portfolio = ptrade_portfolio.get('positions', {})
+                self.portfolio = self._normalize_portfolio_keys(ptrade_portfolio.get('positions', {}))
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
                 # 标记已同步，防止同一天重复处理
@@ -1703,7 +1703,7 @@ class StrategyRunner:
         if portfolio_file.exists():
             logger.info(f"【数据初始化】{date} 的持仓文件已存在，从本地加载")
             prev_data = self._load_portfolio(str(portfolio_file))
-            self.portfolio = prev_data.get('positions', {})
+            self.portfolio = self._normalize_portfolio_keys(prev_data.get('positions', {}))
             self.current_total_capital = prev_data.get('cash', 300000)
             self.initial_capital = prev_data.get('initial_capital', 300000)
             return False
@@ -1865,6 +1865,34 @@ class StrategyRunner:
         except Exception as e:
             logger.warning(f"加载持仓文件失败: {str(e)}")
             return {'cash': 300000, 'positions': {}}
+    
+    @staticmethod
+    def _normalize_portfolio_keys(positions: Dict) -> Dict:
+        """标准化持仓字典的股票代码键名，去掉 PTrade 带来的 .SZ/.SH 后缀
+        
+        PTrade 反馈数据使用带交易所后缀的代码（如 002179.SZ），但系统内部
+        候选池和选股流程使用纯数字代码（如 002179），统一去除后缀避免不匹配。
+        
+        Args:
+            positions: 原始持仓字典，键可能带 .SZ/.SH 后缀
+            
+        Returns:
+            标准化后的持仓字典，键为纯数字代码
+        """
+        if not positions:
+            return {}
+        normalized = {}
+        for code, pos in positions.items():
+            # 去除 PTrade 添加的交易所后缀
+            clean_code = code.replace('.SZ', '').replace('.SH', '')
+            if clean_code in normalized:
+                # 同一只股票已存在（不应出现），合并或跳过
+                logger.warning(f"【持仓标准化】代码冲突: {code} → {clean_code} 已存在，跳过重复条目")
+                continue
+            normalized[clean_code] = pos
+        if len(normalized) != len(positions):
+            logger.info(f"【持仓标准化】完成代码标准化，{len(positions)}条 → {len(normalized)}条")
+        return normalized
     
     def _save_portfolio(self, portfolio: Dict, portfolio_file: str):
         """保存持仓信息
@@ -2843,7 +2871,7 @@ class StrategyRunner:
             
             # 加载持仓信息
             portfolio_data = self._load_portfolio(str(portfolio_file))
-            self.portfolio = portfolio_data.get('positions', {})
+            self.portfolio = self._normalize_portfolio_keys(portfolio_data.get('positions', {}))
             
             # 加载信号
             self.signals = self._load_signals(str(signals_file))
@@ -3560,7 +3588,7 @@ class StrategyRunner:
                 if timing_result.is_buy:
                     # 根据交易类型决定买入数量计算方式
                     if timing_result.trade_type == 'add':
-                        # 加仓：使用策略返回的买入数量（不检查涨幅）
+                        # 加仓：使用策略返回的买入数量（不检查涨幅、不检查重复信号）
                         buy_quantity = timing_result.buy_quantity
                         quantity_source = '择时策略（加仓）'
                         trade_type = 'add'  # 加仓
@@ -3905,7 +3933,7 @@ class StrategyRunner:
             # 加载持仓信息
             portfolio_file = self.running_dir / f"portfolio_{working_date}.json"
             portfolio_data = self._load_portfolio(str(portfolio_file))
-            self.portfolio = portfolio_data.get('positions', {})
+            self.portfolio = self._normalize_portfolio_keys(portfolio_data.get('positions', {}))
             
             # 加载信号历史
             signals_file = self.running_dir / f"signals_{working_date}.json"
