@@ -207,6 +207,8 @@ class StrategyRunner:
         self._initialized_dates = set()
         # 除权处理日期记录，避免同一天重复处理除权
         self._exdividend_processed_dates = set()
+        # 工作日期缓存：同一进程内工作日期不变，避免重复计算交易日/收盘状态
+        self._cached_working_date = None
         # 加载回测评分器
         from trading.backtest_scorer import BacktestScoreCalculator
         self.score_calculator = BacktestScoreCalculator(db_manager=self.db_manager)
@@ -1430,7 +1432,7 @@ class StrategyRunner:
             return False
     
     def get_working_date(self) -> str:
-        """获取当前工作日期
+        """获取当前工作日期（进程级缓存，避免重复计算）
         
         判断逻辑（根据设计文档）：
         1. 如果当前是交易日 AND 当前时间 > 收盘时间(15:00): 处理日期 = 今日
@@ -1440,6 +1442,10 @@ class StrategyRunner:
         Returns:
             工作日期字符串 (YYYY-MM-DD)
         """
+        # 同一进程内工作日期不变，优先返回缓存
+        if self._cached_working_date is not None:
+            return self._cached_working_date
+        
         today = datetime.datetime.now()
         today_str = today.strftime('%Y-%m-%d')
         
@@ -1449,17 +1455,20 @@ class StrategyRunner:
             if is_market_closed():
                 # 已收盘，使用今日
                 logger.info(f"当日是交易日且已收盘，使用今日作为工作日期: {today_str}")
-                return today_str
+                self._cached_working_date = today_str
+                return self._cached_working_date
             else:
                 # 未收盘，使用前一交易日
                 working_date = get_previous_trading_day(today_str)
                 logger.info(f"当日是交易日但未收盘，使用前一交易日: {working_date}")
-                return working_date
+                self._cached_working_date = working_date
+                return self._cached_working_date
         
         # 不是交易日，返回前一交易日
         working_date = get_previous_trading_day(today_str)
         logger.info(f"当日不是交易日，使用前一交易日: {working_date}")
-        return working_date
+        self._cached_working_date = working_date
+        return self._cached_working_date
     
     def _get_working_date_for_test(self, date_str: str) -> str:
         """测试用方法：获取指定日期的工作日期"""

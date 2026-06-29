@@ -40,6 +40,7 @@ const StrategyRunnerModule = {
     initStrategyRunnerModule: async function() {
         await this.loadStrategyNames();
         this.setupEventListeners();
+        // loadStrategyRunnerPage 内部已完成所有数据加载（含 loadPortfolio）
         await this.loadStrategyRunnerPage();
     },
     
@@ -362,6 +363,8 @@ const StrategyRunnerModule = {
                     initBtn.classList.remove('btn-primary');
                     initBtn.classList.add('btn-secondary');
                 }
+                // 加载持仓信息，更新资金显示
+                await this.loadPortfolio();
             } else {
                 this.appendLog('❌ 策略运行器初始化失败: ' + result.message);
             }
@@ -521,6 +524,9 @@ const StrategyRunnerModule = {
                 document.getElementById('total-assets').textContent = '¥' + (portfolio.total_assets || 0).toLocaleString();
                 document.getElementById('portfolio-profit').textContent = (portfolio.total_profit_percent || 0).toFixed(2) + '%';
                 
+                // 存储运行模式（自动模式下隐藏操作按钮）
+                const isAutoMode = portfolio.run_mode === 'auto';
+                
                 // 更新资金日期显示
                 const portfolioDateEl = document.getElementById('portfolio-date');
                 if (portfolioDateEl) {
@@ -537,6 +543,11 @@ const StrategyRunnerModule = {
                             const profitLoss = parseFloat(pos.profit_loss) || 0;
                             const profitLossPercent = parseFloat(pos.profit_loss_percent) || 0;
                             const profitColor = profitLoss >= 0 ? '#22c55e' : '#ef4444';
+                            // 自动模式下不显示卖出按钮，显示提示文字
+                            const actionCell = isAutoMode
+                                ? '<span style="color:#9ca3af; font-size:12px;">自动</span>'
+                                : `<button onclick="sellPosition('${pos.stock_code}', '${pos.stock_name}')"
+                                        style="padding:4px 12px; background:#ef4444; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;">卖出</button>`;
                             return `
                             <tr>
                                 <td><a href="javascript:void(0)" onclick="viewStockDetail('${pos.stock_code}')">${pos.stock_code}</a></td>
@@ -549,12 +560,7 @@ const StrategyRunnerModule = {
                                     ${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%
                                 </td>
                                 <td>${pos.hold_days}</td>
-                                <td>
-                                    <button onclick="sellPosition('${pos.stock_code}', '${pos.stock_name}')" 
-                                            style="padding:4px 12px; background:#ef4444; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;">
-                                        卖出
-                                    </button>
-                                </td>
+                                <td>${actionCell}</td>
                             </tr>
                             `;
                         }).join('');
@@ -631,8 +637,23 @@ const StrategyRunnerModule = {
                 }
                 
                 if (signalsList) {
+                    // 自动模式下信号操作按钮不可用
+                    const isAutoMode = result.data.run_mode === 'auto';
                     if (signals && signals.length > 0) {
-                        signalsList.innerHTML = signals.map(signal => `
+                        signalsList.innerHTML = signals.map(signal => {
+                            // 自动模式下：已执行信号显示标记，未执行信号显示"自动"提示
+                            let actionCell;
+                            if (isAutoMode) {
+                                actionCell = signal.executed
+                                    ? '<span class="badge bg-secondary">已执行</span>'
+                                    : '<span style="color:#9ca3af; font-size:12px;">自动</span>';
+                            } else {
+                                actionCell = signal.executed
+                                    ? '<span class="badge bg-secondary">已执行</span>'
+                                    : `<button class="btn btn-sm btn-success execute-signal-btn" data-signal-id="${signal.id}">执行</button>
+                                       <button class="btn btn-sm btn-secondary ignore-signal-btn" data-signal-id="${signal.id}">忽略</button>`;
+                            }
+                            return `
                             <tr>
                                 <td>${signal.signal_type === 'buy' ? '<span style="color:#22c55e;">买入</span>' : '<span style="color:#ef4444;">卖出</span>'}</td>
                                 <td><a href="javascript:void(0)" onclick="viewStockDetail('${signal.stock_code}')">${signal.stock_code}</a></td>
@@ -641,16 +662,10 @@ const StrategyRunnerModule = {
                                 <td>${signal.quantity}</td>
                                 <td>${this.getStrategyDisplayName(signal.strategy_name) || 'N/A'}</td>
                                 <td>${signal.reason}</td>
-                                <td>
-                                    ${signal.executed ? `
-                                        <span class="badge bg-secondary">已执行</span>
-                                    ` : `
-                                        <button class="btn btn-sm btn-success execute-signal-btn" data-signal-id="${signal.id}">执行</button>
-                                    `}
-                                    <button class="btn btn-sm btn-secondary ignore-signal-btn" data-signal-id="${signal.id}">忽略</button>
-                                </td>
+                                <td>${actionCell}</td>
                             </tr>
-                        `).join('');
+                            `;
+                        }).join('');
                     } else {
                         signalsList.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#9ca3af;">今日暂无信号</td></tr>';
                     }
