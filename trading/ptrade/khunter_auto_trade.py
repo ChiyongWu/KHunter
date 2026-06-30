@@ -19,6 +19,10 @@ KHunter 自动交易策略 (PTrade 云端部署脚本)
   - 开盘跌幅 > 3% → 不买入（强势下跌风险）
   - 当前价偏离信号价 > 3% → 不买入（价格波动风险）
   - 买入时按当前价下单（limit_price = 当前价）
+  - 资金三档处理:
+    ① 可用资金 < 2000元 → 直接跳过（不足最小买入金额）
+    ② 2000元 ≤ 可用资金 < 需要金额 → 按可用资金降级买入（100股取整）
+    ③ 可用资金 ≥ 需要金额 → 正常下单
 
 反馈机制:
   - PTrade 原生自动导出 Fund_/Hold_ CSV 文件（不需要策略中手动生成）
@@ -44,6 +48,9 @@ MORNING_EXEC_TIME = '9:31'    # 开盘信号处理时间（9:31，等行情落�
 # 买入价格阈值（当前价偏离信号价 ±3% 以内才下单，信号价=昨收）
 MAX_PRICE_UP_DEVIATION = 0.03    # 当前价高于信号价3%不买入（追高风险）
 MAX_PRICE_DOWN_DEVIATION = 0.03  # 当前价低于信号价3%不买入（强势下跌风险）
+
+# 最小买入金额（元）：不足此金额直接跳过，避免碎股
+MIN_BUY_AMOUNT = 2000
 
 # PTrade 研究模块 upload_files 目录名（相对研究模块路径）
 UPLOAD_DIRNAME = "upload_file"
@@ -441,9 +448,10 @@ def process_khunter_signals(context, today_str):
                  f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
 
     # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
+    # 注意：PTrade 的 order() 提交后 context.portfolio.cash 会立即扣除订单金额，
+    # 无需手动维护 reserved_cash 做双重扣除
     buy_count = 0
     buy_skip_count = 0
-    reserved_cash = 0  # 已提交但未扣款的买入委托累计占用资金
 
     for idx, signal_id, symbol, volume, price in buy_signals:
         # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
@@ -472,25 +480,34 @@ def process_khunter_signals(context, today_str):
                 buy_skip_count += 1
                 continue
 
-        # 规则3: 检查可用资金（扣除前面已委托但未扣款的占用）
-        available_cash = context.portfolio.cash - reserved_cash
+        # 规则3: 检查可用资金（PTrade 已实时更新 context.portfolio.cash，无需手动扣除委托占用）
+        available_cash = context.portfolio.cash
         required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
         if available_cash < required_amount:
-            # 可用资金不足时，按实际可用资金调整买入数量（100股取整）
-            adjusted_volume = int(available_cash / (current_price * 1.001) / 100) * 100
-            if adjusted_volume < 2000:
+            # 可用资金本身已不足最小买入金额，直接跳过，无需尝试调整
+            if available_cash < MIN_BUY_AMOUNT:
                 log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
-                           f"可用 {context.portfolio.cash:.0f}(已占用{reserved_cash:.0f})，不足2000元，跳过")
+                           f"可用 {available_cash:.0f}，"
+                           f"可用资金不足{MIN_BUY_AMOUNT}元，跳过")
+                buy_skip_count += 1
+                continue
+            # 可用资金不足但 >= MIN_BUY_AMOUNT，按实际资金调整买入数量（100股取整）
+            adjusted_volume = int(available_cash / (current_price * 1.001) / 100) * 100
+            adjusted_amount = adjusted_volume * current_price * 1.001
+            if adjusted_amount < MIN_BUY_AMOUNT:
+                log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
+                           f"可用 {available_cash:.0f}，"
+                           f"调整后 {adjusted_amount:.0f} 不足{MIN_BUY_AMOUNT}元，跳过")
                 buy_skip_count += 1
                 continue
             # 按可用资金调整委托量
             log.info(f"[KHunter] {symbol} 资金不足，按可用资金调整: "
                      f"{volume}股 → {adjusted_volume}股 "
-                     f"(需要 {required_amount:.0f}, 可用 {context.portfolio.cash:.0f}(已占用{reserved_cash:.0f}))")
+                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
             volume = adjusted_volume
             required_amount = volume * current_price * 1.001  # 更新实际占用金额
 
-        # 提交委托：按当前价下单
+        # 提交委托：按当前价下单（PTrade 内部会立即扣除 portfolio.cash）
         order_id = order(symbol, volume, limit_price=current_price)
         g.executed_signals[signal_id] = {
             'order_id': order_id,
@@ -504,7 +521,6 @@ def process_khunter_signals(context, today_str):
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
-        reserved_cash += volume * current_price * 1.001  # 累计已委托占用的资金
         log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
                  f"偏离={(current_price/price-1)*100:+.2f}% order_id={order_id}")
