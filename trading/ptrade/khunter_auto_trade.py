@@ -211,21 +211,34 @@ def _wait_sell_orders_filled(sell_orders, max_wait=120, poll_interval=3):
                 if filled_qty is None:
                     filled_qty = getattr(ord_info, 'filled_amount', None)
                 if filled_qty is None:
-                    filled_qty = 0
+                    filled_qty = getattr(ord_info, 'filled_quantity', None)
+                if filled_qty is None:
+                    # PTrade 成交后可能 filled 为 None 但 status 已为终态
+                    # 如果 status 是终态且 filled 为 None，用 volume 兜底
+                    pass
                 status = getattr(ord_info, 'status', None)
                 if status is None:
                     status = getattr(ord_info, 'order_status', None) or ''
+                # 统一转小写比较
+                status_lower = str(status).lower()
 
-                # 已完全成交
-                if filled_qty >= volume:
+                # 已取消或被拒绝（不再等待）
+                if status_lower in ('canceled', 'rejected', 'cancelled'):
+                    actual_filled = filled_qty if filled_qty is not None else 0
+                    log.warning(f"[KHunter] 卖出被{status}: {symbol} order_id={order_id} "
+                                f"已成交 {actual_filled}/{volume}")
+                    filled_count += 1  # 也算完成（不再等待）
+                # 订单已到终态（已全部成交/已报/已成）
+                elif status_lower in ('filled', 'done', 'completed', 'success', 'finished', 'all_traded'):
+                    actual_filled = filled_qty if filled_qty is not None else volume
+                    log.info(f"[KHunter] 卖出成交: {symbol} {actual_filled}/{volume}股 order_id={order_id} "
+                             f"(耗时 {elapsed}s, 状态={status})")
+                    filled_count += 1
+                # 通过成交数量判断是否完全成交
+                elif filled_qty is not None and filled_qty >= volume:
                     log.info(f"[KHunter] 卖出成交: {symbol} {filled_qty}股 order_id={order_id} "
                              f"(耗时 {elapsed}s)")
                     filled_count += 1
-                # 已取消或被拒绝（不再等待）
-                elif status in ('canceled', 'rejected', 'cancelled'):
-                    log.warning(f"[KHunter] 卖出被{status}: {symbol} order_id={order_id} "
-                                f"已成交 {filled_qty}/{volume}")
-                    filled_count += 1  # 也算完成（不再等待）
                 else:
                     # 仍在等待成交
                     still_pending.append((signal_id, order_id, symbol, volume))
