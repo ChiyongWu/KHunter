@@ -257,21 +257,20 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
                     log.warning(f"[KHunter] 订单 {order_id} 查询返回 None")
 
                 # === 优先级2: 持仓变化兜底 ===
+                # 同一股票一天只有一个卖出委托，持仓变化量直接与委托量对比即可
                 if not confirmed:
                     if symbol in pre_positions and symbol not in cur_positions:
-                        # 持仓已清空，只有当剩余待确认量 <= 当前减少量时才判定成交
-                        remaining_in_pre = pre_positions[symbol]  # 初始已记录的量
-                        if volume <= remaining_in_pre:
-                            log.info(f"[KHunter] 持仓兜底: {symbol} 已从持仓列表清除 "
-                                     f"(剩余追踪量 {remaining_in_pre}股, 委托 {volume}股, 耗时 {elapsed}s)")
-                            confirmed = True
-                            confirm_reason = '持仓已清除'
+                        # 持仓已清空 → 确认卖出成交
+                        log.info(f"[KHunter] 持仓兜底: {symbol} 已从持仓列表清除 "
+                                 f"(原 {pre_positions[symbol]}股, 委托 {volume}股, 耗时 {elapsed}s)")
+                        confirmed = True
+                        confirm_reason = '持仓已清除'
                     elif symbol in pre_positions and symbol in cur_positions:
                         if cur_positions[symbol] < pre_positions[symbol]:
                             qty_reduced = pre_positions[symbol] - cur_positions[symbol]
                             if qty_reduced >= volume:
                                 log.info(f"[KHunter] 持仓兜底: {symbol} 持仓减少 {qty_reduced}股 "
-                                         f"(追踪 {pre_positions[symbol]}股 → 当前 {cur_positions[symbol]}股, "
+                                         f"({pre_positions[symbol]} → {cur_positions[symbol]}, "
                                          f"委托 {volume}股, 耗时 {elapsed}s)")
                                 confirmed = True
                                 confirm_reason = f'持仓减少{qty_reduced}股'
@@ -280,8 +279,6 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
                 if not confirmed:
                     cash_increased = cur_cash - pre_cash
                     if cash_increased > 0:
-                        # 资金增加说明有卖出到账
-                        # 但不能精确归属到某笔订单，只在无其他判断依据时使用
                         log.info(f"[KHunter] 资金兜底: 可用资金增加 +{cash_increased:.0f}, "
                                  f"推测 {symbol} 已成交 (耗时 {elapsed}s)")
                         confirmed = True
@@ -289,12 +286,6 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
 
                 if confirmed:
                     filled_count += 1
-                    # 从追踪量中扣除已确认的委托量，避免同一股票多笔委托时数量叠加误判
-                    if symbol in pre_positions:
-                        pre_positions[symbol] = max(0, pre_positions[symbol] - volume)
-                        # 追踪量归零后移除，后续不再用于兜底判断
-                        if pre_positions[symbol] == 0:
-                            del pre_positions[symbol]
                 else:
                     still_pending.append((signal_id, order_id, symbol, volume))
 
