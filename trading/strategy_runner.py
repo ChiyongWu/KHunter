@@ -3291,24 +3291,32 @@ class StrategyRunner:
                 highest_price = current_price  # 默认使用当前价
 
                 if enable_trailing_stop:
-                    # 从持仓期间的历史数据中获取最高价（截至前一日，不含当日）
-                    if buy_date and stock_code in self.stock_filtered_cache:
-                        cache_df = self.stock_filtered_cache[stock_code]
-                        # 筛选买入日期之后、前一交易日之前的数据
-                        prev_date = (pd.Timestamp(trade_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-                        holding_df = cache_df[(cache_df['date'] >= buy_date) & (cache_df['date'] <= prev_date)].copy()
-                        if not holding_df.empty:
-                            highest_price = holding_df['high'].max()
-                            highest_price_return = (highest_price - buy_price) / buy_price * 100
-                    
+                    # 从持仓期间的历史数据中获取最高价
+                    # 注意：实盘在收盘后运行(>15:00)，当日OHLC已完整，应纳入持仓期计算
+                    # 与回测不同：回测在次日开盘判断，只看前一交易日之前的数据
+                    holding_df = None
+                    cache_df = None
+                    # 优先从 filtered_cache 获取，回退到 data_cache
+                    if buy_date:
+                        if stock_code in self.stock_filtered_cache:
+                            cache_df = self.stock_filtered_cache[stock_code]
+                        elif stock_code in self.stock_data_cache:
+                            cache_df = self.stock_data_cache[stock_code]
+                        # 筛选买入日期到当日之间的数据（含当日，收盘后执行）
+                        if cache_df is not None:
+                            holding_df = cache_df[(cache_df['date'] >= buy_date) & (cache_df['date'] <= trade_date)].copy()
+                            if not holding_df.empty:
+                                highest_price = holding_df['high'].max()
+                                highest_price_return = (highest_price - buy_price) / buy_price * 100
+
                     # 移动止损逻辑：
                     # - 最高收益 < 5%：使用固定止损 -6%
-                    # - 最高收益 >= 5%：移动止损 = 截至前一日的最高价 × 92%
+                    # - 最高收益 >= 5%：移动止损 = 持仓期间最高价 × 92%
                     if highest_price_return >= trailing_trigger_threshold:
                         stop_price = highest_price * 0.92
                         current_stop = (stop_price - buy_price) / buy_price
 
-                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}")
+                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}, 数据来源={'filtered_cache' if stock_code in self.stock_filtered_cache else 'data_cache' if cache_df is not None else 'none'}")
                 # ========== 移动止损逻辑结束 ==========
 
                 # 记录择时信号详情
