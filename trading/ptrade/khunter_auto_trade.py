@@ -165,20 +165,23 @@ def _normalize_symbol(symbol):
     return symbol  # .SZ 已正确，或无后缀时保留原样
 
 
-def _wait_sell_orders_filled(sell_orders, max_wait=120, poll_interval=3):
+def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3):
     """
     等待卖出委托全部成交后再继续处理买入
 
     PTrade 中卖出委托是异步的，order() 后不会立即成交。
     本函数轮询 get_order() 检查成交状态，确保卖出资金到账后再买入。
 
-    处理逻辑:
-      - 轮询每笔卖出订单的 filled 数量，>= 委托量即视为成交
-      - canceled/rejected 状态视为不再等待（部分成交也算完成）
-      - 超时后继续执行买入，依赖 context.portfolio.cash 获取最新可用资金
+    处理逻辑（按优先级）:
+      1. 订单终态检查: status 为 canceled/rejected/filled/done 等直接判定
+      2. 订单成交数量检查: filled_qty >= volume
+      3. 持仓变化兜底: 持仓数量减少则判定成交
+      4. 资金变化兜底: 可用现金增加则判定成交
+      5. 超时后继续执行买入，依赖 context.portfolio.cash 获取最新可用资金
 
     Args:
         sell_orders: list of (signal_id, order_id, symbol, volume) 元组
+        context: PTrade context 对象（用于获取 portfolio）
         max_wait: 最大等待秒数（默认 120 秒）
         poll_interval: 轮询间隔秒数（默认 3 秒）
 
@@ -192,56 +195,100 @@ def _wait_sell_orders_filled(sell_orders, max_wait=120, poll_interval=3):
     pending = sell_orders[:]  # 待检查的订单列表
     elapsed = 0
 
+    # 记录初始可用资金和持仓数量，用于兜底判断
+    pre_cash = context.portfolio.cash if hasattr(context, 'portfolio') else 0
+    pre_positions = {}
+    if hasattr(context, 'portfolio') and hasattr(context.portfolio, 'positions'):
+        pre_positions = {pos.security: pos.amount for pos in context.portfolio.positions.values()
+                         if hasattr(pos, 'amount') and pos.amount > 0}
+
     while pending and elapsed < max_wait:
         time.sleep(poll_interval)
         elapsed += poll_interval
 
+        # 每轮更新当前可用资金和持仓（用于兜底检测）
+        cur_cash = context.portfolio.cash if hasattr(context, 'portfolio') else 0
+        cur_positions = {}
+        if hasattr(context, 'portfolio') and hasattr(context.portfolio, 'positions'):
+            cur_positions = {pos.security: pos.amount for pos in context.portfolio.positions.values()
+                             if hasattr(pos, 'amount') and pos.amount > 0}
+
         still_pending = []
         for signal_id, order_id, symbol, volume in pending:
             try:
+                confirmed = False  # 是否确认完成（不再等待）
+                confirm_reason = ''
+
+                # === 优先级1: 通过订单状态/数量判断 ===
                 ord_info = get_order(order_id)
-                if ord_info is None:
-                    log.warning(f"[KHunter] 订单 {order_id} 查询返回 None，继续等待")
-                    still_pending.append((signal_id, order_id, symbol, volume))
-                    continue
+                if ord_info is not None:
+                    # 获取成交数量和状态（兼容 PTrade API 不同字段名）
+                    filled_qty = getattr(ord_info, 'filled', None)
+                    if filled_qty is None:
+                        filled_qty = getattr(ord_info, 'filled_amount', None)
+                    if filled_qty is None:
+                        filled_qty = getattr(ord_info, 'filled_quantity', None)
+                    status = getattr(ord_info, 'status', None)
+                    if status is None:
+                        status = getattr(ord_info, 'order_status', None) or ''
+                    status_lower = str(status).lower()
 
-                # 获取成交数量和状态（兼容 PTrade API 不同字段名）
-                # 注意: 显式检查 None 而非用 or 短路，避免 filled=0 被误判为 falsy
-                filled_qty = getattr(ord_info, 'filled', None)
-                if filled_qty is None:
-                    filled_qty = getattr(ord_info, 'filled_amount', None)
-                if filled_qty is None:
-                    filled_qty = getattr(ord_info, 'filled_quantity', None)
-                if filled_qty is None:
-                    # PTrade 成交后可能 filled 为 None 但 status 已为终态
-                    # 如果 status 是终态且 filled 为 None，用 volume 兜底
-                    pass
-                status = getattr(ord_info, 'status', None)
-                if status is None:
-                    status = getattr(ord_info, 'order_status', None) or ''
-                # 统一转小写比较
-                status_lower = str(status).lower()
+                    # 已取消或被拒绝
+                    if status_lower in ('canceled', 'rejected', 'cancelled'):
+                        actual_filled = filled_qty if filled_qty is not None else 0
+                        log.warning(f"[KHunter] 卖出被{status}: {symbol} order_id={order_id} "
+                                    f"已成交 {actual_filled}/{volume}")
+                        confirmed = True
+                        confirm_reason = f'订单状态={status}'
+                    # 终态
+                    elif status_lower in ('filled', 'done', 'completed', 'success', 'finished', 'all_traded'):
+                        actual_filled = filled_qty if filled_qty is not None else volume
+                        log.info(f"[KHunter] 卖出成交: {symbol} {actual_filled}/{volume}股 "
+                                 f"order_id={order_id} (耗时 {elapsed}s, 状态={status})")
+                        confirmed = True
+                        confirm_reason = f'订单状态={status}'
+                    # 成交数量达标
+                    elif filled_qty is not None and filled_qty >= volume:
+                        log.info(f"[KHunter] 卖出成交: {symbol} {filled_qty}股 order_id={order_id} "
+                                 f"(耗时 {elapsed}s)")
+                        confirmed = True
+                        confirm_reason = f'成交数量={filled_qty}'
+                else:
+                    log.warning(f"[KHunter] 订单 {order_id} 查询返回 None")
 
-                # 已取消或被拒绝（不再等待）
-                if status_lower in ('canceled', 'rejected', 'cancelled'):
-                    actual_filled = filled_qty if filled_qty is not None else 0
-                    log.warning(f"[KHunter] 卖出被{status}: {symbol} order_id={order_id} "
-                                f"已成交 {actual_filled}/{volume}")
-                    filled_count += 1  # 也算完成（不再等待）
-                # 订单已到终态（已全部成交/已报/已成）
-                elif status_lower in ('filled', 'done', 'completed', 'success', 'finished', 'all_traded'):
-                    actual_filled = filled_qty if filled_qty is not None else volume
-                    log.info(f"[KHunter] 卖出成交: {symbol} {actual_filled}/{volume}股 order_id={order_id} "
-                             f"(耗时 {elapsed}s, 状态={status})")
-                    filled_count += 1
-                # 通过成交数量判断是否完全成交
-                elif filled_qty is not None and filled_qty >= volume:
-                    log.info(f"[KHunter] 卖出成交: {symbol} {filled_qty}股 order_id={order_id} "
-                             f"(耗时 {elapsed}s)")
+                # === 优先级2: 持仓变化兜底 ===
+                if not confirmed:
+                    if symbol in pre_positions and symbol not in cur_positions:
+                        # 持仓已清空 → 确认卖出成交
+                        log.info(f"[KHunter] 持仓兜底: {symbol} 已从持仓列表清除 "
+                                 f"(原 {pre_positions[symbol]}股, 耗时 {elapsed}s)")
+                        confirmed = True
+                        confirm_reason = '持仓已清除'
+                    elif symbol in pre_positions and symbol in cur_positions:
+                        if cur_positions[symbol] < pre_positions[symbol]:
+                            qty_reduced = pre_positions[symbol] - cur_positions[symbol]
+                            if qty_reduced >= volume:
+                                log.info(f"[KHunter] 持仓兜底: {symbol} 持仓减少 {qty_reduced}股 "
+                                         f"({pre_positions[symbol]} → {cur_positions[symbol]}, 耗时 {elapsed}s)")
+                                confirmed = True
+                                confirm_reason = f'持仓减少{qty_reduced}股'
+
+                # === 优先级3: 资金变化兜底 ===
+                if not confirmed:
+                    cash_increased = cur_cash - pre_cash
+                    if cash_increased > 0:
+                        # 资金增加说明有卖出到账
+                        # 但不能精确归属到某笔订单，只在无其他判断依据时使用
+                        log.info(f"[KHunter] 资金兜底: 可用资金增加 +{cash_increased:.0f}, "
+                                 f"推测 {symbol} 已成交 (耗时 {elapsed}s)")
+                        confirmed = True
+                        confirm_reason = f'资金增加+{cash_increased:.0f}'
+
+                if confirmed:
                     filled_count += 1
                 else:
-                    # 仍在等待成交
                     still_pending.append((signal_id, order_id, symbol, volume))
+
             except Exception as e:
                 log.warning(f"[KHunter] 查询订单 {order_id} 失败: {e}，继续等待")
                 still_pending.append((signal_id, order_id, symbol, volume))
@@ -387,7 +434,7 @@ def process_khunter_signals(context, today_str):
     if sell_orders:
         log.info(f"[KHunter] 等待 {len(sell_orders)} 笔卖出成交后继续买入...")
         pre_sell_cash = context.portfolio.cash
-        filled = _wait_sell_orders_filled(sell_orders)
+        filled = _wait_sell_orders_filled(sell_orders, context)
         post_sell_cash = context.portfolio.cash
         cash_change = post_sell_cash - pre_sell_cash
         log.info(f"[KHunter] 卖出成交完成: {filled}/{len(sell_orders)} 笔, "
