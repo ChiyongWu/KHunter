@@ -463,19 +463,27 @@ class MoneyflowScorer:
 
         return metrics
 
-    def _fetch_north_fund_data(self, stock_code: str) -> Optional[pd.DataFrame]:
+    def _fetch_north_fund_data(
+        self, stock_code: str, score_date: str = None
+    ) -> Optional[pd.DataFrame]:
         """
         从 Tushare hk_hold 接口获取北向资金持股数据
 
-        获取最近两个季度的北向资金持股数据，用于判断增减持。
+        获取评分日期之前半年的北向资金持股数据，用于判断增减持。
+        确保回测和实盘使用数据逻辑一致（不会用到未来数据）。
 
         参数:
             stock_code: 股票代码（6位数字）
+            score_date: 评分日期（YYYYMMDD 格式），为 None 时使用当前日期
         返回:
             DataFrame: 北向资金持股数据，失败返回 None
         """
-        # 构建缓存键
-        cache_key = f"north_fund_{stock_code}"
+        # 评分日期未传时使用当前日期（兼容旧调用）
+        if score_date is None:
+            score_date = datetime.now().strftime("%Y%m%d")
+
+        # 构建缓存键（包含评分日期，确保回测不重用实盘缓存）
+        cache_key = f"north_fund_{stock_code}_{score_date}"
         # 检查缓存
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -487,9 +495,10 @@ class MoneyflowScorer:
 
         try:
             pro = self._get_pro()
-            # 获取最近 180 天的北向资金数据
-            end_date = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+            # 按评分日期计算查询范围：往前推 180 天
+            score_dt = datetime.strptime(score_date, "%Y%m%d")
+            end_date = score_dt.strftime("%Y%m%d")
+            start_date = (score_dt - timedelta(days=180)).strftime("%Y%m%d")
 
             # 调用 hk_hold 接口
             df = self._call_tushare_with_retry(
@@ -581,7 +590,9 @@ class MoneyflowScorer:
             # ratio == 0 时不加分不减分
         return total
 
-    def _score_north_fund(self, stock_code: str) -> Tuple[float, str]:
+    def _score_north_fund(
+        self, stock_code: str, score_date: str = None
+    ) -> Tuple[float, str]:
         """
         计算北向资金维度得分
 
@@ -594,12 +605,13 @@ class MoneyflowScorer:
 
         参数:
             stock_code: 股票代码（6位数字）
+            score_date: 评分日期（YYYYMMDD 格式），透传给数据获取方法
         返回:
             Tuple[float, str]: (北向资金得分, 持股状态)
             状态: "none" / "increase" / "decrease" / "hold"
         """
-        # 获取北向资金数据
-        df = self._fetch_north_fund_data(stock_code)
+        # 获取评分日期之前的北向资金数据（确保回测不用未来数据）
+        df = self._fetch_north_fund_data(stock_code, score_date=score_date)
 
         # 没有数据，视为没有持股
         if df is None or df.empty:
@@ -746,7 +758,8 @@ class MoneyflowScorer:
         
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_mf = executor.submit(self._fetch_moneyflow_data, stock_code, formatted_date)
-            future_nf = executor.submit(self._fetch_north_fund_data, stock_code)
+            # 北向资金数据也使用评分日期，确保回测不用未来数据
+            future_nf = executor.submit(self._fetch_north_fund_data, stock_code, formatted_date)
             
             try:
                 df = future_mf.result(timeout=10)

@@ -195,11 +195,12 @@ class FundamentalDetail:
     """
     基本面评分详情模型
 
-    记录基本面评分的三个维度详细信息：
+    记录基本面评分的四个维度详细信息：
     - 净利润增速（net_profit_yoy）
     - 净资产收益率 ROE（roe）
     - 经营现金流与收入比（ocf_to_income）
-    得分范围：-60 到 +60
+    - 市值（market_cap），单位亿元
+    得分范围：-110 到 +60（实际限制在 -100 到 +100）
     """
 
     def __init__(self):
@@ -215,6 +216,10 @@ class FundamentalDetail:
         self.ocf_to_income: Optional[float] = None
         # 经营现金流维度得分
         self.ocf_to_income_score: float = 0
+        # 市值（亿元）
+        self.market_cap: Optional[float] = None
+        # 市值维度得分
+        self.market_cap_score: float = 0
         # 是否触发一票否决
         self.veto: bool = False
         # 一票否决原因
@@ -225,7 +230,7 @@ class FundamentalDetail:
         将基本面详情序列化为字典
 
         返回:
-            dict: 包含基本面三个维度详情的字典
+            dict: 包含基本面四个维度详情的字典
         """
         return {
             # 净利润同比增速
@@ -240,6 +245,10 @@ class FundamentalDetail:
             "ocf_to_income": self.ocf_to_income,
             # 经营现金流得分
             "ocf_to_income_score": self.ocf_to_income_score,
+            # 市值（亿元）
+            "market_cap": self.market_cap,
+            # 市值得分
+            "market_cap_score": self.market_cap_score,
             # 一票否决标志
             "veto": self.veto,
             # 否决原因
@@ -269,6 +278,10 @@ class FundamentalDetail:
         detail.ocf_to_income = data.get("ocf_to_income")
         # 解析经营现金流得分
         detail.ocf_to_income_score = data.get("ocf_to_income_score", 0)
+        # 解析市值
+        detail.market_cap = data.get("market_cap")
+        # 解析市值得分
+        detail.market_cap_score = data.get("market_cap_score", 0)
         # 解析否决标志
         detail.veto = data.get("veto", False)
         # 解析否决原因

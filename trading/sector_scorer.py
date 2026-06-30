@@ -278,20 +278,27 @@ class SectorScorer:
     # 数据获取方法
     # ============================================================
 
-    def _get_stock_sectors(self, stock_code: str) -> List[dict]:
+    def _get_stock_sectors(
+        self, stock_code: str, score_date: str = None
+    ) -> List[dict]:
         """
         获取个股所属板块列表
 
         通过 Tushare ths_member 接口查询个股所属板块代码，
         再通过 ths_index 接口获取板块名称。
 
+        注意：ths_member 接口不支持历史查询，板块成分可能随时间变化。
+        缓存键包含评分日期以区分不同回测日期的缓存。
+
         参数:
             stock_code: 股票代码（6位数字）
+            score_date: 评分日期（YYYYMMDD 格式），用于缓存键区分
         返回:
             List[dict]: 板块列表，每个元素包含 ts_code 和 name
         """
-        # 构建缓存键
-        cache_key = f"stock_sectors_{stock_code}"
+        # 构建缓存键（包含评分日期，区分回测缓存）
+        date_suffix = f"_{score_date}" if score_date else ""
+        cache_key = f"stock_sectors_{stock_code}{date_suffix}"
         # 检查缓存
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -703,8 +710,8 @@ class SectorScorer:
         # 预加载所有需要的板块数据（减少API调用）
         self._preload_sector_data(dates)
 
-        # 获取个股所属板块列表
-        sectors = self._get_stock_sectors(stock_code)
+        # 获取个股所属板块列表（传评分日期用于缓存键区分）
+        sectors = self._get_stock_sectors(stock_code, score_date=formatted_date)
         if not sectors:
             # 无板块映射，返回 0 分
             logger.warning(f"个股无板块映射: {stock_code}")
