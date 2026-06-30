@@ -443,6 +443,7 @@ def process_khunter_signals(context, today_str):
     # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
     buy_count = 0
     buy_skip_count = 0
+    reserved_cash = 0  # 已提交但未扣款的买入委托累计占用资金
 
     for idx, signal_id, symbol, volume, price in buy_signals:
         # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
@@ -471,22 +472,23 @@ def process_khunter_signals(context, today_str):
                 buy_skip_count += 1
                 continue
 
-        # 规则3: 检查可用资金（此时已包含卖出回款）
-        available_cash = context.portfolio.cash
+        # 规则3: 检查可用资金（扣除前面已委托但未扣款的占用）
+        available_cash = context.portfolio.cash - reserved_cash
         required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
         if available_cash < required_amount:
             # 可用资金不足时，按实际可用资金调整买入数量（100股取整）
             adjusted_volume = int(available_cash / (current_price * 1.001) / 100) * 100
             if adjusted_volume < 2000:
                 log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
-                           f"可用 {available_cash:.0f}，不足2000元，跳过")
+                           f"可用 {context.portfolio.cash:.0f}(已占用{reserved_cash:.0f})，不足2000元，跳过")
                 buy_skip_count += 1
                 continue
             # 按可用资金调整委托量
             log.info(f"[KHunter] {symbol} 资金不足，按可用资金调整: "
                      f"{volume}股 → {adjusted_volume}股 "
-                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
+                     f"(需要 {required_amount:.0f}, 可用 {context.portfolio.cash:.0f}(已占用{reserved_cash:.0f}))")
             volume = adjusted_volume
+            required_amount = volume * current_price * 1.001  # 更新实际占用金额
 
         # 提交委托：按当前价下单
         order_id = order(symbol, volume, limit_price=current_price)
@@ -502,6 +504,7 @@ def process_khunter_signals(context, today_str):
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
+        reserved_cash += volume * current_price * 1.001  # 累计已委托占用的资金
         log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
                  f"偏离={(current_price/price-1)*100:+.2f}% order_id={order_id}")
