@@ -475,9 +475,18 @@ def process_khunter_signals(context, today_str):
         available_cash = context.portfolio.cash
         required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
         if available_cash < required_amount:
-            log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，可用 {available_cash:.0f}，跳过")
-            buy_skip_count += 1
-            continue
+            # 可用资金不足时，按实际可用资金调整买入数量（100股取整）
+            adjusted_volume = int(available_cash / (current_price * 1.001) / 100) * 100
+            if adjusted_volume < 2000:
+                log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
+                           f"可用 {available_cash:.0f}，不足2000元，跳过")
+                buy_skip_count += 1
+                continue
+            # 按可用资金调整委托量
+            log.info(f"[KHunter] {symbol} 资金不足，按可用资金调整: "
+                     f"{volume}股 → {adjusted_volume}股 "
+                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
+            volume = adjusted_volume
 
         # 提交委托：按当前价下单
         order_id = order(symbol, volume, limit_price=current_price)
