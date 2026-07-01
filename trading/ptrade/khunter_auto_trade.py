@@ -533,22 +533,9 @@ def process_khunter_signals(context, today_str):
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
-        reserved_cash += required_amount  # 日志累计：保持预估值供参考
-
-        # 从订单获取实际成交金额（回测中订单立即成交，实盘中未成交）
-        # 避免 required_amount 的 1.001 估算费率与 PTrade 实际扣减不一致，
-        # 导致 tracked_cash 与 portfolio.cash 产生偏差（例：估算 18820 vs 实际 18807）
-        try:
-            order_obj = get_order(order_id)
-            # 回测模式：订单立即成交，context.portfolio.cash 已被 PTrade 更新为精确值
-            if order_obj is not None and getattr(order_obj, 'filled', 0) > 0:
-                tracked_cash = context.portfolio.cash  # 直接从 portfolio 同步精确剩余
-            else:
-                # 实盘模式：订单未成交，手动扣减预估值
-                tracked_cash -= required_amount
-        except Exception:
-            # 查询失败时回退到预估扣减
-            tracked_cash -= required_amount
+        # 从追踪资金中扣除预估占用，确保后续订单不重复使用
+        tracked_cash -= required_amount
+        reserved_cash += required_amount  # 日志累计
 
         log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
