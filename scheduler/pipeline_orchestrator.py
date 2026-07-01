@@ -357,9 +357,10 @@ class PipelineOrchestrator:
             while time_module.time() < deadline:
                 progress = self.data_collection_service.get_update_progress()
                 if not progress.get('running'):
-                    # 更新完成（或跳过）
+                    # 更新完成（4种场景）
                     svc_state = progress.get('status', 'unknown')
                     is_skipped = progress.get('skipped', False)
+                    message = progress.get('message', '')
                     total_stats = progress.get('totalStats', {})
 
                     step.details = {
@@ -375,15 +376,27 @@ class PipelineOrchestrator:
                         "market_cap_updated": total_stats.get('market_cap_updated', 0),
                     }
 
+                    # 4种场景：
+                    #   场景1: completed + !skipped → success（正常完成，继续）
+                    #   场景2: completed + skipped  → skipped（数据源未就绪，停止）
+                    #   场景3: failed    + 其他错误 → failed （真正失败，停止）
+                    #   场景4: failed    + "已更新过" → success（当日已完成，继续）
                     if is_skipped:
-                        # 数据源未就绪，标记为 skipped（不当作失败）
+                        # 场景2: 数据源未就绪
                         step.status = "skipped"
-                        step.error = progress.get('message', '数据源未就绪，已跳过本次更新')
+                        step.error = message or '数据源未就绪，已跳过本次更新'
                     elif svc_state == 'completed':
+                        # 场景1: 正常完成
                         step.status = "success"
+                    elif svc_state == 'failed' and '已更新过' in message:
+                        # 场景4: 当日已完成更新，视为正常（策略可继续运行）
+                        step.status = "success"
+                        step.details["already_updated"] = True
+                        logger.info("当日数据已完成更新，跳过重复更新（流水线继续执行）")
                     else:
+                        # 场景3: 真正失败
                         step.status = "failed"
-                        step.error = progress.get('message', '')
+                        step.error = message
                     break
 
                 # 打印最新日志行（便于排查进度）
