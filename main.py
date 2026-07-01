@@ -3,11 +3,12 @@
 A股量化选股系统 - 主程序
 
 使用方法:
-    python main.py init      # 首次全量抓取
-    python main.py update    # 每日增量更新（内部使用）
-    python main.py select    # 执行选股
-    python main.py run       # 完整流程（更新+选股+通知）
-    python main.py schedule  # 启动定时调度
+    python main.py init              # 首次全量抓取
+    python main.py update            # 每日增量更新（内部使用）
+    python main.py select            # 执行选股
+    python main.py run               # 完整流程（更新+选股+通知）
+    python main.py schedule          # 启动定时调度（守护进程）
+    python main.py schedule --once   # 执行一次流水线
 """
 import sys
 import os
@@ -544,28 +545,18 @@ class QuantSystem:
         return match_result
     
     def run_schedule(self):
-        """启动定时调度"""
-        try:
-            import schedule
-        except ImportError:
-            print("✗ 请安装 schedule: pip install schedule")
-            return
-        
-        schedule_time = self.config.get('schedule', {}).get('time', '15:05')
-        
-        print("=" * 60)
-        print(f"⏰ 启动定时调度")
-        print(f"   每日 {schedule_time} 执行选股任务")
-        print("=" * 60)
-        
-        # 设置定时任务
-        schedule.every().day.at(schedule_time).do(self.run_full)
-        
-        print("\n按 Ctrl+C 停止")
-        
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
+        """启动定时调度（新版流水线编排）"""
+        from scheduler.scheduled_runner import ScheduledRunner
+
+        runner = ScheduledRunner()
+        runner.start_schedule()
+
+    def run_schedule_once(self):
+        """执行一次流水线（配合外部定时器）"""
+        from scheduler.scheduled_runner import ScheduledRunner
+
+        runner = ScheduledRunner()
+        return runner.run_once()
 
 
 def print_version():
@@ -616,7 +607,7 @@ B1完美图形匹配:
 
     parser.add_argument(
         'command',
-        choices=['init', 'run', 'web'],
+        choices=['init', 'run', 'web', 'schedule'],
         nargs='?',
         help='要执行的命令: init(初始化数据), run(执行选股), web(启动Web服务器)'
     )
@@ -684,6 +675,12 @@ B1完美图形匹配:
         help=f'B1完美图形匹配的回看天数 (默认: {default_lookback_days})'
     )
 
+    parser.add_argument(
+        '--once',
+        action='store_true',
+        help='schedule 命令：执行一次流水线后退出（配合外部定时器使用）'
+    )
+
     args = parser.parse_args()
 
     # 处理 --version 参数
@@ -727,6 +724,12 @@ B1完美图形匹配:
         # 启动Web服务器
         from web_server import run_web_server
         run_web_server(host=args.host, port=args.port)
+
+    elif args.command == 'schedule':
+        if args.once:
+            quant.run_schedule_once()
+        else:
+            quant.run_schedule()
 
 
 if __name__ == '__main__':

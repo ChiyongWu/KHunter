@@ -2042,6 +2042,9 @@ class StrategyRunner:
             
             logger.info(f"PTrade格式CSV信号文件已保存到: {pt_csv_file}")
             
+            # 保存 CSV 路径，供上层编排器报告使用
+            signal_csv_path = str(pt_csv_file)
+            
             # 清理旧信号文件，控制文件数量（PTrade 上传文件数有限制）
             # 保留最近 MAX_PTRADE_CSV_FILES 个文件，删除更早的
             import glob as _glob
@@ -2069,8 +2072,12 @@ class StrategyRunner:
             if kept > 0:
                 logger.info(f"信号文件清理完成: 保留 {kept} 个 (上限 {MAX_PTRADE_CSV_FILES})")
             
+            # 返回 CSV 文件路径，供上层编排器报告使用
+            return signal_csv_path
+            
         except Exception as e:
             logger.error(f"保存信号文件失败: {str(e)}")
+            return None
     
     def _format_stock_code(self, stock_code: str) -> str:
         """格式化股票代码，确保带市场后缀（PTrade 格式 .SS / .SZ）
@@ -4196,7 +4203,8 @@ class StrategyRunner:
             signals_file = self.running_dir / f"signals_{working_date}.json"
             # 使用赋值替换（而非extend追加），防止重复执行时信号叠加
             self.signals = signals
-            self._save_signals(self.signals, str(signals_file))
+            # 保存信号文件并获取 PTrade CSV 路径
+            ptrade_csv_path = self._save_signals(self.signals, str(signals_file))
             logger.info(f"信号已保存到: {signals_file}，卖出信号: {len(sell_signals)} 条，买入信号: {len(buy_signals)} 条")
             
             self._save_portfolio(self.portfolio, str(portfolio_file))
@@ -4214,6 +4222,7 @@ class StrategyRunner:
                     "buy_signals": len(buy_signals),
                     "sell_signals": len(sell_signals),
                     "position_count": len(self.portfolio),
+                    "ptrade_csv_file": ptrade_csv_path or "",
                     "task_results": task_results
                 }
             }

@@ -8,17 +8,61 @@
 
 data_dir: data
 
-# 钉钉机器人配置
-# 1. 在钉钉群中添加自定义机器人
-# 2. 复制 webhook URL 和加签密钥
-# 3. 填入下方（去掉引号内的占位符）
-dingtalk:
-  webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN_HERE"
-  secret: "YOUR_SECRET_HERE"
+# 飞书机器人配置
+# API 方式（推荐）：
+#   1. 在飞书开放平台创建企业自建应用
+#   2. 获取 App ID 和 App Secret
+#   3. 添加 im:message 权限并发布
+#   4. 将 bot 添加到目标群聊
+feishu:
+  app_id: "YOUR_APP_ID"
+  app_secret: "YOUR_APP_SECRET"
+  chat_id: "YOUR_CHAT_ID"  # 目标群聊 ID
+  # 备用 webhook 方式（可选）
+  webhook_url: ""
+  signing_secret: ""
+  # 通知模式: false=总是通知, true=仅异常时通知
+  alert_only: false
 
-# 定时任务配置
+# 钉钉机器人配置（已废弃，保留兼容）
+dingtalk:
+  webhook_url: ""
+  secret: ""
+
+# 定时任务配置（旧版，向后兼容）
 schedule:
   time: "17:00"  # 每日执行时间
+
+# 定时流水线配置（新版编排）
+pipeline_schedule:
+  enabled: true                          # 是否启用定时流水线
+  time: "17:00"                          # 每日执行时间 (北京时间，收盘后)
+  detect_trading_day: true               # 是否检测交易日（非交易日跳过）
+
+  # 数据更新步骤 (Step 1)
+  data_update:
+    enabled: true
+    update_kline: true                   # K线增量更新
+    rebuild_exdividend: true             # 除权历史重建
+    init_new_stocks: true                # 新股检测与初始化
+    sync_basic_data: true                # 基础数据同步（股票列表等）
+    max_retries: 2                       # 更新失败重试次数
+    timeout_minutes: 30                  # 超时时间（分钟）
+
+  # 策略运行步骤 (Step 2)
+  strategy_run:
+    enabled: true
+    select_strategy: "immortal_guidance" # 选股策略
+    timing_strategy: "support"           # 择时策略
+    score_threshold: 60                  # 评分阈值
+    max_daily_buys: 3                    # 每日最大买入数
+
+  # 通知步骤 (Step 3)
+  notification:
+    enabled: true
+    feishu: true                         # 飞书通知
+    feishu_summary: true                 # 发送运行摘要
+    feishu_alert_only: false             # 仅异常时通知
 
 # 数据更新配置
 update:
