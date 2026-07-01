@@ -301,11 +301,18 @@ class PipelineOrchestrator:
 
     # ---- Step 1: 数据更新 ----
 
+    # 轮询等待数据更新完成的最大时长（秒），防止异常情况下无限等待
+    _UPDATE_POLL_TIMEOUT_SECONDS = 2 * 60 * 60  # 2 小时
+    _UPDATE_POLL_INTERVAL_SECONDS = 10  # 轮询间隔 10 秒
+
     def _step_data_update(self) -> StepResult:
         """
         Step 1: 数据更新
 
-        委派给 DataCollectionService 统一执行所有数据更新子步骤：
+        通过 DataCollectionService.start_update() 触发更新（与前端 POST /api/data/update/start
+        走完全一致的公共 API），然后轮询进度直至完成。
+
+        子步骤（由 DataCollectionService 内部编排）：
             - 交易时间校验
             - 新股检测与初始化
             - K线增量更新
@@ -313,48 +320,77 @@ class PipelineOrchestrator:
             - 市值更新
             - 市场温度计算
 
-        DataCollectionService 已内置除权重建等逻辑，流水线不再重复编排子步骤。
-
         返回:
             StepResult: 包含各子步骤状态和统计
         """
+        import time as time_module
+
         step = StepResult(step_name="data_update")
         step.start_time = datetime.now()
-        logger.info("Step 1/3: 数据更新开始（委派 DataCollectionService）")
-
-        # 生成任务ID
-        task_id = f"PIPE_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        logger.info("Step 1/3: 数据更新开始（通过 start_update API 触发）")
 
         try:
-            # 同步调用 DataCollectionService._run_update（与前端触发更新走同一逻辑）
-            self.data_collection_service._run_update(task_id, None)
+            # 使用与前端 API 完全一致的公共方法触发更新（后台线程执行）
+            start_result = self.data_collection_service.start_update(
+                update_types=None  # None = 全部类型
+            )
 
-            # 从服务状态读取统计结果
-            svc_status = self.data_collection_service.update_status
-            total_stats = svc_status.get('totalStats', {})
-            svc_state = svc_status.get('status', 'unknown')
+            if not start_result.get('success'):
+                # 可能已有更新任务在运行
+                err_msg = start_result.get('message', '启动更新任务失败')
+                logger.warning("数据更新启动失败: %s", err_msg)
+                step.status = "failed"
+                step.error = err_msg
+                step.details = {"error": err_msg}
+                step.end_time = datetime.now()
+                step.duration_seconds = (step.end_time - step.start_time).total_seconds()
+                return step
 
-            step.details = {
-                "kline_added": total_stats.get('kline_added', 0),
-                "kline_updated": total_stats.get('kline_updated', 0),
-                "kline_failed": total_stats.get('kline_failed', 0),
-                "fund_flow_added": total_stats.get('fund_flow_added', 0),
-                "fund_flow_updated": total_stats.get('fund_flow_updated', 0),
-                "new_stock_detected": total_stats.get('new_stock_detected', 0),
-                "new_stock_initialized": total_stats.get('new_stock_initialized', 0),
-                "market_cap_updated": total_stats.get('market_cap_updated', 0),
-            }
-            step.status = "success" if svc_state == 'completed' else "failed"
-            step.error = svc_status.get('message', '') if svc_state != 'completed' else ''
+            task_id = start_result.get('taskId', 'unknown')
+            logger.info("数据更新任务已启动: %s，等待完成...", task_id)
+
+            # 轮询等待更新完成
+            deadline = time_module.time() + self._UPDATE_POLL_TIMEOUT_SECONDS
+            while time_module.time() < deadline:
+                progress = self.data_collection_service.get_update_progress()
+                if not progress.get('running'):
+                    # 更新完成
+                    svc_state = progress.get('status', 'unknown')
+                    total_stats = progress.get('totalStats', {})
+
+                    step.details = {
+                        "task_id": task_id,
+                        "kline_added": total_stats.get('kline_added', 0),
+                        "kline_updated": total_stats.get('kline_updated', 0),
+                        "kline_failed": total_stats.get('kline_failed', 0),
+                        "fund_flow_added": total_stats.get('fund_flow_added', 0),
+                        "fund_flow_updated": total_stats.get('fund_flow_updated', 0),
+                        "new_stock_detected": total_stats.get('new_stock_detected', 0),
+                        "new_stock_initialized": total_stats.get('new_stock_initialized', 0),
+                        "market_cap_updated": total_stats.get('market_cap_updated', 0),
+                    }
+                    step.status = "success" if svc_state == 'completed' else "failed"
+                    step.error = progress.get('message', '') if svc_state != 'completed' else ''
+                    break
+
+                # 打印最新日志行（便于排查进度）
+                logs = progress.get('logs', [])
+                if logs:
+                    logger.debug("数据更新进行中: %s", logs[-1].strip())
+
+                time_module.sleep(self._UPDATE_POLL_INTERVAL_SECONDS)
+            else:
+                # 超时未完成
+                step.status = "failed"
+                step.error = f"数据更新超时（超过 {self._UPDATE_POLL_TIMEOUT_SECONDS // 60} 分钟）"
+                step.details = {"error": step.error}
+                logger.error(step.error)
 
         except Exception as e:
             logger.error("Step 1 数据更新失败: %s", e)
             step.status = "failed"
             step.error = str(e)
-            step.details = {
-                "kline_updated": -1,
-                "error": str(e),
-            }
+            step.details = {"error": str(e)}
 
         step.end_time = datetime.now()
         step.duration_seconds = (step.end_time - step.start_time).total_seconds()
