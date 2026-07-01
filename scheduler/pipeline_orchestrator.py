@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # 文件锁路径，防止并发执行
 LOCK_FILE = "data/running/pipeline.lock"
+# 锁超时时间（秒），超过此时间未释放则视为残留锁自动清理
+LOCK_TIMEOUT_SECONDS = 30 * 60  # 30 分钟
 
 
 class PipelineOrchestrator:
@@ -129,6 +131,9 @@ class PipelineOrchestrator:
         使用原子文件创建（os.O_CREAT | os.O_EXCL）实现跨平台互斥。
         POSIX 上追加 fcntl.flock 确保进程崩溃后自动释放。
 
+        超时检测：锁文件超过 LOCK_TIMEOUT_SECONDS 未更新则视为残留，
+        自动删除后重试获取。
+
         返回:
             获取锁成功返回 True
         """
@@ -149,8 +154,73 @@ class PipelineOrchestrator:
 
             return True
         except OSError:
-            logger.warning("流水线正在执行中（lock held），跳过本次运行")
-            return False
+            # 锁文件已存在 → 检测是否超时残留
+            if self._is_lock_stale(lock_path):
+                logger.warning("残留锁文件已超时，自动清理后重试")
+                self._force_release_stale_lock(lock_path)
+                # 清理后递归重试一次
+                return self._acquire_lock()
+            else:
+                logger.warning("流水线正在执行中（lock held），跳过本次运行")
+                return False
+
+    def _is_lock_stale(self, lock_path: Path) -> bool:
+        """
+        检测锁文件是否已超时
+
+        通过文件最后修改时间判断，超过 LOCK_TIMEOUT_SECONDS 视为残留。
+
+        参数:
+            lock_path: 锁文件路径
+
+        返回:
+            超时返回 True
+        """
+        try:
+            mtime = os.path.getmtime(str(lock_path))
+            age_seconds = time.time() - mtime
+            if age_seconds > LOCK_TIMEOUT_SECONDS:
+                logger.warning(
+                    "锁文件已过期: %s (修改时间 %s 前, 超时阈值 %d 分钟)",
+                    lock_path,
+                    self._format_duration(age_seconds),
+                    LOCK_TIMEOUT_SECONDS // 60
+                )
+                return True
+        except OSError:
+            # 文件可能在检测时被删除，视为可获取锁
+            return True
+        return False
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """格式化时间跨度为可读字符串"""
+        if seconds < 60:
+            return f"{seconds:.0f} 秒"
+        elif seconds < 3600:
+            return f"{seconds / 60:.1f} 分钟"
+        else:
+            return f"{seconds / 3600:.1f} 小时"
+
+    @staticmethod
+    def _force_release_stale_lock(lock_path: Path):
+        """
+        强制清理残留的锁文件
+
+        参数:
+            lock_path: 锁文件路径
+        """
+        try:
+            if lock_path.exists():
+                # 读取残留信息用于日志
+                try:
+                    content = lock_path.read_text()
+                    logger.info("清理残留锁文件: %s (内容: %s)", lock_path, content.strip())
+                except Exception:
+                    logger.info("清理残留锁文件: %s", lock_path)
+                lock_path.unlink()
+        except Exception as e:
+            logger.error("清理残留锁文件失败: %s - %s", lock_path, e)
 
     def _release_lock(self):
         """释放文件锁，删除锁文件"""
