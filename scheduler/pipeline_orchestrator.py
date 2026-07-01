@@ -266,21 +266,24 @@ class PipelineOrchestrator:
             step1 = self._step_data_update()
             result.add_step(step1)
 
-            # Step 2: 策略运行
-            step2 = self._step_strategy_run()
-            result.add_step(step2)
+            # 数据更新未正常完成时，跳过策略运行，直接发通知
+            if step1.status in ("failed", "skipped"):
+                logger.warning("数据更新未正常完成（%s），跳过策略运行", step1.status)
+            else:
+                # Step 2: 策略运行
+                step2 = self._step_strategy_run()
+                result.add_step(step2)
 
-            # Step 3: 通知
+            # Step 3: 通知（无论什么状态都发送，确保用户知晓）
             step3 = self._step_notify(result)
             result.add_step(step3)
 
-            # 汇总状态
+            # 汇总状态（优先级: failed > skipped > success）
             statuses = [s.status for s in result.steps]
-            if all(s == "success" for s in statuses):
-                result.status = "success"
-            elif any(s == "failed" for s in statuses):
-                # 数据更新失败但有后续结果 = partial_failure
+            if any(s == "failed" for s in statuses):
                 result.status = "partial_failure"
+            elif any(s == "skipped" for s in statuses):
+                result.status = "skipped"
             else:
                 result.status = "success"
 
@@ -354,12 +357,14 @@ class PipelineOrchestrator:
             while time_module.time() < deadline:
                 progress = self.data_collection_service.get_update_progress()
                 if not progress.get('running'):
-                    # 更新完成
+                    # 更新完成（或跳过）
                     svc_state = progress.get('status', 'unknown')
+                    is_skipped = progress.get('skipped', False)
                     total_stats = progress.get('totalStats', {})
 
                     step.details = {
                         "task_id": task_id,
+                        "skipped": is_skipped,
                         "kline_added": total_stats.get('kline_added', 0),
                         "kline_updated": total_stats.get('kline_updated', 0),
                         "kline_failed": total_stats.get('kline_failed', 0),
@@ -369,8 +374,16 @@ class PipelineOrchestrator:
                         "new_stock_initialized": total_stats.get('new_stock_initialized', 0),
                         "market_cap_updated": total_stats.get('market_cap_updated', 0),
                     }
-                    step.status = "success" if svc_state == 'completed' else "failed"
-                    step.error = progress.get('message', '') if svc_state != 'completed' else ''
+
+                    if is_skipped:
+                        # 数据源未就绪，标记为 skipped（不当作失败）
+                        step.status = "skipped"
+                        step.error = progress.get('message', '数据源未就绪，已跳过本次更新')
+                    elif svc_state == 'completed':
+                        step.status = "success"
+                    else:
+                        step.status = "failed"
+                        step.error = progress.get('message', '')
                     break
 
                 # 打印最新日志行（便于排查进度）
@@ -506,8 +519,8 @@ class PipelineOrchestrator:
                 else:
                     logger.warning("  运行摘要发送失败（不阻断流水线）")
 
-                # 异常时发送告警
-                if result.status in ("partial_failure", "failed"):
+                # 异常时发送告警（含数据源跳过）
+                if result.status in ("partial_failure", "failed", "skipped"):
                     alert_ok = self.notifier.send_alert(result)
                     if alert_ok:
                         logger.info("  异常告警已发送")
