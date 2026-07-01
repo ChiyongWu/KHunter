@@ -4,17 +4,17 @@
 
 基于财务指标数据计算基本面得分。
 数据来源：Tushare Pro fina_indicator 接口（财务指标数据）、
-         Tushare daily_basic 接口（历史市值数据）
+         Tushare daily_basic 接口（历史市值数据）（市值维度暂已屏蔽）
 
 评分维度：
   1. 净利润增速（net_profit_yoy）- 公司赚钱能力增长
   2. 净资产收益率 ROE（roe）- 公司盈利能力
   3. 经营现金流（ocf_to_income）- 赚的钱是否真实
-  4. 市值（market_cap）- 公司规模，通过 Tushare daily_basic 按 trade_date 查询历史市值
+  4. 市值（market_cap）- 公司规模（暂时屏蔽）
 
 综合公式：
-  基本面得分 = 50 + 净利润增速得分 + ROE得分 + 经营现金流得分 + 市值得分
-  得分范围：-110 到 +110（实际限制在 -100 到 +100）
+  基本面得分 = 50 + 净利润增速得分 + ROE得分 + 经营现金流得分（市值已屏蔽）
+  得分范围：-90 到 +90（实际限制在 -100 到 +100）
 
 一票否决条件：
   - 净利润同比下滑 > 50%（即 net_profit_yoy < -50）：-100分
@@ -104,7 +104,7 @@ class FundamentalScorer:
     基本面评分器
 
     根据 Tushare 财务指标数据计算基本面得分。
-    四个评分维度：净利润增速、ROE、经营现金流、市值。
+    评分维度：净利润增速、ROE、经营现金流（市值维度暂已屏蔽）。
     支持一票否决机制。
     """
 
@@ -416,73 +416,75 @@ class FundamentalScorer:
         # 经营现金流 < 0：-20分
         return -20
 
-    def _fetch_market_cap(self, stock_code: str, trade_date: str) -> Optional[float]:
-        """
-        通过 Tushare daily_basic 接口查询指定日期的总市值
+    # ---- 市值评分已注释（暂时屏蔽） ----
+    # def _fetch_market_cap(self, stock_code: str, trade_date: str) -> Optional[float]:
+    #     """
+    #     通过 Tushare daily_basic 接口查询指定日期的总市值
+    #
+    #     参数:
+    #         stock_code: 股票代码（6位数字）
+    #         trade_date: 交易日期，格式 YYYYMMDD 或 YYYY-MM-DD
+    #     返回:
+    #         float: 市值（亿元），无数据返回 None
+    #     """
+    #     # 构建缓存键（包含日期）
+    #     cache_key = f"market_cap_{stock_code}_{trade_date}"
+    #     cached = self._cache.get(cache_key)
+    #     if cached is not None:
+    #         return cached
+    #
+    #     # 统一转换为 Tushare 格式（YYYYMMDD）
+    #     date_str = trade_date.replace("-", "") if trade_date else ""
+    #     # 转换为 Tushare 格式代码
+    #     ts_code = self._convert_ts_code(stock_code)
+    #
+    #     try:
+    #         pro = self._get_pro()
+    #         # 调用 daily_basic 接口获取指定日期的总市值
+    #         df = self._call_tushare_with_retry(
+    #             pro.daily_basic,
+    #             ts_code=ts_code,
+    #             trade_date=date_str,
+    #             fields="ts_code,trade_date,total_mv",
+    #         )
+    #         if df is not None and not df.empty:
+    #             # total_mv 单位为万元，转换为亿元
+    #             total_mv = float(df.iloc[0]["total_mv"])
+    #             if total_mv > 0:
+    #                 market_cap = total_mv / 10000
+    #                 # 写入缓存
+    #                 self._cache.set(cache_key, market_cap)
+    #                 logger.debug(f"市值查询成功: {stock_code} @ {trade_date}, {market_cap:.2f}亿")
+    #                 return market_cap
+    #     except Exception as e:
+    #         logger.debug(f"查询市值失败: {stock_code} @ {trade_date}, {e}")
+    #
+    #     # 缓存 None 避免重复请求
+    #     self._cache.set(cache_key, None)
+    #     return None
 
-        参数:
-            stock_code: 股票代码（6位数字）
-            trade_date: 交易日期，格式 YYYYMMDD 或 YYYY-MM-DD
-        返回:
-            float: 市值（亿元），无数据返回 None
-        """
-        # 构建缓存键（包含日期）
-        cache_key = f"market_cap_{stock_code}_{trade_date}"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # 统一转换为 Tushare 格式（YYYYMMDD）
-        date_str = trade_date.replace("-", "") if trade_date else ""
-        # 转换为 Tushare 格式代码
-        ts_code = self._convert_ts_code(stock_code)
-
-        try:
-            pro = self._get_pro()
-            # 调用 daily_basic 接口获取指定日期的总市值
-            df = self._call_tushare_with_retry(
-                pro.daily_basic,
-                ts_code=ts_code,
-                trade_date=date_str,
-                fields="ts_code,trade_date,total_mv",
-            )
-            if df is not None and not df.empty:
-                # total_mv 单位为万元，转换为亿元
-                total_mv = float(df.iloc[0]["total_mv"])
-                if total_mv > 0:
-                    market_cap = total_mv / 10000
-                    # 写入缓存
-                    self._cache.set(cache_key, market_cap)
-                    logger.debug(f"市值查询成功: {stock_code} @ {trade_date}, {market_cap:.2f}亿")
-                    return market_cap
-        except Exception as e:
-            logger.debug(f"查询市值失败: {stock_code} @ {trade_date}, {e}")
-
-        # 缓存 None 避免重复请求
-        self._cache.set(cache_key, None)
-        return None
-
-    def _score_market_cap(self, market_cap: Optional[float]) -> float:
-        """
-        计算市值维度得分
-
-        评分标准：
-          市值 < 50亿：-50分（小盘股风险较高）
-          市值 ≥ 50亿 / 数据缺失：0分
-
-        参数:
-            market_cap: 市值（亿元），None 表示数据缺失
-        返回:
-            float: 市值维度得分
-        """
-        # 数据缺失不作惩罚
-        if market_cap is None:
-            return 0
-        # 市值 < 50亿：-50分
-        if market_cap < 50:
-            return -50
-        # 市值 ≥ 50亿：不扣分
-        return 0
+    # ---- 市值评分已注释（暂时屏蔽） ----
+    # def _score_market_cap(self, market_cap: Optional[float]) -> float:
+    #     """
+    #     计算市值维度得分
+    #
+    #     评分标准：
+    #       市值 < 50亿：-50分（小盘股风险较高）
+    #       市值 ≥ 50亿 / 数据缺失：0分
+    #
+    #     参数:
+    #         market_cap: 市值（亿元），None 表示数据缺失
+    #     返回:
+    #         float: 市值维度得分
+    #     """
+    #     # 数据缺失不作惩罚
+    #     if market_cap is None:
+    #         return 0
+    #     # 市值 < 50亿：-50分
+    #     if market_cap < 50:
+    #         return -50
+    #     # 市值 ≥ 50亿：不扣分
+    #     return 0
 
     def calculate_score(
         self, stock_code: str, score_date: str
@@ -494,8 +496,8 @@ class FundamentalScorer:
         确保回测和实盘逻辑完全一致，避免未来函数。
 
         综合公式：
-          基本面得分 = 50 + 净利润增速得分 + ROE得分 + 经营现金流得分 + 市值得分
-          得分范围：-110 到 +110（实际限制在 -100 到 +100）
+          基本面得分 = 50 + 净利润增速得分 + ROE得分 + 经营现金流得分（市值已屏蔽）
+          得分范围：-90 到 +90（实际限制在 -100 到 +100）
 
         参数:
             stock_code: 股票代码（6位数字）
@@ -530,12 +532,15 @@ class FundamentalScorer:
         ocf_score = self._score_ocf_to_income(indicators["ocf_to_income"])
         detail.ocf_to_income_score = ocf_score
 
+        # ---- 市值评分已注释（暂时屏蔽） ----
         # 4. 获取评分日期的历史市值（通过 Tushare daily_basic 按 trade_date 查询）
-        market_cap = self._fetch_market_cap(stock_code, score_date)
-        detail.market_cap = market_cap
-        # 计算市值维度得分
-        market_cap_score = self._score_market_cap(market_cap)
-        detail.market_cap_score = market_cap_score
+        # market_cap = self._fetch_market_cap(stock_code, score_date)
+        # detail.market_cap = market_cap
+        # # 计算市值维度得分
+        # market_cap_score = self._score_market_cap(market_cap)
+        # detail.market_cap_score = market_cap_score
+        # 市值得分暂时设为 0
+        market_cap_score = 0
 
         # 一票否决：净利润同比下滑 > 50%
         if indicators["net_profit_yoy"] is not None and indicators["net_profit_yoy"] < -50:
@@ -551,7 +556,7 @@ class FundamentalScorer:
             logger.warning(f"股票 {stock_code} 触发基本面一票否决: {detail.veto_reason}")
             return -100, detail
 
-        # 计算综合得分（基准分50 + 四个维度得分）
+        # 计算综合得分（基准分50 + 三个维度得分，市值已屏蔽）
         total_score = max(-100, min(100,
             50 + profit_score + roe_score + ocf_score + market_cap_score
         ))
@@ -560,7 +565,7 @@ class FundamentalScorer:
         logger.debug(
             f"股票 {stock_code} @ {score_date} 基本面得分: {total_score} "
             f"(基准分=50, 净利润增速={profit_score}, ROE={roe_score}, "
-            f"经营现金流={ocf_score}, 市值={market_cap_score})"
+            f"经营现金流={ocf_score}) [市值评分已屏蔽]"
         )
         return total_score, detail
 
