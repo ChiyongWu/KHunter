@@ -455,11 +455,15 @@ def process_khunter_signals(context, today_str):
                  f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
 
     # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
-    # 手动跟踪已占用资金：PTrade 的 order() 提交后不会立即同步更新 context.portfolio.cash，
-    # 因此需要在本地累计每笔委托占用金额，避免后面订单重复使用已被前面订单占用的资金
+    # 独立追踪可用资金快照，每笔买入后从中扣除。
+    # 不直接依赖 context.portfolio.cash - reserved_cash，因为：
+    #   - 回测模式：order() 后 portfolio.cash 立即扣减，reserved_cash 再减 = 双重扣减
+    #   - 实盘模式：order() 后 portfolio.cash 不立即扣减，需要 reserved_cash 手动跟踪
+    # 使用 tracked_cash 自追踪，两种模式下行为一致。
     buy_count = 0
     buy_skip_count = 0
-    reserved_cash = 0.0  # 已占用的资金（前面买入订单累计）
+    tracked_cash = context.portfolio.cash  # 可用资金快照（跟随买入递减）
+    reserved_cash = 0.0  # 已占用的资金（仅用于日志累计）
 
     for idx, signal_id, symbol, volume, price in buy_signals:
         # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
@@ -488,15 +492,15 @@ def process_khunter_signals(context, today_str):
                 buy_skip_count += 1
                 continue
 
-        # 规则3: 检查可用资金（扣除已占用的资金，避免重复使用）
-        available_cash = context.portfolio.cash - reserved_cash
+        # 规则3: 检查可用资金（使用自追踪快照，兼容回测/实盘双模式）
+        available_cash = tracked_cash
         required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
         if available_cash < required_amount:
             # 可用资金本身已不足最小买入金额，直接跳过，无需尝试调整
             if available_cash < MIN_BUY_AMOUNT:
                 log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
-                           f"可用 {available_cash:.0f} (原始 {context.portfolio.cash:.0f} - 已占用 {reserved_cash:.0f})，"
-                           f"可用资金不足{MIN_BUY_AMOUNT}元，跳过")
+                           f"可用 {available_cash:.0f}，"
+                           f"不足{MIN_BUY_AMOUNT}元，跳过")
                 buy_skip_count += 1
                 continue
             # 可用资金不足但 >= MIN_BUY_AMOUNT，按实际资金调整买入数量（100股取整）
@@ -511,8 +515,7 @@ def process_khunter_signals(context, today_str):
             # 按可用资金调整委托量
             log.info(f"[KHunter] {symbol} 资金不足，按可用资金调整: "
                      f"{volume}股 → {adjusted_volume}股 "
-                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f}, "
-                     f"原始 {context.portfolio.cash:.0f} - 已占用 {reserved_cash:.0f})")
+                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
             volume = adjusted_volume
             required_amount = volume * current_price * 1.001  # 更新实际占用金额
 
@@ -530,8 +533,9 @@ def process_khunter_signals(context, today_str):
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
-        # 累计已占用资金，确保后续订单不重复使用
-        reserved_cash += required_amount
+        # 从追踪资金中扣除，确保后续订单不重复使用（兼容回测/实盘双模式）
+        tracked_cash -= required_amount
+        reserved_cash += required_amount  # 仅用于日志累计
         log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
                  f"偏离={(current_price/price-1)*100:+.2f}% "
