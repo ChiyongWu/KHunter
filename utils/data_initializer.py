@@ -118,27 +118,69 @@ class DataInitializer:
     def _init_kline_history_data(self, stock_codes: list, years: int = 3,
                                   progress_range: tuple = (0, 100)) -> None:
         """
-        初始化K线历史数据（TickFlow 优先，智能降级 + 自动恢复）
+        初始化K线历史数据
 
         策略：
-        1. 优先使用 TickFlow 批量 API，批次间延迟 3 秒防止限流
-        2. TickFlow 失败时等待 30 秒后重试 1 次，再失败才降级
-        3. 连续 3 次 TickFlow 失败才永久降级；否则尝试恢复
-        4. 降级期间每 5 批自动探测 TickFlow 是否恢复
-        5. 腾讯财经降级使用 2 线程低并发，避免反爬
+        - 已有 K 线数据：委派给 KlineUpdater 执行增量更新（与日常更新流程一致）
+        - 无 K 线数据：TickFlow 优先全量拉取，智能降级 + 自动恢复
 
         参数：
             stock_codes: 股票代码列表
-            years: 获取数据的年份数（默认 3 年）
+            years: 获取数据的年份数（默认 3 年，仅全量模式使用）
             progress_range: 进度映射区间 (start, end)，默认 (0, 100)
         """
         import time as time_module
+        total = len(stock_codes)
+        progress_start, progress_end = progress_range
+
+        # ============ 检测是否已有 K 线数据 ============
+        has_existing_data = False
+        try:
+            result = self.db_manager.query_one("SELECT COUNT(*) as cnt FROM stock_kline")
+            has_existing_data = result and result.get('cnt', 0) > 0
+        except Exception:
+            has_existing_data = False
+
+        if has_existing_data:
+            # 已有数据 → 委派给 KlineUpdater 增量更新（与日常更新流程一致）
+            logger.info("=" * 60)
+            logger.info(f"检测到已有K线数据，执行增量更新 | 股票: {total} 只")
+            logger.info("=" * 60)
+
+            # 查询最近更新日期作为增量基准
+            try:
+                last_date_result = self.db_manager.query_one(
+                    "SELECT MAX(date) as last_date FROM stock_kline"
+                )
+                last_update_date = (
+                    last_date_result.get('last_date')
+                    if last_date_result and last_date_result.get('last_date')
+                    else (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+                )
+            except Exception:
+                last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+
+            target_date = datetime.now().strftime('%Y-%m-%d')
+            self._report_progress(progress_start, "正在增量更新K线数据...")
+
+            from utils.kline_updater import KlineUpdater
+            updater = KlineUpdater(self.db_manager, self.stock_data_fetcher)
+            result = updater.update_kline_data(
+                stock_codes=stock_codes,
+                last_update_date=last_update_date,
+                target_date=target_date,
+                batch_size=100
+            )
+
+            logger.info(f"K线增量更新完成: {result.get('message', '')}")
+            self._report_progress(progress_end, "K线数据更新完成")
+            return
+
+        # ============ 无数据 → 全量初始化 ============
         # batch_size: 每批处理的股票数，与日常更新对齐
         batch_size = 100
         # days: 将年份转换为交易日数，与 TickFlow batch API 参数对齐
         days = years * 250
-        total = len(stock_codes)
-        progress_start, progress_end = progress_range
         success_count = 0
         failed_count = 0
         total_inserted = 0
@@ -158,7 +200,7 @@ class DataInitializer:
         consecutive_empty_tencent = 0
 
         logger.info("=" * 60)
-        logger.info(f"K线初始化开始 | 股票: {total} 只 | 年份: {years}年 | 批次大小: {batch_size}")
+        logger.info(f"K线初始化开始（全量）| 股票: {total} 只 | 年份: {years}年 | 批次大小: {batch_size}")
         logger.info(f"数据源策略: TickFlow 优先(批间 3s 延迟) → TickFlow 失败重试(30s) → 腾讯财经降级(2线程)")
         logger.info(f"永久降级阈值: 连续 {TF_PERMANENT_THRESHOLD} 次 TickFlow 失败")
         logger.info("=" * 60)
