@@ -1582,7 +1582,13 @@ class StrategyRunner:
                 # 同步成功后，更新内存中的 self.portfolio
                 # PTrade 数据完全覆盖本地持仓，确保自动模式下持仓数据与实盘一致
                 ptrade_portfolio = result.get('portfolio', {})
-                self.portfolio = self._normalize_portfolio_keys(ptrade_portfolio.get('positions', {}))
+                new_positions = ptrade_portfolio.get('positions', {})
+                # 合并旧 portfolio 中的追踪字段（PTrade Hold CSV 不包含这些字段）
+                # add_count 丢失会导致已加仓股票被误判为首次加仓，加仓数量计算错误
+                # self.portfolio 此时可能为空，需从上一个交易日 portfolio 文件加载旧数据
+                old_portfolio = self._load_previous_portfolio_for_merge(portfolio_date)
+                self._merge_tracking_fields(old_portfolio, new_positions)
+                self.portfolio = self._normalize_portfolio_keys(new_positions)
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
                 # 标记已同步，防止同一天重复处理
@@ -1866,6 +1872,86 @@ class StrategyRunner:
             logger.warning(f"加载持仓文件失败: {str(e)}")
             return {'cash': 300000, 'positions': {}}
     
+    def _load_previous_portfolio_for_merge(self, current_date: str) -> Dict:
+        """加载上一个交易日 portfolio 文件中的持仓数据，用于合并追踪字段
+        
+        PTrade 反馈同步时会完全覆盖 portfolio，add_count 等字段会丢失。
+        需要从上一个交易日的 portfolio 文件中恢复这些字段。
+        
+        Args:
+            current_date: 当前日期 YYYY-MM-DD
+            
+        Returns:
+            上一交易日持仓字典 {stock_code: {...}}，找不到时返回 {}
+        """
+        try:
+            prev_date = get_previous_trading_day(current_date)
+            prev_file = self.running_dir / f"portfolio_{prev_date}.json"
+            if not prev_file.exists():
+                logger.debug(f"【合并追踪】上一交易日 portfolio 不存在: {prev_file}，跳过合并")
+                return {}
+            with open(prev_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            positions = data.get('positions', {})
+            logger.info(f"【合并追踪】从 {prev_date} 加载旧持仓: {len(positions)} 条")
+            return positions
+        except Exception as e:
+            logger.warning(f"【合并追踪】加载上一交易日 portfolio 失败: {e}")
+            return {}
+
+    @staticmethod
+    def _merge_tracking_fields(old_portfolio: Dict, new_positions: Dict):
+        """将旧 portfolio 中的追踪字段合并到 PTrade 新建的持仓数据中
+        
+        PTrade Hold CSV 只包含基本持仓信息（代码、数量、成本价等），不包含
+        add_count、last_add_date 等 KHunter 内部追踪字段。这些字段丢失会导致：
+        - 已加仓的股票被误判为首次加仓（add_count 重置为0）
+        - 加仓数量和价格计算错误
+        - 策略信号生成偏差
+        
+        本方法将旧数据中的追踪字段合并到新持仓中，确保 PTrade 覆盖不丢失状态。
+        
+        Args:
+            old_portfolio: 合并前的旧持仓字典 {stock_code: {...}}
+            new_positions: PTrade 构建的新持仓字典 {stock_code.SZ: {...}}，会被原地修改
+        """
+        # PTrade 代码可能带 .SZ/.SH 后缀，需要同时尝试匹配
+        for new_code, new_pos in new_positions.items():
+            # 尝试多种方式匹配旧持仓中的对应条目
+            old_pos = old_portfolio.get(new_code)  # 精确匹配
+            if not old_pos:
+                # 去除 PTrade 后缀再匹配（如 002179.SZ → 002179）
+                clean_code = new_code.replace('.SZ', '').replace('.SH', '')
+                old_pos = old_portfolio.get(clean_code)
+            if not old_pos:
+                continue  # 新开仓股票，无旧数据可合并
+            
+            # 数量一致性校验：PTrade 实际持仓 vs 旧 portfolio 记录
+            # PTrade 可能未执行加仓委托，若数量未增加则 add_count 不应递增
+            new_qty = new_pos.get('quantity', 0)
+            old_qty = old_pos.get('quantity', 0)
+            stock_name = new_pos.get('stock_name', new_code)
+            old_add_count = old_pos.get('add_count', 0)
+            
+            if new_qty < old_qty:
+                # PTrade 数量少于预期，加仓可能未执行或部分成交
+                # 此时 add_count 不可靠，跳过合并，避免误判加仓次数
+                logger.warning(
+                    f"【PTrade同步】{stock_name}({new_code}) PTrade数量({new_qty}) "
+                    f"< 持仓记录({old_qty})，加仓可能未完全执行，"
+                    f"跳过 add_count={old_add_count} 合并")
+                continue
+            
+            # 保留旧 portfolio 中的加仓追踪字段（PTrade Hold CSV 无法提供）
+            preserved_count = 0
+            for field in ['add_count', 'last_add_date', 'last_add_price']:
+                if field in old_pos:
+                    new_pos[field] = old_pos[field]
+                    preserved_count += 1
+            if preserved_count > 0:
+                logger.info(f"【PTrade同步】{stock_name}({new_code}) 保留追踪字段: "
+                           f"add_count={old_add_count}, 合并字段数={preserved_count}")
+
     @staticmethod
     def _normalize_portfolio_keys(positions: Dict) -> Dict:
         """标准化持仓字典的股票代码键名，去掉 PTrade 带来的 .SZ/.SH 后缀

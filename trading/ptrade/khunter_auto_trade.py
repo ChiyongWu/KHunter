@@ -15,6 +15,7 @@ KHunter 自动交易策略 (PTrade 云端部署脚本)
   - 卖出未成交时买入不会被执行，确保资金到位后再买
 
 买入过滤规则:
+  - 688 科创板 → 不买入（暂无科创板交易权限）
   - 开盘涨幅 > 3% → 不买入（追高风险）
   - 开盘跌幅 > 3% → 不买入（强势下跌风险）
   - 当前价偏离信号价 > 3% → 不买入（价格波动风险）
@@ -378,6 +379,7 @@ def process_khunter_signals(context, today_str):
     sell_signals = []   # (idx, signal_id, symbol, volume) - 卖出信号
     buy_signals = []    # (idx, signal_id, symbol, volume, price) - 买入信号
     parse_skip_count = 0
+    star_market_skip_count = 0  # 科创板跳过计数
 
     for idx, row in df.iterrows():
         try:
@@ -400,10 +402,15 @@ def process_khunter_signals(context, today_str):
         if side == 'sell':
             sell_signals.append((idx, signal_id, symbol, volume))
         elif side == 'buy':
+            # 科创板权限检查: 688 开头跳过（暂无科创板交易权限）
+            if symbol.startswith('688'):
+                log.info(f"[KHunter] {symbol} 科创板暂无交易权限，跳过买入信号")
+                star_market_skip_count += 1
+                continue
             buy_signals.append((idx, signal_id, symbol, volume, price))
 
     log.info(f"[KHunter] 信号分类: 卖出{len(sell_signals)}条, 买入{len(buy_signals)}条, "
-             f"解析跳过{parse_skip_count}条")
+             f"解析跳过{parse_skip_count}条, 科创板跳过{star_market_skip_count}条")
 
     # ========== 阶段二：先提交全部卖出委托 ==========
     sell_count = 0
@@ -448,10 +455,11 @@ def process_khunter_signals(context, today_str):
                  f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
 
     # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
-    # 注意：PTrade 的 order() 提交后 context.portfolio.cash 会立即扣除订单金额，
-    # 无需手动维护 reserved_cash 做双重扣除
+    # 手动跟踪已占用资金：PTrade 的 order() 提交后不会立即同步更新 context.portfolio.cash，
+    # 因此需要在本地累计每笔委托占用金额，避免后面订单重复使用已被前面订单占用的资金
     buy_count = 0
     buy_skip_count = 0
+    reserved_cash = 0.0  # 已占用的资金（前面买入订单累计）
 
     for idx, signal_id, symbol, volume, price in buy_signals:
         # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
@@ -480,14 +488,14 @@ def process_khunter_signals(context, today_str):
                 buy_skip_count += 1
                 continue
 
-        # 规则3: 检查可用资金（PTrade 已实时更新 context.portfolio.cash，无需手动扣除委托占用）
-        available_cash = context.portfolio.cash
+        # 规则3: 检查可用资金（扣除已占用的资金，避免重复使用）
+        available_cash = context.portfolio.cash - reserved_cash
         required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
         if available_cash < required_amount:
             # 可用资金本身已不足最小买入金额，直接跳过，无需尝试调整
             if available_cash < MIN_BUY_AMOUNT:
                 log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
-                           f"可用 {available_cash:.0f}，"
+                           f"可用 {available_cash:.0f} (原始 {context.portfolio.cash:.0f} - 已占用 {reserved_cash:.0f})，"
                            f"可用资金不足{MIN_BUY_AMOUNT}元，跳过")
                 buy_skip_count += 1
                 continue
@@ -503,11 +511,12 @@ def process_khunter_signals(context, today_str):
             # 按可用资金调整委托量
             log.info(f"[KHunter] {symbol} 资金不足，按可用资金调整: "
                      f"{volume}股 → {adjusted_volume}股 "
-                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
+                     f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f}, "
+                     f"原始 {context.portfolio.cash:.0f} - 已占用 {reserved_cash:.0f})")
             volume = adjusted_volume
             required_amount = volume * current_price * 1.001  # 更新实际占用金额
 
-        # 提交委托：按当前价下单（PTrade 内部会立即扣除 portfolio.cash）
+        # 提交委托：按当前价下单
         order_id = order(symbol, volume, limit_price=current_price)
         g.executed_signals[signal_id] = {
             'order_id': order_id,
@@ -521,9 +530,12 @@ def process_khunter_signals(context, today_str):
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
+        # 累计已占用资金，确保后续订单不重复使用
+        reserved_cash += required_amount
         log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
-                 f"偏离={(current_price/price-1)*100:+.2f}% order_id={order_id}")
+                 f"偏离={(current_price/price-1)*100:+.2f}% "
+                 f"占用 {required_amount:.0f} (累计占用 {reserved_cash:.0f}) order_id={order_id}")
 
     log.info(f"[KHunter] 信号处理完成: 卖出{sell_count}条, 买入{buy_count}条, "
              f"跳过{parse_skip_count + sell_skip_count + buy_skip_count}条")

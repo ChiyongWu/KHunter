@@ -21,9 +21,14 @@ if exist "requirements.txt" (
     pip install -r requirements.txt -q
 )
 
+:: Start scheduler (daemon mode)
+echo.
+echo Starting scheduler daemon...
+start "KHunter Scheduler" python main.py schedule
+
 :: Start server
 echo.
-echo Starting KHunter...
+echo Starting KHunter Web Server...
 python web_server.py
 
 pause
