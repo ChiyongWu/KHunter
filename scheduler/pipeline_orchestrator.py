@@ -6,13 +6,14 @@
 每个步骤独立记录状态和耗时，单个步骤失败不阻断后续步骤。
 """
 
+import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List
 
 from scheduler.models import PipelineResult, StepResult
 
@@ -274,11 +275,8 @@ class PipelineOrchestrator:
                 step2 = self._step_strategy_run()
                 result.add_step(step2)
 
-            # Step 3: 通知（无论什么状态都发送，确保用户知晓）
-            step3 = self._step_notify(result)
-            result.add_step(step3)
-
-            # 汇总状态（优先级: failed > skipped > success）
+            # 汇总状态（优先于通知计算，确保飞书消息拿到正确状态）
+            # 优先级: failed > skipped > success
             statuses = [s.status for s in result.steps]
             if any(s == "failed" for s in statuses):
                 result.status = "partial_failure"
@@ -287,16 +285,21 @@ class PipelineOrchestrator:
             else:
                 result.status = "success"
 
+            # 先计算结束时间和总耗时，确保飞书消息能拿到正确的耗时数据
+            result.end_time = datetime.now()
+            result.duration_seconds = (
+                result.end_time - result.start_time
+            ).total_seconds()
+
+            # Step 3: 通知（无论什么状态都发送，确保用户知晓）
+            step3 = self._step_notify(result)
+            result.add_step(step3)
+
             # 生成摘要
             result.summary = self._build_summary(result)
 
         finally:
             self._release_lock()
-
-        result.end_time = datetime.now()
-        result.duration_seconds = (
-            result.end_time - result.start_time
-        ).total_seconds()
         logger.info("流水线 %s 完成，状态: %s，耗时: %.1f 秒",
                      result.pipeline_id, result.status, result.duration_seconds)
 
@@ -447,28 +450,46 @@ class PipelineOrchestrator:
         }
 
         try:
-            # 构建策略任务配置
+            # 从 task_history.json 加载历史任务配置（不存在或无 strategies 时报错终止）
+            tasks = self._load_historical_tasks()
+
+            # 构建运行配置（与 web_server.py 一致）
+            # 1. 从回测配置获取基础参数
+            run_config = self.strategy_runner._get_backtest_config() or {}
+            # 2. 流水线配置覆盖特定参数
             ps_config = self.config.get("pipeline_schedule", {})
             sr_config = ps_config.get("strategy_run", {})
+            run_config["score_threshold"] = sr_config.get("score_threshold", run_config.get("score_threshold", 60))
+            run_config["max_daily_buys"] = sr_config.get("max_daily_buys", run_config.get("max_daily_buys", 3))
+            # 3. 检查海龟策略，从 StrategyConfigManager 加载参数
+            has_turtle = any(
+                'turtle' in str(t.get('timing_strategy', '')) for t in tasks
+            )
+            if has_turtle:
+                try:
+                    from utils.strategy_config_manager import StrategyConfigManager
+                    config_manager = StrategyConfigManager()
+                    turtle_config = config_manager.get_strategy_config('TurtleStrategy')
+                    turtle_params = turtle_config.get('params', {})
+                    logger.info("  从配置文件读取海龟策略参数: n_entry=%s, n_exit=%s, atr_period=%s",
+                                 turtle_params.get('n_entry'), turtle_params.get('n_exit'),
+                                 turtle_params.get('atr_period'))
+                    run_config['n_entry'] = turtle_params.get('n_entry')
+                    run_config['n_exit'] = turtle_params.get('n_exit')
+                    run_config['atr_period'] = turtle_params.get('atr_period')
+                    run_config['entry_atr'] = turtle_params.get('entry_atr')
+                    run_config['add_atr'] = turtle_params.get('add_atr')
+                    run_config['exit_atr'] = turtle_params.get('exit_atr')
+                    run_config['base_position_amount'] = turtle_params.get('base_position_amount')
+                except Exception as e:
+                    logger.warning("  读取海龟策略配置失败，使用默认值: %s", e)
 
-            tasks = [{
-                "selection_strategy": sr_config.get(
-                    "select_strategy", "immortal_guidance"
-                ),
-                "timing_strategy": sr_config.get(
-                    "timing_strategy", "support"
-                ),
-            }]
-
-            run_config = {
-                "score_threshold": sr_config.get("score_threshold", 60),
-                "max_daily_buys": sr_config.get("max_daily_buys", 3),
-            }
-
-            logger.info("  任务数: %d, 选股策略: %s, 择时策略: %s",
-                         len(tasks),
-                         sr_config.get("select_strategy", "immortal_guidance"),
-                         sr_config.get("timing_strategy", "support"))
+            # 日志显示实际使用的任务策略
+            task_summary = ", ".join(
+                "[" + ",".join(t.get('strategy_names', ['?'])) + "]/" + t.get('timing_strategy', '?')
+                for t in tasks
+            )
+            logger.info("  任务数: %d, 策略: %s", len(tasks), task_summary)
 
             batch_result = self.strategy_runner.run_strategies_batch(
                 tasks=tasks, config=run_config
@@ -476,15 +497,59 @@ class PipelineOrchestrator:
 
             # 提取统计数据（从 batch_result["data"] 中获取实际返回格式）
             if batch_result:
-                data = batch_result.get("data", {})
-                details["buy_signals"] = data.get("buy_signals", 0)
-                details["sell_signals"] = data.get("sell_signals", 0)
-                details["signals_generated"] = data.get("total_signals", 0)
-                details["signal_file"] = data.get("ptrade_csv_file", "")
+                batch_status = batch_result.get("status", "")
 
-            step.details = details
-            step.status = "success"
-            logger.info("  信号: 买入 %d, 卖出 %d", details["buy_signals"], details["sell_signals"])
+                # 策略运行失败（如 PTrade 反馈文件缺失）→ 直接标记失败
+                if batch_status == "failed":
+                    step.status = "failed"
+                    step.error = batch_result.get("message", "策略运行失败")
+                    details["error_message"] = step.error
+                    step.details = details
+                    logger.warning("  策略运行失败: %s", step.error)
+                else:
+                    data = batch_result.get("data", {})
+                    details["buy_signals"] = data.get("buy_signals", 0)
+                    details["sell_signals"] = data.get("sell_signals", 0)
+                    details["signals_generated"] = data.get("total_signals", 0)
+                    details["signal_file"] = data.get("ptrade_csv_file", "")
+
+                    # ===== 获取资金信息 =====
+                    sr = self.strategy_runner
+                    # 可用资金
+                    available_cash = getattr(sr, 'current_total_capital', 0)
+                    details["available_cash"] = available_cash
+                    # 总资产 = 可用资金 + 持仓市值
+                    total_assets = available_cash
+                    portfolio = getattr(sr, 'portfolio', {})
+                    for pos in portfolio.values():
+                        total_assets += pos.get('market_value', 0) or (pos.get('quantity', 0) * pos.get('current_price', 0))
+                    details["total_assets"] = total_assets
+                    # 持仓数量
+                    details["position_count"] = len(portfolio)
+
+                    # ===== 策略信息 =====
+                    # 从加载的 tasks 中提取
+                    all_strategies = []
+                    timing = 'support'
+                    for t in tasks:
+                        names = t.get('strategy_names', [])
+                        all_strategies.extend(names)
+                        timing = t.get('timing_strategy', timing)
+                    details["selection_strategies"] = list(set(all_strategies))  # 去重
+                    details["timing_strategy"] = timing
+
+                    # ===== 信号日期 =====
+                    details["signal_date"] = data.get("run_date", "")
+
+                    # ===== 信号详情 =====
+                    # 从 signals JSON 文件读取详细信号信息
+                    signal_details = self._load_signal_details(details["signal_date"])
+                    details["buy_signal_items"] = signal_details.get("buy", [])
+                    details["sell_signal_items"] = signal_details.get("sell", [])
+
+                    step.details = details
+                    step.status = "success"
+                    logger.info("  信号: 买入 %d, 卖出 %d", details["buy_signals"], details["sell_signals"])
 
         except Exception as e:
             logger.error("  策略运行失败: %s", e)
@@ -551,6 +616,95 @@ class PipelineOrchestrator:
         return step
 
     # ---- 辅助方法 ----
+
+    def _load_signal_details(self, signal_date: str) -> Dict[str, list]:
+        """从 signals JSON 文件加载信号详情
+        
+        Args:
+            signal_date: 信号日期，格式 YYYY-MM-DD
+            
+        Returns:
+            {'buy': [...], 'sell': [...]} 格式的信号详情列表
+        """
+        result = {"buy": [], "sell": []}
+        if not signal_date:
+            return result
+        signals_file = Path(self.data_dir) / "running" / f"signals_{signal_date}.json"
+        if not signals_file.exists():
+            logger.debug("信号文件不存在: %s", signals_file)
+            return result
+        try:
+            with open(signals_file, 'r', encoding='utf-8') as f:
+                signals = json.load(f)
+            # 分类 buy/sell 信号，提取关键字段
+            for sig in signals:
+                item = {
+                    "stock_code": sig.get("stock_code", ""),
+                    "stock_name": sig.get("stock_name", ""),
+                    "price": sig.get("price", 0),
+                    "quantity": sig.get("quantity", 0),
+                    "amount": sig.get("amount", 0),
+                    "trade_type": sig.get("trade_type", ""),
+                    "reason": sig.get("reason", ""),
+                    "strategy_name": sig.get("strategy_name", ""),
+                }
+                sig_type = sig.get("signal_type", "")
+                if sig_type == "buy":
+                    result["buy"].append(item)
+                elif sig_type == "sell":
+                    result["sell"].append(item)
+        except Exception as e:
+            logger.warning("读取信号详情失败: %s", e)
+        return result
+
+    def _load_historical_tasks(self) -> List[Dict]:
+        """从 task_history.json 加载上次任务配置（标准格式）
+        
+        task_history.json 标准格式：
+        [{id, timestamp, strategies: [...], timing_strategy, ...}, ...]
+        
+        读取最新记录的 strategies 和 timing_strategy，
+        映射为 run_strategies_batch 所需的 strategy_names 和 timing_strategy。
+        
+        文件不存在或无有效策略 → 直接抛异常，终止流水线并通知用户。
+        
+        Returns:
+            任务列表（可直接传入 run_strategies_batch）
+            
+        Raises:
+            RuntimeError: 无历史任务或无有效策略
+        """
+        running_dir = Path(self.data_dir) / "running"
+        history_file = running_dir / "task_history.json"
+        if not history_file.exists():
+            raise RuntimeError(
+                "task_history.json 不存在，请先通过界面/API 手动运行一次策略"
+            )
+        with open(history_file, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        if not history:
+            raise RuntimeError(
+                "task_history.json 为空，请先通过界面/API 手动运行一次策略"
+            )
+        # 取最新一条记录
+        latest = history[-1]
+        strategies = latest.get('strategies', [])
+        # 过滤空字符串，防止写入空值导致运行时策略名为空
+        strategies = [s for s in strategies if s]
+        timing_strategy = latest.get('timing_strategy', 'support')
+        if not strategies:
+            raise RuntimeError(
+                "task_history.json 最新记录中 strategies 为空，"
+                "请先通过界面/API 手动运行一次策略"
+            )
+        # 构建 run_strategies_batch 需要的 tasks（strategy_names + timing_strategy）
+        tasks = [{
+            'strategy_names': strategies,
+            'timing_strategy': timing_strategy,
+        }]
+        logger.info("  从 task_history.json 加载历史任务: 策略=%s, 择时=%s",
+                     strategies, timing_strategy)
+        return tasks
 
     def _build_summary(self, result: PipelineResult) -> str:
         """

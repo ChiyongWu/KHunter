@@ -279,27 +279,121 @@ class FeishuNotifier:
         return f"{minutes}分{secs}秒"
 
     def _format_data_update_details(self, details: dict) -> str:
-        """格式化数据更新步骤详情"""
+        """格式化数据更新步骤详情
+        
+        details 键名须与 pipeline_orchestrator._step_data_update 中写入的字段一致：
+        kline_added/updated/failed, fund_flow_added/updated,
+        new_stock_detected/initialized, market_cap_updated, already_updated
+        """
         parts = []
-        if details.get("kline_updated"):
-            parts.append(f"- K线增量更新: {details['kline_updated']} 只")
-        if details.get("exdividend_rebuilt"):
-            parts.append(f"- 除权历史重建: {details['exdividend_rebuilt']} 只")
-        if details.get("new_stocks_initialized"):
-            parts.append(f"- 新股初始化: {details['new_stocks_initialized']} 只")
-        if details.get("basic_data_synced", False):
-            parts.append("- 基础数据同步: 完成")
+        # K线更新统计
+        k_added = details.get("kline_added", 0)
+        k_updated = details.get("kline_updated", 0)
+        k_failed = details.get("kline_failed", 0)
+        if k_added or k_updated:
+            parts.append(f"- K线更新: 新增 {k_added} 只, 更新 {k_updated} 只"
+                         + (f", 失败 {k_failed} 只" if k_failed else ""))
+        elif k_failed:
+            parts.append(f"- K线更新: 失败 {k_failed} 只")
+        # 资金流向更新
+        ff_added = details.get("fund_flow_added", 0)
+        ff_updated = details.get("fund_flow_updated", 0)
+        if ff_added or ff_updated:
+            parts.append(f"- 资金流向: 新增 {ff_added} 只, 更新 {ff_updated} 只")
+        # 新股检测与初始化
+        ns_detected = details.get("new_stock_detected", 0)
+        ns_init = details.get("new_stock_initialized", 0)
+        if ns_detected or ns_init:
+            parts.append(f"- 新股: 检测 {ns_detected} 只, 初始化 {ns_init} 只")
+        # 市值更新
+        mc_updated = details.get("market_cap_updated", 0)
+        if mc_updated:
+            parts.append(f"- 市值更新: {mc_updated} 只")
+        # 当日已完成更新标记
+        if details.get("already_updated"):
+            parts.append("- 今日已更新过，跳过重复更新")
+        # 被跳过标记
+        if details.get("skipped"):
+            parts.append("- 数据源未就绪，已跳过")
         return "\n".join(parts) if parts else "- 无详情"
 
     def _format_strategy_run_details(self, details: dict) -> str:
-        """格式化策略运行步骤详情"""
+        """格式化策略运行步骤详情
+        
+        包含：可用资金、总资产、选股/择时策略、信号日期、详细信号信息
+        所有策略名称统一转换为中文显示
+        """
+        from utils.strategy_name_mapper import get_chinese_name, get_chinese_timing_name
+        
+        # 异常终止时只显示错误信息，不显示默认资金数据
+        error_msg = details.get("error_message", "")
+        if error_msg:
+            return f"**执行异常终止**: {error_msg}"
+
         parts = []
-        if details.get("buy_signals") is not None:
-            parts.append(f"- 买入信号: {details['buy_signals']} 条")
-        if details.get("sell_signals") is not None:
-            parts.append(f"- 卖出信号: {details['sell_signals']} 条")
+        # 资金信息
+        avail_cash = details.get("available_cash", 0)
+        total_assets = details.get("total_assets", 0)
+        if avail_cash is not None:
+            parts.append(f"**资金**: 可用 ¥{avail_cash:,.2f} | 总资产 ¥{total_assets:,.2f}")
+        
+        # 策略信息（转换为中文）
+        strategies = details.get("selection_strategies", [])
+        timing = details.get("timing_strategy", "")
+        if strategies or timing:
+            cn_strategies = [get_chinese_name(s) for s in strategies]
+            cn_timing = get_chinese_timing_name(timing)
+            strategy_text = ", ".join(cn_strategies) if cn_strategies else "无"
+            parts.append(f"**策略**: 选股 [{strategy_text}] | 择时 [{cn_timing}]")
+        
+        # 信号日期和数量
+        signal_date = details.get("signal_date", "未知")
+        parts.append(f"**信号日期**: {signal_date}")
+        
+        buy_count = details.get("buy_signals", 0)
+        sell_count = details.get("sell_signals", 0)
+        parts.append(f"**信号统计**: 买入 {buy_count} 条 | 卖出 {sell_count} 条")
+        
+        # 买入信号详情
+        buy_items = details.get("buy_signal_items", [])
+        if buy_items:
+            buy_lines = ["**买入信号详情**:"]
+            for i, sig in enumerate(buy_items, 1):
+                code = sig.get("stock_code", "")
+                name = sig.get("stock_name", "")
+                price = sig.get("price", 0)
+                qty = sig.get("quantity", 0)
+                amount = sig.get("amount", 0)
+                trade_type = sig.get("trade_type", "")
+                type_tag = "加仓" if trade_type == "add" else "首仓"
+                cn_strategy = get_chinese_name(sig.get("strategy_name", ""))
+                buy_lines.append(
+                    f"  {i}. {name}({code}) {type_tag} [{cn_strategy}]: "
+                    f"¥{price:.2f} × {qty}股 = ¥{amount:,.0f}"
+                )
+            parts.append("\n".join(buy_lines))
+        
+        # 卖出信号详情
+        sell_items = details.get("sell_signal_items", [])
+        if sell_items:
+            sell_lines = ["**卖出信号详情**:"]
+            for i, sig in enumerate(sell_items, 1):
+                code = sig.get("stock_code", "")
+                name = sig.get("stock_name", "")
+                price = sig.get("price", 0)
+                qty = sig.get("quantity", 0)
+                amount = sig.get("amount", 0)
+                cn_strategy = get_chinese_name(sig.get("strategy_name", ""))
+                sell_lines.append(
+                    f"  {i}. {name}({code}) [{cn_strategy}]: "
+                    f"¥{price:.2f} × {qty}股 = ¥{amount:,.0f}"
+                )
+            parts.append("\n".join(sell_lines))
+        
+        # 信号文件
         if details.get("signal_file"):
-            parts.append(f"- 信号文件: {details['signal_file']}")
+            parts.append(f"信号文件: {details['signal_file']}")
+        
         return "\n".join(parts) if parts else "- 无详情"
 
     def _format_notification_details(self, details: dict) -> str:
