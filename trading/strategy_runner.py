@@ -327,6 +327,51 @@ class StrategyRunner:
         except Exception as e:
             logger.error(f"保存任务历史记录失败: {str(e)}")
 
+    def _save_batch_task_config(self, tasks: List[Dict], working_date: str):
+        """用标准 task_history.json 格式保存本次批量任务配置
+        
+        将 pipeline 格式（selection_strategy / strategy_names）映射为
+        save_task_record 标准格式（strategies 类名列表）。
+        
+        Args:
+            tasks: 任务列表，每个任务包含 selection_strategy 或 strategy_names、timing_strategy
+            working_date: 运行日期
+        """
+        try:
+            from utils.strategy_name_mapper import get_english_name
+            history = self._load_task_history()
+            # 提取策略类名列表（支持 selection_strategy 和 strategy_names 两种 key）
+            strategy_list = []
+            timing_strategy = 'support'
+            for t in tasks:
+                # 优先取 selection_strategy（web 端传入），回退到 strategy_names（流水线传入）
+                sel = t.get('selection_strategy', None)
+                if not sel:
+                    names = t.get('strategy_names', [])
+                    sel = names[0] if names else ''
+                class_name = get_english_name(sel) if sel else ''
+                if class_name:
+                    strategy_list.append(class_name)
+                timing_strategy = t.get('timing_strategy', 'support')
+            # 过滤空字符串，确保不写入无效记录
+            strategy_list = [s for s in strategy_list if s]
+            # 标准格式记录
+            record = {
+                'id': datetime.datetime.now().strftime('%Y%m%d_%H%M%S'),
+                'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'strategies': strategy_list,
+                'timing_strategy': timing_strategy,
+                'mode': 'realtime',
+                'status': 'completed'
+            }
+            history.append(record)
+            if len(history) > 30:
+                history = history[-30:]
+            self._save_task_history(history)
+            logger.info(f"任务配置已保存到 task_history.json (策略: {strategy_list}, 择时: {timing_strategy})")
+        except Exception as e:
+            logger.warning(f"保存任务配置失败（不阻断主流程）: {e}")
+
     def save_task_record(self, task_config: Dict) -> Dict:
         """保存任务运行记录
         
@@ -796,8 +841,14 @@ class StrategyRunner:
         if not stocks:
             return []
         
+        # 应用策略名称映射（支持蛇形命名别名如 immortal_guidance）
+        from utils.strategy_name_mapper import get_english_name
+        mapped_name = get_english_name(strategy_name)
+        
         # 获取策略的中文名称
-        strategy = self.strategy_registry.get_strategy(strategy_name)
+        strategy = self.strategy_registry.get_strategy(mapped_name)
+        if not strategy:
+            strategy = self.strategy_registry.get_strategy(strategy_name)
         strategy_display_name = strategy.name if strategy else strategy_name
         
         # 使用回测评分器进行批量评分
@@ -1734,13 +1785,13 @@ class StrategyRunner:
                 updated_pos['holding_days'] = pos.get('holding_days', 0) + days_between
                 
                 # 获取最新价格并更新现价和收益
+                # date 已是 get_working_date() 计算的工作日（已处理盘中/非交易日逻辑）
+                # 走本地DB避免远程API超时
                 try:
-                    # 获取股票最新数据
-                    df = self._get_stock_data(code, date, date)
+                    df = self._get_stock_data_from_db(code, date, date)
                     if df is not None and not df.empty:
                         latest_price = df.iloc[0]['close']
                         updated_pos['current_price'] = latest_price
-                        
                         # 计算收益
                         buy_price = pos.get('buy_price', pos.get('cost_price', 0))
                         if buy_price > 0:
@@ -1752,7 +1803,7 @@ class StrategyRunner:
                             updated_pos['profit_rate'] = 0.0
                             updated_pos['profit_loss'] = 0.0
                     else:
-                        # 无法获取最新价格，保持原有现价
+                        # 工作日DB无数据，保持原有现价
                         updated_pos['profit_rate'] = 0.0
                         updated_pos['profit_loss'] = 0.0
                 except Exception as e:
@@ -4026,7 +4077,23 @@ class StrategyRunner:
             # 确保当日数据已初始化（PTrade 同步、持仓继承等统一在此处理）
             # initialize_daily_data 内置 _initialized_dates 和 _ptrade_synced_feedback_date 双重守卫，
             # 同一日期多次调用不会重复处理
-            self.initialize_daily_data(working_date)
+            init_success = self.initialize_daily_data(working_date)
+            
+            # 自动模式下 PTrade 反馈文件是唯一数据源，初始化失败必须终止
+            run_mode = getattr(self, 'run_mode', 'manual')
+            if run_mode == 'auto' and not init_success:
+                error_msg = (
+                    f"【自动任务终止】{working_date} PTrade 反馈文件不存在或同步失败，"
+                    f"无法继续执行。请检查 PTrade 反馈文件是否已生成。"
+                    f"预期路径: data/running/ptrade_feedback/Fund_{working_date.replace('-', '')}.csv "
+                    f"和 Hold_{working_date.replace('-', '')}.csv"
+                )
+                logger.error(error_msg)
+                StrategyRunner._is_running = False
+                return {
+                    "status": "failed",
+                    "message": error_msg
+                }
             
             # 用户点击执行 = 明确要运行策略，不因旧 daily 文件存在而跳过
             # 策略运行锁 (_strategy_run_lock) 已防止并发重复执行
@@ -4132,26 +4199,37 @@ class StrategyRunner:
                 logger.info(f"执行任务 {idx}/{len(tasks)}: 选股={selection_strategy}, 择时={timing_strategy}")
                 
                 try:
-                    # 初始化择时策略
-                    timing_params = config.get('timing_params', {})
-                    strategy_params = timing_params.get(timing_strategy, {})
+                    # 仅当择时策略与当前不同时才重新创建（避免与卖出阶段重复创建）
+                    if timing_strategy != getattr(self, 'timing_strategy_name', None):
+                        timing_params = config.get('timing_params', {})
+                        strategy_params = timing_params.get(timing_strategy, {})
+                        
+                        # 特殊处理：如果是海龟策略
+                        if timing_strategy == 'turtle':
+                            turtle_specific_params = {
+                                'n_entry': config.get('n_entry'),
+                                'n_exit': config.get('n_exit'),
+                                'atr_period': config.get('atr_period'),
+                                'entry_atr': config.get('entry_atr'),
+                                'add_atr': config.get('add_atr'),
+                                'exit_atr': config.get('exit_atr'),
+                                'preset': config.get('turtle_preset'),
+                                'base_position_amount': config.get('base_position_amount')
+                            }
+                            turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
+                            strategy_params.update(turtle_specific_params)
+                        
+                        self.timing_strategy = TimingStrategyFactory.create_strategy(
+                            timing_strategy, strategy_params
+                        )
+                        self.timing_strategy_name = timing_strategy
+                        self.timing_strategy_params = strategy_params
+                        logger.info(f"  创建择时策略: {timing_strategy}")
+                    else:
+                        logger.debug(f"  择时策略 {timing_strategy} 已创建，复用已有实例")
                     
-                    # 特殊处理：如果是海龟策略
-                    if timing_strategy == 'turtle':
-                        turtle_specific_params = {
-                            'n_entry': config.get('n_entry'),
-                            'n_exit': config.get('n_exit'),
-                            'atr_period': config.get('atr_period'),
-                            'entry_atr': config.get('entry_atr'),
-                            'add_atr': config.get('add_atr'),
-                            'exit_atr': config.get('exit_atr'),
-                            'preset': config.get('turtle_preset'),
-                            'base_position_amount': config.get('base_position_amount')
-                        }
-                        turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
-                        strategy_params.update(turtle_specific_params)
-                    
-                    # 打印任务级别的策略参数
+                    # 使用当前择时策略的参数进行日志记录
+                    strategy_params = getattr(self, 'timing_strategy_params', {})
                     logger.info("-" * 60)
                     logger.info(f"任务 {idx}/{len(tasks)} 策略参数:")
                     logger.info(f"  择时策略: {timing_strategy}")
@@ -4162,12 +4240,6 @@ class StrategyRunner:
                         logger.info(f"    n_exit: {strategy_params.get('n_exit')}")
                         logger.info(f"    atr_period: {strategy_params.get('atr_period')}")
                     logger.info("-" * 60)
-                    
-                    self.timing_strategy = TimingStrategyFactory.create_strategy(
-                        timing_strategy, strategy_params
-                    )
-                    self.timing_strategy_name = timing_strategy
-                    self.timing_strategy_params = strategy_params
                     
                     # 执行选股
                     candidate_stocks = self._select_and_score_stocks(selection_strategy, working_date, score_threshold)
@@ -4296,6 +4368,8 @@ class StrategyRunner:
             self._save_portfolio(self.portfolio, str(portfolio_file))
             logger.info(f"持仓信息已保存到: {portfolio_file}")
             
+            # 保存本次任务配置到 task_history.json，供定时流水线读取历史任务
+            self._save_batch_task_config(tasks, working_date)
             logger.info(f"批量策略执行完成")
             return {
                 "status": "success",
