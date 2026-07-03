@@ -173,6 +173,29 @@ def _normalize_symbol(symbol):
     return symbol  # .SZ 已正确，或无后缀时保留原样
 
 
+def _get_pos_symbol(pos):
+    """
+    获取 PTrade 持仓对象的股票代码，兼容不同版本的属性名
+
+    PTrade 不同版本中持仓对象标识属性名可能是 sid 或 security。
+    本函数按优先级尝试获取：sid → security → 抛出异常
+
+    Args:
+        pos: PTrade Position 对象
+
+    Returns:
+        str: 如 "603341.SS"
+
+    Raises:
+        AttributeError: 若两个属性都不存在
+    """
+    for attr in ('sid', 'security'):
+        val = getattr(pos, attr, None)
+        if val is not None:
+            return val
+    raise AttributeError(f"PTrade 持仓对象无 sid/security 属性: {type(pos).__name__}")
+
+
 def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3):
     """
     等待卖出委托全部成交后再继续处理买入
@@ -207,7 +230,8 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
     pre_cash = context.portfolio.cash if hasattr(context, 'portfolio') else 0
     pre_positions = {}
     if hasattr(context, 'portfolio') and hasattr(context.portfolio, 'positions'):
-        pre_positions = {pos.security: pos.amount for pos in context.portfolio.positions.values()
+        # PTrade 不同版本 pos 标识属性名不同：sid / security，用 getattr 兼容
+        pre_positions = {_get_pos_symbol(pos): pos.amount for pos in context.portfolio.positions.values()
                          if hasattr(pos, 'amount') and pos.amount > 0}
 
     while pending and elapsed < max_wait:
@@ -218,7 +242,7 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
         cur_cash = context.portfolio.cash if hasattr(context, 'portfolio') else 0
         cur_positions = {}
         if hasattr(context, 'portfolio') and hasattr(context.portfolio, 'positions'):
-            cur_positions = {pos.security: pos.amount for pos in context.portfolio.positions.values()
+            cur_positions = {_get_pos_symbol(pos): pos.amount for pos in context.portfolio.positions.values()
                              if hasattr(pos, 'amount') and pos.amount > 0}
 
         still_pending = []
