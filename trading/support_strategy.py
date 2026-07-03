@@ -103,6 +103,8 @@ class SupportStrategy(TimingStrategy):
                 current_date_str = latest_bar['date']
                 if isinstance(current_date_str, str):
                     current_date = datetime.datetime.strptime(current_date_str, '%Y-%m-%d').date()
+                elif isinstance(current_date_str, pd.Timestamp):
+                    current_date = current_date_str.date()
                 else:
                     current_date = current_date_str
 

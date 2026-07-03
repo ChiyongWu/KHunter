@@ -22,8 +22,8 @@ from scheduler.pipeline_orchestrator import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
 
-# 任务历史文件路径
-TASK_HISTORY_FILE = "data/running/task_history.json"
+# 流水线执行历史文件路径（与 strategy_runner 的任务配置历史文件 task_history.json 分离）
+PIPELINE_HISTORY_FILE = "data/running/pipeline_history.json"
 
 
 class ScheduledRunner:
@@ -150,7 +150,7 @@ class ScheduledRunner:
         参数:
             result: 流水线执行结果
         """
-        history_path = Path(TASK_HISTORY_FILE)
+        history_path = Path(PIPELINE_HISTORY_FILE)
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 读取现有历史

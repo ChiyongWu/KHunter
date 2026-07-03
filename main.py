@@ -553,10 +553,16 @@ class QuantSystem:
 
     def run_schedule_once(self):
         """执行一次流水线（配合外部定时器）"""
+        import os as _os
         from scheduler.scheduled_runner import ScheduledRunner
 
         runner = ScheduledRunner()
-        return runner.run_once()
+        result = runner.run_once()
+
+        # 使用 os._exit 避免 daemon 线程（requests/urllib3/akshare）
+        # 在解释器关闭时引发 fatal error
+        exit_code = 0 if result.status == "success" else 1
+        _os._exit(exit_code)
 
 
 def print_version():

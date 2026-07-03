@@ -33,8 +33,12 @@ def _load_mapping_from_config():
             # 获取正向映射
             strategy_names = config.get('strategy_names', {})
             
-            # 生成反向映射
+            # 生成反向映射（基于中文名->英文类名）
             reverse_mapping = {v: k for k, v in strategy_names.items()}
+            
+            # 合并显式定义的反向映射条目（如蛇形命名别名）
+            explicit_reverse = config.get('reverse_mapping', {})
+            reverse_mapping.update(explicit_reverse)
             
             return strategy_names, reverse_mapping
     except Exception as e:
@@ -69,8 +73,12 @@ def _get_default_mapping():
         'Strategy2560Selection': '2560战法选股策略',
         'TrendStartStrategy': '趋势起点策略',
     }
-    
+
     reverse_map = {v: k for k, v in default_map.items()}
+
+    # 添加蛇形命名别名，用于定时任务等场景
+    reverse_map['immortal_guidance'] = 'ImmortalGuidanceStrategy'
+
     return default_map, reverse_map
 
 
@@ -109,13 +117,48 @@ def get_chinese_name(english_name: str) -> str:
     """
     将英文策略名称转换为中文名称
     
+    支持类名直接映射和蛇形命名别名：
+    1. 先用 english_name 直接在正向映射中查找
+    2. 如果未找到，尝试通过反向映射获取类名，再查正向映射
+       （处理 snake_case -> ClassName -> 中文名 的转换链）
+    
     Args:
-        english_name: 英文策略名称（类名）
+        english_name: 英文策略名称（类名或蛇形命名别名）
         
     Returns:
         中文策略名称，如果不存在则返回原名称
     """
-    return STRATEGY_NAME_MAP.get(english_name, english_name)
+    # 步骤1: 直接正向查找
+    if english_name in STRATEGY_NAME_MAP:
+        return STRATEGY_NAME_MAP[english_name]
+    # 步骤2: 通过反向映射获取类名，再正向查找
+    class_name = STRATEGY_NAME_REVERSE_MAP.get(english_name)
+    if class_name and class_name in STRATEGY_NAME_MAP:
+        return STRATEGY_NAME_MAP[class_name]
+    return english_name
+
+
+# ===== 择时策略英文→中文映射 =====
+_TIMING_NAME_MAP = {
+    'turtle': '海龟策略',
+    'support': '支撑位策略',
+    'rsi': 'RSI策略',
+    'bollinger': '布林带策略',
+    'macd_bollinger': '顺势宝',
+}
+
+
+def get_chinese_timing_name(english_name: str) -> str:
+    """
+    将择时策略英文名称转换为中文名称
+    
+    Args:
+        english_name: 择时策略英文名称
+        
+    Returns:
+        中文择时策略名称，如果不存在则返回原名称
+    """
+    return _TIMING_NAME_MAP.get(english_name, english_name)
 
 
 def get_english_name(chinese_name: str) -> str:
