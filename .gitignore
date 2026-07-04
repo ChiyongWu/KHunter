@@ -83,6 +83,7 @@ trading/strategy_runner_exdividend_fix.py
 
 # 运行时缓存
 data/risk_cache/
+data/trading_calendar_cache.json
 
 # running 目录的备份副本
 data/running - 副本*/
