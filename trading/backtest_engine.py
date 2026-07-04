@@ -980,6 +980,16 @@ class BacktestEngine:
                 f"请在网络正常时先运行一次回测以生成缓存文件。"
             )
         
+        # 通知 trade_date_utils 刷新模块级缓存（Flask 长驻进程场景必需）
+        # 其他模块（moneyflow_scorer 等）通过 trade_date_utils.is_trading_day()
+        # 判断交易日，需要确保模块级缓存与文件缓存同步
+        try:
+            from utils.trade_date_utils import refresh_trading_calendar_cache
+            refresh_trading_calendar_cache()
+            logger.debug("已刷新 trade_date_utils 模块级交易日缓存")
+        except Exception:
+            pass
+        
         # 构建交易日缓存字典和排序列表
         self.trading_calendar_cache.clear()
         for date_str in dates_cache:

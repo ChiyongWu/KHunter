@@ -47,18 +47,38 @@ def _load_cache_from_file() -> set:
 
 
 def _ensure_cache_loaded():
-    """确保交易日历缓存已加载到内存（懒加载）"""
+    """确保交易日历缓存已加载到内存（懒加载，空集合时自动重试加载）
+
+    关键修复：模块级 _trading_calendar_cache 可能在缓存文件生成前被初始化为
+    空集合（Flask 长驻进程场景），此时需要重新从文件加载。
+    """
     global _trading_calendar_cache
+    # None 时首次加载
     if _trading_calendar_cache is None:
         cached = _load_cache_from_file()
         if not cached:
-            # 缓存文件不存在或为空时，_trading_calendar_cache 设为空集合
-            # 后续调用 get_trading_days 时会尝试从 Tushare 更新
             _trading_calendar_cache = set()
+        return _trading_calendar_cache
+    # 空集合时重试加载（回测引擎可能已生成缓存文件）
+    if not _trading_calendar_cache:
+        cached = _load_cache_from_file()
+        if cached:
+            _trading_calendar_cache = cached
+            logger.info(f"交易日内存缓存已刷新，加载 {len(cached)} 个交易日")
     return _trading_calendar_cache
 
 
-@lru_cache(maxsize=256)
+def refresh_trading_calendar_cache():
+    """强制刷新交易日内存缓存（供回测引擎等上游模块写入缓存文件后调用）"""
+    global _trading_calendar_cache
+    # 清除 @lru_cache 缓存
+    is_trading_day.cache_clear()
+    get_trading_days.cache_clear()
+    # 重新从文件加载
+    _trading_calendar_cache = None
+    _ensure_cache_loaded()
+
+
 def is_trading_day(date_str: str) -> bool:
     """
     判断指定日期是否为交易日
@@ -66,6 +86,9 @@ def is_trading_day(date_str: str) -> bool:
     优先使用本地缓存（data/trading_calendar_cache.json）。
     缓存未命中时回退到 Tushare API，成功则更新缓存。
     均已失败时不再使用周末排除，直接报错。
+
+    注意：不使用 @lru_cache，因模块级 _trading_calendar_cache 已做 set 查找，
+    且 @lru_cache 会在缓存文件生成前后返回不一致的过期结果。
 
     参数:
         date_str: 日期字符串，支持 YYYY-MM-DD 或 YYYYMMDD 格式
