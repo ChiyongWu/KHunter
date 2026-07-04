@@ -14,151 +14,249 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
+# 交易日历本地缓存（模块级，进程内全局复用）
+_trading_calendar_cache: set = None
+_CACHE_FILE = None
+
+
+def _get_cache_file() -> str:
+    """获取交易日历缓存文件路径"""
+    from pathlib import Path
+    global _CACHE_FILE
+    if _CACHE_FILE is None:
+        _CACHE_FILE = str(Path(__file__).parent.parent / "data" / "trading_calendar_cache.json")
+    return _CACHE_FILE
+
+
+def _load_cache_from_file() -> set:
+    """从本地缓存文件加载交易日历到内存"""
+    global _trading_calendar_cache
+    from pathlib import Path
+    import json
+    cache_file = Path(_get_cache_file())
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                _trading_calendar_cache = set(data.get("dates", []))
+                logger.debug(f"从本地缓存加载交易日历: {len(_trading_calendar_cache)} 日")
+                return _trading_calendar_cache
+        except Exception as e:
+            logger.warning(f"读取交易日历缓存文件失败: {e}")
+    return set()
+
+
+def _ensure_cache_loaded():
+    """确保交易日历缓存已加载到内存（懒加载）"""
+    global _trading_calendar_cache
+    if _trading_calendar_cache is None:
+        cached = _load_cache_from_file()
+        if not cached:
+            # 缓存文件不存在或为空时，_trading_calendar_cache 设为空集合
+            # 后续调用 get_trading_days 时会尝试从 Tushare 更新
+            _trading_calendar_cache = set()
+    return _trading_calendar_cache
+
+
 @lru_cache(maxsize=256)
 def is_trading_day(date_str: str) -> bool:
     """
     判断指定日期是否为交易日
 
-    优先使用 Tushare 获取真实交易日历，包含节假日判断。
-    如果 Tushare 不可用，则回退到简单的周末排除逻辑。
+    优先使用本地缓存（data/trading_calendar_cache.json）。
+    缓存未命中时回退到 Tushare API，成功则更新缓存。
+    均已失败时不再使用周末排除，直接报错。
 
     参数:
         date_str: 日期字符串，支持 YYYY-MM-DD 或 YYYYMMDD 格式
     返回:
         bool: 是否为交易日
+        
+    Raises:
+        RuntimeError: 缓存和 Tushare 均不可用
     """
+    from pathlib import Path
+    
+    # 统一日期格式
+    if '-' in date_str:
+        date_str_fmt = date_str.replace('-', '')
+        display_str = date_str
+    else:
+        date_str_fmt = date_str
+        display_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+    
+    # 1. 优先从内存缓存查找
+    _ensure_cache_loaded()
+    if _trading_calendar_cache:
+        return display_str in _trading_calendar_cache
+    
+    # 2. 内存缓存为空，尝试从 Tushare 查询
     try:
-        # 统一日期格式
-        if '-' in date_str:
-            date_str_fmt = date_str.replace('-', '')
+        import tushare as ts
+        import json
+        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                tushare_config = json.load(f)
+            if 'api_key' in tushare_config:
+                ts.set_token(tushare_config['api_key'])
+        pro = ts.pro_api()
+        df = pro.trade_cal(
+            start_date=date_str_fmt,
+            end_date=date_str_fmt,
+            is_open='1'
+        )
+        if df is not None and not df.empty:
+            # Tushare 确认是交易日，更新缓存
+            _update_cache_from_tushare(date_str_fmt, date_str_fmt)
+            logger.debug(f"Tushare 确认 {display_str} 是交易日")
+            return True
         else:
-            date_str_fmt = date_str
-            date = datetime.strptime(date_str, '%Y%m%d')
-        
-        # 先尝试使用 Tushare 获取真实交易日历
-        try:
-            import tushare as ts
-            from pathlib import Path
-            # 尝试从配置文件加载 token
-            config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-            if config_path.exists():
-                import json
-                with open(config_path, 'r') as f:
-                    tushare_config = json.load(f)
-                if 'api_key' in tushare_config:
-                    ts.set_token(tushare_config['api_key'])
-            pro = ts.pro_api()
-            df = pro.trade_cal(
-                start_date=date_str_fmt,
-                end_date=date_str_fmt,
-                is_open='1'
-            )
-            if df is not None and not df.empty:
-                logger.debug(f"Tushare 确认 {date_str} 是交易日")
-                return True
-            else:
-                logger.debug(f"Tushare 确认 {date_str} 不是交易日")
-                return False
-        except Exception as e:
-            logger.debug(f"Tushare 交易日查询失败，使用周末判断: {e}")
-        
-        # 回退：排除周六(5)和周日(6)
-        if '-' in date_str:
-            date = datetime.strptime(date_str, '%Y-%m-%d')
-        else:
-            date = datetime.strptime(date_str, '%Y%m%d')
-        
-        weekday = date.weekday()
-        if weekday >= 5:
-            logger.debug(f"日期 {date_str} 是周末，不是交易日")
+            logger.debug(f"Tushare 确认 {display_str} 不是交易日")
             return False
-        
-        logger.debug(f"日期 {date_str} 是交易日（基于周末判断）")
-        return True
     except Exception as e:
-        logger.error(f"判断交易日时出错: {e}")
-        return False
+        # Tushare 不可用且缓存为空 → 报错
+        raise RuntimeError(
+            f"交易日判断失败: {display_str}\n"
+            f"本地缓存文件不存在且 Tushare API 不可用。\n"
+            f"缓存路径: {_get_cache_file()}\n"
+            f"Tushare 错误: {e}\n"
+            f"请在网络正常时先运行一次回测生成缓存文件。"
+        )
+
+
+def _update_cache_from_tushare(start_str: str, end_str: str):
+    """从 Tushare 批量获取交易日历并更新本地缓存
+    
+    Args:
+        start_str: 开始日期 (YYYYMMDD)
+        end_str: 结束日期 (YYYYMMDD)
+    """
+    global _trading_calendar_cache
+    try:
+        import tushare as ts
+        import json
+        from pathlib import Path
+        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                tushare_config = json.load(f)
+            if 'api_key' in tushare_config:
+                ts.set_token(tushare_config['api_key'])
+        pro = ts.pro_api()
+        df = pro.trade_cal(
+            exchange='SSE',
+            start_date=start_str,
+            end_date=end_str,
+            is_open='1'
+        )
+        if df is not None and not df.empty:
+            new_dates = set()
+            for _, row in df.iterrows():
+                cal_date = row['cal_date']
+                new_dates.add(f"{cal_date[:4]}-{cal_date[4:6]}-{cal_date[6:8]}")
+            
+            # 合并到内存缓存
+            _ensure_cache_loaded()
+            _trading_calendar_cache.update(new_dates)
+            
+            # 写回文件
+            cache_file = Path(_get_cache_file())
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            sorted_dates = sorted(_trading_calendar_cache)
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump({"dates": sorted_dates}, f, ensure_ascii=False, indent=2)
+            logger.info(f"交易日历缓存已更新: {len(new_dates)} 新日期 → 总计 {len(sorted_dates)} 日")
+    except Exception as e:
+        logger.debug(f"更新交易日历缓存失败: {e}")
 
 
 @lru_cache(maxsize=256)
 def get_trading_days(start_date: str, end_date: str) -> List[str]:
     """
-    获取指定日期范围内的交易日列表（批量优化版 + LRU 缓存）
+    获取指定日期范围内的交易日列表（批量优化版 + LRU 缓存 + 本地文件缓存）
 
-    一次性获取整个区间的交易日历，避免逐日调用 API。
-    加 LRU 缓存：同一日期范围的查询只走一次 Tushare API。
+    策略：本地缓存 → Tushare API 补充 → 合并缓存。
+    不再降级到周末排除模式（节假日不可靠）。
 
     参数:
         start_date: 开始日期，支持 YYYY-MM-DD 或 YYYYMMDD 格式
         end_date: 结束日期，支持 YYYY-MM-DD 或 YYYYMMDD 格式
     返回:
         List[str]: 交易日列表，格式为 YYYY-MM-DD
+        
+    Raises:
+        RuntimeError: 缓存和 Tushare 均不可用时抛出
     """
+    # 统一日期格式
+    if '-' in start_date:
+        start_str = start_date.replace('-', '')
+    else:
+        start_str = start_date
+
+    if '-' in end_date:
+        end_str = end_date.replace('-', '')
+    else:
+        end_str = end_date
+
+    start_dt = datetime.strptime(start_str, '%Y%m%d')
+    end_dt = datetime.strptime(end_str, '%Y%m%d')
+
+    # 1. 先尝试从 Tushare 批量获取并更新缓存
+    tushare_ok = False
     try:
-        # 统一日期格式
-        if '-' in start_date:
-            start_str = start_date.replace('-', '')
-        else:
-            start_str = start_date
+        import tushare as ts
+        from pathlib import Path
+        import json
 
-        if '-' in end_date:
-            end_str = end_date.replace('-', '')
-        else:
-            end_str = end_date
+        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                tushare_config = json.load(f)
+            if 'api_key' in tushare_config:
+                ts.set_token(tushare_config['api_key'])
 
-        # 尝试使用 Tushare 批量获取交易日历
-        try:
-            import tushare as ts
-            from pathlib import Path
-            import json
+        pro = ts.pro_api()
+        df = pro.trade_cal(
+            start_date=start_str,
+            end_date=end_str,
+            is_open='1'
+        )
 
-            # 尝试从配置文件加载 token
-            config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    tushare_config = json.load(f)
-                if 'api_key' in tushare_config:
-                    ts.set_token(tushare_config['api_key'])
-
-            pro = ts.pro_api()
-
-            # 一次性获取整个区间的交易日历
-            df = pro.trade_cal(
-                start_date=start_str,
-                end_date=end_str,
-                is_open='1'  # 只要交易日
-            )
-
-            if df is not None and not df.empty:
-                # 转换格式并返回
-                trading_days = [
-                    f"{row['cal_date'][:4]}-{row['cal_date'][4:6]}-{row['cal_date'][6:]}"
-                    for _, row in df.iterrows()
-                ]
-                logger.info(f"批量获取到 {len(trading_days)} 个交易日")
-                return trading_days
-
-        except Exception as e:
-            logger.warning(f"Tushare 批量获取失败: {e}，降级到简单排除")
-
-        # 降级方案：简单的周末排除（节假日可能不准确）
-        from datetime import datetime, timedelta
-        start = datetime.strptime(start_date.replace('-', ''), '%Y%m%d')
-        end = datetime.strptime(end_date.replace('-', ''), '%Y%m%d')
-
-        trading_days = []
-        current = start
-        while current <= end:
-            if current.weekday() < 5:  # 周一到周五
-                trading_days.append(current.strftime('%Y-%m-%d'))
-            current += timedelta(days=1)
-
-        logger.info(f"获取到 {len(trading_days)} 个交易日（降级模式）")
-        return trading_days
+        if df is not None and not df.empty:
+            # 解析并更新缓存
+            _update_cache_from_tushare(start_str, end_str)
+            tushare_ok = True
+            # 直接返回 Tushare 结果（最新数据）
+            trading_days = sorted([
+                f"{row['cal_date'][:4]}-{row['cal_date'][4:6]}-{row['cal_date'][6:]}"
+                for _, row in df.iterrows()
+            ])
+            logger.info(f"批量获取到 {len(trading_days)} 个交易日 (Tushare)")
+            return trading_days
 
     except Exception as e:
-        logger.error(f"获取交易日列表时出错: {e}")
-        return []
+        logger.warning(f"Tushare 批量获取交易日失败: {e}")
+
+    # 2. Tushare 失败，从本地缓存筛选
+    _ensure_cache_loaded()
+    if _trading_calendar_cache:
+        trading_days = []
+        for d_str in sorted(_trading_calendar_cache):
+            d = datetime.strptime(d_str, '%Y-%m-%d')
+            if start_dt <= d <= end_dt:
+                trading_days.append(d_str)
+        if trading_days:
+            logger.info(f"获取到 {len(trading_days)} 个交易日 (本地缓存)")
+            return trading_days
+
+    # 3. 缓存也没有 → 报错
+    raise RuntimeError(
+        f"获取交易日列表失败: {start_date} ~ {end_date}\n"
+        f"Tushare API 不可用且本地缓存文件不存在或没有覆盖该日期范围。\n"
+        f"缓存路径: {_get_cache_file()}\n"
+        f"请在网络正常时先运行一次回测生成缓存文件。"
+    )
 
 
 def get_trading_days_between(start_date: str, end_date: str) -> int:

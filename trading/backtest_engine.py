@@ -880,78 +880,152 @@ class BacktestEngine:
         logger.info("-------------------- 初始股票池预加载结束 --------------------\n")
     
     def _load_trading_calendar(self, start_date: str, end_date: str):
-        """加载交易日历数据（扩大范围，覆盖前一交易日查找需求）
+        """加载交易日历数据（三级策略：Tushare API → 本地缓存 → 报错终止）
+        
+        不再降级到"仅过滤周末"，避免节假日被错误当作交易日处理。
         
         Args:
             start_date: 回测开始日期 (YYYY-MM-DD)
             end_date: 回测结束日期 (YYYY-MM-DD)
+            
+        Raises:
+            RuntimeError: Tushare API 和本地缓存均不可用时抛出
         """
+        from datetime import timedelta
+        from pathlib import Path
+        import json
+        
+        cache_file = Path("data/trading_calendar_cache.json")
+        
+        # 扩大加载范围：往前多加载60天，覆盖_get_previous_trading_day的需求
+        extended_start_dt = datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=60)
+        extended_start = extended_start_dt.strftime('%Y%m%d')
+        end_date_str = end_date.replace('-', '')
+        
+        dates_cache = []  # 最终使用的交易日列表
+        
+        # 1. 尝试从 Tushare 加载交易日历
         try:
             import tushare as ts
             
             # 读取Tushare token
             tushare_token = None
             try:
-                import json
                 with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    tushare_token = config.get('token') or config.get('api_key')
-            except:
+                    cfg = json.load(f)
+                    tushare_token = cfg.get('token') or cfg.get('api_key')
+            except Exception:
                 pass
             
-            if not tushare_token:
-                logger.warning("未找到Tushare token，使用简单的交易日判断（仅过滤周末）")
-                return
-            
-            # 扩大加载范围：往前多加载60天，覆盖_get_previous_trading_day的需求
-            from datetime import timedelta
-            extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=60)).strftime('%Y%m%d')
-            end_date_str = end_date.replace('-', '')
-            logger.info(f"加载交易日历范围: {extended_start} 至 {end_date_str}")
-            
-            # 获取交易日历（只获取交易日）
-            pro = ts.pro_api(tushare_token)
-            df = pro.trade_cal(
-                exchange='SSE',
-                start_date=extended_start,
-                end_date=end_date_str,
-                is_open='1'
-            )
-            
-            if df.empty:
-                logger.warning("未获取到交易日历数据，使用简单的交易日判断（仅过滤周末）")
-                return
-            
-            # 清空旧缓存
-            self.trading_calendar_cache.clear()
-            
-            # 构建交易日缓存和排序列表
-            trading_dates_sorted = []
-            for _, row in df.iterrows():
-                cal_date = row['cal_date']
-                date_str = f"{cal_date[:4]}-{cal_date[4:6]}-{cal_date[6:8]}"
-                self.trading_calendar_cache[date_str] = True
-                trading_dates_sorted.append(date_str)
-            
-            # 按日期排序（tushare返回的可能是倒序）
-            trading_dates_sorted.sort()
-            # 保存排序后的交易日列表，供_get_previous_trading_day使用
-            self._sorted_trading_dates = trading_dates_sorted
-            
-            # 打印前10个和后10个交易日，用于调试
-            if trading_dates_sorted:
-                logger.info(f"前10个交易日: {trading_dates_sorted[:10]}")
-                logger.info(f"后10个交易日: {trading_dates_sorted[-10:]}")
-            
-            logger.info(f"成功加载交易日历数据，共 {len(self.trading_calendar_cache)} 个交易日")
-            
+            if tushare_token:
+                logger.info(f"从 Tushare 加载交易日历范围: {extended_start} ~ {end_date_str}")
+                
+                pro = ts.pro_api(tushare_token)
+                df = pro.trade_cal(
+                    exchange='SSE',
+                    start_date=extended_start,
+                    end_date=end_date_str,
+                    is_open='1'
+                )
+                
+                if df is not None and not df.empty:
+                    # 解析 Tushare 返回的日期列表
+                    new_dates = []
+                    for _, row in df.iterrows():
+                        cal_date = row['cal_date']
+                        new_dates.append(f"{cal_date[:4]}-{cal_date[4:6]}-{cal_date[6:8]}")
+                    new_dates.sort()
+                    
+                    # 合并到本地缓存文件
+                    all_dates = self._load_cache_dates(cache_file)
+                    all_set = set(all_dates)
+                    for d in new_dates:
+                        all_set.add(d)
+                    merged = sorted(all_set)
+                    # 写回缓存文件
+                    self._save_cache_dates(cache_file, merged)
+                    
+                    # 筛选回测所需范围
+                    start_dt = extended_start_dt.date()
+                    end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+                    for d_str in merged:
+                        d = datetime.strptime(d_str, '%Y-%m-%d').date()
+                        if start_dt <= d <= end_dt:
+                            dates_cache.append(d_str)
+                    
+                    logger.info(f"Tushare 返回 {len(new_dates)} 日，缓存总计 {len(merged)} 日，"
+                                f"回测范围 {len(dates_cache)} 日")
         except Exception as e:
-            logger.warning(f"加载交易日历数据失败: {str(e)}，使用简单的交易日判断（仅过滤周末）")
-            self.trading_calendar_cache.clear()
-            self._sorted_trading_dates = []
+            logger.warning(f"从 Tushare 加载交易日历失败: {e}")
+        
+        # 2. 如果 Tushare 失败，尝试从本地缓存加载
+        if not dates_cache and cache_file.exists():
+            logger.info(f"Tushare 不可用，从本地缓存加载交易日历: {cache_file}")
+            all_dates = self._load_cache_dates(cache_file)
+            if all_dates:
+                start_dt = extended_start_dt.date()
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+                for d_str in all_dates:
+                    d = datetime.strptime(d_str, '%Y-%m-%d').date()
+                    if start_dt <= d <= end_dt:
+                        dates_cache.append(d_str)
+                logger.info(f"从缓存加载回测范围交易日: {len(dates_cache)} 日 "
+                            f"(缓存总计 {len(all_dates)} 日)")
+        
+        # 3. 如果缓存也没有，报错终止（不再降级到仅过滤周末）
+        if not dates_cache:
+            raise RuntimeError(
+                f"交易日历加载失败：Tushare API 不可用且本地缓存文件不存在。\n"
+                f"预期缓存路径: {cache_file.absolute()}\n"
+                f"请在网络正常时先运行一次回测以生成缓存文件。"
+            )
+        
+        # 构建交易日缓存字典和排序列表
+        self.trading_calendar_cache.clear()
+        for date_str in dates_cache:
+            self.trading_calendar_cache[date_str] = True
+        self._sorted_trading_dates = dates_cache.copy()
+        
+        # 打印前10个和后10个交易日，用于调试
+        if dates_cache:
+            logger.info(f"前10个交易日: {dates_cache[:10]}")
+            logger.info(f"后10个交易日: {dates_cache[-10:]}")
+        
+        logger.info(f"交易日历加载完成，共 {len(self.trading_calendar_cache)} 个交易日")
+    
+    @staticmethod
+    def _load_cache_dates(cache_file) -> list:
+        """从本地缓存文件读取交易日列表
+        
+        Args:
+            cache_file: Path 对象，缓存文件路径
+            
+        Returns:
+            list: 日期字符串列表 ["YYYY-MM-DD", ...]
+        """
+        import json
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("dates", [])
+        except Exception:
+            return []
+    
+    @staticmethod
+    def _save_cache_dates(cache_file, dates: list):
+        """将交易日列表写入本地缓存文件
+        
+        Args:
+            cache_file: Path 对象，缓存文件路径
+            dates: 日期字符串列表 ["YYYY-MM-DD", ...]
+        """
+        import json
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump({"dates": dates}, f, ensure_ascii=False, indent=2)
     
     def _is_trading_day(self, date: date) -> bool:
-        """判断是否为交易日
+        """判断是否为交易日（必须基于交易日历缓存，不使用周末降级）
         
         Args:
             date: 日期
@@ -961,22 +1035,23 @@ class BacktestEngine:
         """
         date_str = date.strftime('%Y-%m-%d')
         
-        # 如果交易日历缓存已加载，使用缓存判断
-        if self.trading_calendar_cache:
-            # 缓存中只存了交易日，不在缓存中说明不是交易日
-            is_open = date_str in self.trading_calendar_cache
-            logger.debug(f"使用交易日历判断日期 {date_str} 是否为交易日: {is_open}")
-            return is_open
+        # 交易日历缓存未加载时，直接报错
+        if not self.trading_calendar_cache:
+            raise RuntimeError(
+                f"交易日历缓存未加载，无法判断 {date_str} 是否为交易日。"
+                f"请确保 _load_trading_calendar() 已成功执行。"
+            )
         
-        # 如果没有交易日历数据，使用简单的判断（仅过滤周末）
-        is_open = date.weekday() < 5
-        logger.debug(f"使用简单判断日期 {date_str} 是否为交易日: {is_open}")
+        # 缓存中只存了交易日，不在缓存中说明不是交易日
+        is_open = date_str in self.trading_calendar_cache
+        logger.debug(f"使用交易日历判断日期 {date_str} 是否为交易日: {is_open}")
         return is_open
     
     def _get_trading_dates(self, start_date: str, end_date: str) -> List[date]:
         """获取回测期间的交易日列表
         
-        直接从已加载的交易日历缓存中筛选，确保只处理真实交易日。
+        直接从前一步加载的交易日历缓存中筛选，确保只处理真实交易日。
+        不再降级到仅过滤周末的模式。
         
         Args:
             start_date: 开始日期
@@ -984,26 +1059,27 @@ class BacktestEngine:
             
         Returns:
             交易日期列表
+            
+        Raises:
+            RuntimeError: 交易日历缓存未加载
         """
         # 转换为日期对象
         start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
         end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
         
-        # 如果有排序好的交易日列表，直接筛选
-        if hasattr(self, '_sorted_trading_dates') and self._sorted_trading_dates:
-            dates = []
-            for d_str in self._sorted_trading_dates:
-                d = datetime.strptime(d_str, '%Y-%m-%d').date()
-                if start_dt <= d <= end_dt:
-                    dates.append(d)
-        else:
-            # fallback：逐日遍历，仅过滤周末
-            dates = []
-            current = start_dt
-            while current <= end_dt:
-                if self._is_trading_day(current):
-                    dates.append(current)
-                current += timedelta(days=1)
+        # 必须从已排序的交易日列表中筛选
+        if not (hasattr(self, '_sorted_trading_dates') and self._sorted_trading_dates):
+            raise RuntimeError(
+                "交易日历缓存未加载，无法获取回测交易日列表。"
+                "请确保 _load_trading_calendar() 已成功执行。"
+            )
+        
+        # 从已排序的交易日列表中筛选
+        dates = []
+        for d_str in self._sorted_trading_dates:
+            d = datetime.strptime(d_str, '%Y-%m-%d').date()
+            if start_dt <= d <= end_dt:
+                dates.append(d)
         
         # 打印回测交易日列表
         logger.info(f"回测交易日: {start_date} 至 {end_date}，共 {len(dates)} 个交易日")
