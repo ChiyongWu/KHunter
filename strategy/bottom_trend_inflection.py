@@ -6,6 +6,9 @@
 2. MACD底背离：股票价格创新低，但MACD指标不创新低
 3. 放量反弹：涨幅超过8%，当日成交量是前十日成交量均值的2.5倍以上
 
+核心设计：以"放量长阳日"为锚点，回溯检查该日当时的深度下跌和MACD底背离，
+而非以"今天"为锚点检查，避免放量反弹后价格脱离底部导致C2误杀。
+
 策略特点：
 - 捕捉底部反转机会
 - 多指标组合确认
@@ -78,7 +81,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         # MACD = DIF - DEA
         result['MACD'] = result['DIF'] - result['DEA']
         
-        # 计算成交量均线
+        # 计算成交量均线（前N日均量，排除当日）
         volume_ma_period = self.params['volume_ma_period']
         result['volume_ma'] = result['volume'].shift(1).rolling(
             window=volume_ma_period, min_periods=1
@@ -91,7 +94,17 @@ class BottomTrendInflectionStrategy(BaseStrategy):
     
     def select_stocks(self, df, stock_name='') -> list:
         """
-        选股逻辑 - 识别底部趋势拐点
+        选股逻辑 - 以放量长阳日为锚点，回溯检查深度下跌和MACD底背离
+        
+        核心流程（修复C2/C3互斥缺陷）：
+        1. 快速检查深度下跌（性能过滤）
+        2. 计算指标
+        3. 寻找放量长阳日（涨幅>8% + 量比>=2.5 的最近交易日）
+        4. 以放量长阳日为锚点回溯：
+           a. 检查深度下跌（从锚点前120天最高点计算）
+           b. 检查MACD底背离（锚点当时的价格和MACD关系）
+           c. 检查起涨点距离（距120日内最低点<=15%）
+           d. 检查回调支撑（放量长阳后收盘价未破开盘价）
         
         参数：
             df: 股票数据DataFrame（倒序，从新到旧，最新在index=0）
@@ -99,10 +112,6 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         
         返回：
             选股信号列表
-        
-        数据顺序说明：
-            - df是倒序的（从新到旧），最新数据在index=0
-            - 使用iloc[0]获取最新数据，iloc[-1]获取最旧数据
         """
         # 基本检查
         if df.empty or len(df) < self.params['lookback_days']:
@@ -118,71 +127,161 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             if stock_name.startswith('ST') or stock_name.startswith('*ST'):
                 return []
         
-        # 快速过滤：检查是否满足深度下跌条件（使用原始数据，避免计算指标）
-        # 这样可以在计算复杂指标前快速排除不符合条件的股票
+        # 快速过滤：检查是否满足深度下跌条件（性能优化，使用原始数据）
         if not self._quick_check_deep_decline(df):
             return []
         
         # 计算指标（只调用一次）
         df_with_indicators = self.calculate_indicators(df)
         
-        # 获取最新一天的数据
-        latest = df_with_indicators.iloc[0]
-        latest_date = latest['date']
-        
         # 检查最新一天是否有有效交易
+        latest = df_with_indicators.iloc[0]
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
         
-        # 获取回溯期间的数据
+        # Step 1: 寻找放量长阳日（最近10个交易日内）
+        surge_result = self._find_volume_surge(df_with_indicators)
+        if not surge_result:
+            return []
+        
+        surge_date_str, surge_pos, surge_row = surge_result
         lookback_days = self.params['lookback_days']
-        lookback_df = df_with_indicators.head(lookback_days)
         
-        # 检查三个条件
-        # 条件1：深度下跌（下跌幅度 > 45%）
-        if not self._check_deep_decline(lookback_df):
+        # Step 2: 以放量长阳日为锚点，截取锚点之前的数据用于C1/C2检查
+        # 数据倒序排列，surge_pos是放量日在df中的索引位置
+        # 截取从放量日开始、往前lookback_days天的数据
+        anchor_df = df_with_indicators.iloc[surge_pos: surge_pos + lookback_days]
+        
+        if anchor_df.empty or len(anchor_df) < self.params['macd_divergence_days']:
             return []
         
-        # 条件2：MACD底背离
-        if not self._check_macd_divergence(lookback_df):
+        # Step 3: 检查条件1 - 深度下跌（从锚点回溯120天）
+        if not self._check_deep_decline(anchor_df):
             return []
         
-        # 条件3：放量反弹（需要在最近10个交易日内发生）
-        volume_surge_result = self._check_volume_surge(df_with_indicators)
-        if not volume_surge_result:
+        # Step 4: 检查条件2 - MACD底背离（锚点当时的价格与MACD）
+        if not self._check_macd_divergence(anchor_df):
             return []
         
-        # 获取放量长阳日的日期
-        key_date = volume_surge_result if isinstance(volume_surge_result, str) else latest_date
-        
-        # 格式化日期
-        if hasattr(key_date, 'strftime'):
-            key_date_str = key_date.strftime('%Y-%m-%d')
-        else:
-            key_date_str = str(key_date)[:10]
-        
-        # 三个条件都满足，生成选股信号
+        # 所有条件满足，生成选股信号
         signal_info = {
-            'key_date': key_date_str,
+            'key_date': surge_date_str,
             'key_date_type': '放量长阳日',
             'reasons': ['深度下跌45%以上', 'MACD底背离', '放量反弹']
         }
         
         return [signal_info]
     
+    def _find_volume_surge(self, df):
+        """
+        在最近10个交易日内寻找放量长阳日，并验证子条件
+        
+        放量长阳定义：
+        1. 当日涨幅 > 8%（相对前一日收盘）
+        2. 当日量比 >= 2.5（相对前10日均量）
+        
+        子条件（在找到放量日后验证）：
+        - 起涨点距120日最低点 <= 15%
+        - 放量日后收盘价未有效跌破长阳开盘价（支撑验证）
+        
+        FIX 缺陷1: 最低点查找限定在放量日之前的数据
+        FIX 缺陷2: 支撑检查使用收盘价 >= 开盘价，而非最低价
+        FIX 缺陷3: 放量日=最新日时，无后续数据 → 支撑条件满足
+        
+        参数：
+            df: 完整的股票数据（倒序，包含指标列）
+        
+        返回：
+            - (surge_date_str, surge_pos, surge_row) 元组 如果找到
+            - None 如果未找到
+        """
+        if df.empty or len(df) < 11:
+            return None
+        
+        # 获取最近10个交易日的数据（需要前一日计算涨幅，所以取11条）
+        recent_10_days = df.head(11)
+        lookback_days = self.params['lookback_days']
+        price_threshold = self.params['price_increase_threshold']
+        vol_threshold = self.params['volume_ratio_threshold']
+        
+        # 遍历最近10个交易日，寻找放量反弹
+        for i in range(len(recent_10_days) - 1):
+            current_day = recent_10_days.iloc[i]
+            prev_day = recent_10_days.iloc[i + 1]
+            
+            # 检查数据有效性
+            if pd.isna(current_day['close']) or pd.isna(current_day['volume']):
+                continue
+            if pd.isna(prev_day['close']) or pd.isna(prev_day['volume']) or prev_day['volume'] <= 0:
+                continue
+            if pd.isna(current_day['volume_ma']) or current_day['volume_ma'] <= 0:
+                continue
+            
+            # 计算当日涨幅（相对前一日收盘）
+            price_increase = (current_day['close'] - prev_day['close']) / prev_day['close']
+            if price_increase <= price_threshold:
+                continue
+            
+            # 计算量比（当日成交量 / 前10日均量）
+            volume_ratio = current_day['volume'] / current_day['volume_ma']
+            if volume_ratio < vol_threshold:
+                continue
+            
+            # 找到放量长阳日，获取在完整df中的位置
+            surge_day_idx = df[df['date'] == current_day['date']].index
+            if surge_day_idx.empty:
+                continue
+            surge_pos = surge_day_idx[0]
+            
+            # 子条件检查1: 起涨点距最低点距离
+            # FIX: 最低点从放量日往前120天找，不包含放量日之后的数据
+            anchor_data = df.iloc[surge_pos: surge_pos + lookback_days]
+            if anchor_data.empty:
+                continue
+            lowest_price = anchor_data['low'].min()
+            
+            if lowest_price > 0:
+                distance_ratio = (current_day['close'] - lowest_price) / lowest_price
+            else:
+                distance_ratio = float('inf')
+            
+            if distance_ratio > 0.15:
+                continue
+            
+            # 子条件检查2: 回调支撑条件
+            # FIX: 使用收盘价 >= 开盘价（而非最低价 >= 开盘价），更符合实际交易
+            support_price = current_day['open']
+            
+            # FIX: 放量日就是最新日(surge_pos=0)，无后续天数 → 支撑条件满足
+            if surge_pos == 0:
+                pass  # 无后续数据，支撑自然成立
+            else:
+                after_surge = df.iloc[:surge_pos]
+                # 检查放量日后每个交易日的收盘价是否都不低于长阳开盘价
+                if (after_surge['close'] < support_price).any():
+                    continue
+            
+            # 所有子条件通过
+            surge_date_str = str(current_day['date'])
+            if len(surge_date_str) > 10:
+                surge_date_str = surge_date_str[:10]
+            return (surge_date_str, surge_pos, current_day)
+        
+        return None
+    
     def _check_deep_decline(self, df) -> bool:
         """
         检查条件1：深度下跌
         
         判断逻辑：
-        - 数据按倒序排列（从新到旧）
+        - 数据按倒序排列（从新到旧，锚点在index=0）
         - 找到最高价出现的位置
-        - 然后在该位置之后（时间上更近）找最低价
+        - 在最高价之后（时间上更近，向锚点方向）找最低价
         - 计算下跌幅度 = (最高价 - 最低价) / 最高价
         - 判断下跌幅度是否 > 45%
         
         参数：
-            df: 回溯期间的数据（倒序）
+            df: 以锚点为起点的回溯数据（倒序，锚点在index=0）
         
         返回：
             True 如果满足深度下跌条件，否则 False
@@ -198,8 +297,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if pd.isna(highest_price) or highest_price <= 0:
             return False
         
-        # 在最高价之后（时间上更近）找最低价
-        # 从最高价位置到最新一天的数据中找最低价
+        # 在最高价之后（时间上更近，即锚点方向）找最低价
         after_highest = df.iloc[:highest_pos]
         
         if after_highest.empty:
@@ -215,7 +313,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
     
     def _quick_check_deep_decline(self, df) -> bool:
         """
-        快速检查：深度下跌（在计算指标前进行）
+        快速检查：深度下跌（在计算指标前进行，性能优化）
         
         这个方法在计算指标前快速检查是否满足深度下跌条件
         使用原始数据，避免不必要的指标计算
@@ -260,12 +358,11 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         检查条件2：MACD底背离
         
         判断逻辑：
-        - 在最近N个交易日内，检查是否存在底背离
-        - 底背离定义：价格创近期新低，但MACD柱没有创同期新低
-        - 即：当前最低价是近期最低价 AND 当前MACD柱不是同期最低价
+        - 以锚点（index=0）"当时"的价格和MACD来判断底背离
+        - 底背离定义：锚点价格在近期低点附近 AND MACD柱未创同期新低
         
         参数：
-            df: 回溯期间的数据（倒序）
+            df: 以锚点为起点的回溯数据（倒序，锚点在index=0）
         
         返回：
             True 如果存在MACD底背离，否则 False
@@ -280,120 +377,36 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if recent_df.empty or len(recent_df) < 5:  # 至少需要5天数据
             return False
         
-        # 获取当前（最新）的数据 - 使用最低价判断是否创新低
-        current_low = df.iloc[0]['low']
-        current_macd = df.iloc[0]['MACD']
+        # 获取锚点（放量长阳日当时）的数据 - 使用最低价判断是否创新低
+        anchor_low = df.iloc[0]['low']
+        anchor_macd = df.iloc[0]['MACD']
         
         # 检查是否为NaN
-        if pd.isna(current_macd) or pd.isna(current_low):
+        if pd.isna(anchor_macd) or pd.isna(anchor_low):
             return False
         
-        # 获取近期数据（排除当前一天，使用前N天的数据）
-        recent_data = recent_df.iloc[1:]
+        # 获取锚点之前的数据（排除锚点自身，向前N天）
+        past_data = recent_df.iloc[1:]
         
-        if recent_data.empty:
+        if past_data.empty:
             return False
         
-        # 计算近期最低价和最低MACD柱
-        recent_lowest_price = recent_data['low'].min()
-        recent_lowest_macd = recent_data['MACD'].min()
+        # 计算锚点之前的最低价和最低MACD柱
+        past_lowest_price = past_data['low'].min()
+        past_lowest_macd = past_data['MACD'].min()
         
         # 检查是否为NaN
-        if pd.isna(recent_lowest_price) or pd.isna(recent_lowest_macd):
+        if pd.isna(past_lowest_price) or pd.isna(past_lowest_macd):
             return False
         
         # 底背离判断：
-        # 1. 当前最低价 <= 近期最低价（价格创近期新低或接近新低）
-        # 2. 当前MACD柱 > 近期最低MACD柱（MACD柱没有创同期新低）
+        # 1. 锚点最低价在近期最低价附近（允许2%误差）→ 价格接近底部
+        # 2. 锚点MACD柱 > 近期最低MACD柱 → MACD没有同步创新低
+        price_at_low = anchor_low <= past_lowest_price * 1.02
+        macd_not_at_low = anchor_macd > past_lowest_macd
         
-        price_at_low = current_low <= recent_lowest_price * 1.02  # 允许2%的误差
-        macd_not_at_low = current_macd > recent_lowest_macd
-        
-        # 底背离条件：价格创近期新低，且MACD柱没有创同期新低
+        # 底背离条件：价格在底部附近，且MACD柱没有创新低
         return price_at_low and macd_not_at_low
-    
-    def _check_volume_surge(self, df):
-        """
-        检查条件3：放量反弹
-        
-        判断逻辑：
-        - 在最近10个交易日内寻找放量反弹
-        - 放量反弹定义：
-          1. 涨幅 > 8%
-          2. 成交量 >= 2.5倍前10日均量
-        
-        参数：
-            df: 完整的股票数据（倒序）
-        
-        返回：
-            - 如果满足条件，返回放量长阳日的日期字符串
-            - 如果不满足条件，返回False
-        """
-        if df.empty or len(df) < 11:
-            return False
-        
-        # 获取最近10个交易日的数据（包括当前一天）
-        recent_10_days = df.head(11)
-        
-        # 遍历最近10个交易日，寻找放量反弹
-        for i in range(len(recent_10_days) - 1):
-            current_day = recent_10_days.iloc[i]
-            prev_day = recent_10_days.iloc[i + 1]
-            
-            # 检查数据有效性
-            if pd.isna(current_day['close']) or pd.isna(current_day['volume']):
-                continue
-            if pd.isna(prev_day['close']) or pd.isna(prev_day['volume']) or prev_day['volume'] <= 0:
-                continue
-            if pd.isna(current_day['volume_ma']) or current_day['volume_ma'] <= 0:
-                continue
-            
-            # 计算涨幅
-            price_increase = (current_day['close'] - prev_day['close']) / prev_day['close']
-            
-            # 检查涨幅条件
-            price_increase_threshold = self.params['price_increase_threshold']
-            if price_increase <= price_increase_threshold:
-                continue
-            
-            # 检查成交量条件
-            volume_ratio = current_day['volume'] / current_day['volume_ma']
-            volume_ratio_threshold = self.params['volume_ratio_threshold']
-            
-            if volume_ratio >= volume_ratio_threshold:
-                # 检查起涨点距离条件
-                # 找到最近的最低点
-                lookback_days = self.params['lookback_days']
-                recent_data = df.head(lookback_days)
-                lowest_price = recent_data['low'].min()
-                
-                # 计算起涨点距离
-                if lowest_price > 0:
-                    distance_ratio = (current_day['close'] - lowest_price) / lowest_price
-                else:
-                    distance_ratio = 0
-                
-                # 距离要求：起涨点距离最低点 <= 15%
-                if distance_ratio <= 0.15:
-                    # 检查回调支撑条件：放量长阳后回调不低于长阳线开盘价
-                    # 获取放量长阳日之后到今天的数据
-                    surge_day_idx = df[df['date'] == current_day['date']].index
-                    if not surge_day_idx.empty:
-                        surge_day_pos = surge_day_idx[0]
-                        # 从放量长阳日到今天（最新交易日）
-                        after_surge = df.iloc[:surge_day_pos]
-                        
-                        if not after_surge.empty:
-                            # 获取放量长阳日的开盘价作为支撑位
-                            support_price = current_day['open']
-                            # 检查所有交易日的最低价
-                            all_above_support = (after_surge['low'] >= support_price).all()
-                            
-                            if all_above_support:
-                                # 找到放量反弹，返回日期
-                                return str(current_day['date'])
-        
-        return False
     
     def get_selection_criteria(self):
         """
