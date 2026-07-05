@@ -3,11 +3,12 @@
 
 选股条件（三个条件都必须满足）：
 1. 深度下跌：从半年内最高点计算，下跌幅度超过45%
-2. MACD底背离：股票价格创新低，但MACD指标不创新低
+2. MACD底背离：历史中已形成底背离结构（两次探底，价格新低但MACD不新低）
 3. 放量反弹：涨幅超过8%，当日成交量是前十日成交量均值的2.5倍以上
 
-核心设计：以"放量长阳日"为锚点，回溯检查该日当时的深度下跌和MACD底背离，
-而非以"今天"为锚点检查，避免放量反弹后价格脱离底部导致C2误杀。
+核心设计：以"放量长阳日"为锚点，回溯检查：
+- C1 深度下跌：以锚点当时的价格计算
+- C2 MACD底背离：在锚点之前的历史区间中查找已形成的底背离结构
 
 策略特点：
 - 捕捉底部反转机会
@@ -96,13 +97,13 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         """
         选股逻辑 - 以放量长阳日为锚点，回溯检查深度下跌和MACD底背离
         
-        核心流程（修复C2/C3互斥缺陷）：
+        核心流程：
         1. 快速检查深度下跌（性能过滤）
         2. 计算指标
         3. 寻找放量长阳日（涨幅>8% + 量比>=2.5 的最近交易日）
         4. 以放量长阳日为锚点回溯：
            a. 检查深度下跌（从锚点前120天最高点计算）
-           b. 检查MACD底背离（锚点当时的价格和MACD关系）
+           b. 检查MACD底背离（锚点之前的历史中已形成底背离结构）
            c. 检查起涨点距离（距120日内最低点<=15%）
            d. 检查回调支撑（放量长阳后收盘价未破开盘价）
         
@@ -358,55 +359,56 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         检查条件2：MACD底背离
         
         判断逻辑：
-        - 以锚点（index=0）"当时"的价格和MACD来判断底背离
-        - 底背离定义：锚点价格在近期低点附近 AND MACD柱未创同期新低
+        - 检查放量长阳日之前20个交易日内是否出现过MACD底背离
+        - 底背离定义：两次探底，后一次价格更低，但MACD柱更高（不创新低）
+        
+        方法：
+        - 排除锚点（放量日），取放量日之前20日数据
+        - 分为前后两段（各10日），各找最低价点
+        - 后半段最低价更低、且MACD更高 → 底背离成立
         
         参数：
             df: 以锚点为起点的回溯数据（倒序，锚点在index=0）
         
         返回：
-            True 如果存在MACD底背离，否则 False
+            True 如果放量日前20日内存在MACD底背离
         """
-        if df.empty or len(df) < 2:
+        if df.empty or len(df) < 22:  # 至少需要锚点 + 20日前数据
             return False
         
-        # 获取最近N天的数据（用于判断底背离）
         divergence_days = self.params['macd_divergence_days']
-        recent_df = df.head(divergence_days)
+        # 排除锚点（放量长阳日），取放量日之前 divergence_days 天数据
+        pre_surge_df = df.iloc[1: 1 + divergence_days]
         
-        if recent_df.empty or len(recent_df) < 5:  # 至少需要5天数据
+        if pre_surge_df.empty or len(pre_surge_df) < 10:
             return False
         
-        # 获取锚点（放量长阳日当时）的数据 - 使用最低价判断是否创新低
-        anchor_low = df.iloc[0]['low']
-        anchor_macd = df.iloc[0]['MACD']
+        # 转为正序（从旧到新），便于按时间分段分析
+        recent_df = pre_surge_df.sort_values('date', ascending=True).reset_index(drop=True)
         
-        # 检查是否为NaN
-        if pd.isna(anchor_macd) or pd.isna(anchor_low):
+        # 分为前后两半段，各约10天
+        mid = len(recent_df) // 2
+        first_half = recent_df.iloc[:mid]   # 前半段（较早）
+        second_half = recent_df.iloc[mid:]  # 后半段（较近）
+        
+        if first_half.empty or second_half.empty:
             return False
         
-        # 获取锚点之前的数据（排除锚点自身，向前N天）
-        past_data = recent_df.iloc[1:]
+        # 找到每半段的价格最低点及其MACD
+        first_low = first_half.loc[first_half['low'].idxmin()]
+        second_low = second_half.loc[second_half['low'].idxmin()]
         
-        if past_data.empty:
-            return False
-        
-        # 计算锚点之前的最低价和最低MACD柱
-        past_lowest_price = past_data['low'].min()
-        past_lowest_macd = past_data['MACD'].min()
-        
-        # 检查是否为NaN
-        if pd.isna(past_lowest_price) or pd.isna(past_lowest_macd):
+        # NaN检查
+        if pd.isna(first_low['MACD']) or pd.isna(second_low['MACD']):
             return False
         
         # 底背离判断：
-        # 1. 锚点最低价在近期最低价附近（允许2%误差）→ 价格接近底部
-        # 2. 锚点MACD柱 > 近期最低MACD柱 → MACD没有同步创新低
-        price_at_low = anchor_low <= past_lowest_price * 1.02
-        macd_not_at_low = anchor_macd > past_lowest_macd
+        # 1. 后半段最低价 < 前半段最低价 → 价格创新低
+        # 2. 后半段MACD柱 > 前半段MACD柱 → MACD不创新低（背离）
+        price_lower = second_low['low'] < first_low['low']
+        macd_higher = second_low['MACD'] > first_low['MACD']
         
-        # 底背离条件：价格在底部附近，且MACD柱没有创新低
-        return price_at_low and macd_not_at_low
+        return price_lower and macd_higher
     
     def get_selection_criteria(self):
         """
