@@ -160,7 +160,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if not self._check_deep_decline(anchor_df):
             return []
         
-        # Step 4: 检查条件2 - MACD底背离（锚点当时的价格与MACD）
+        # Step 4: 检查条件2 - MACD底背离（锚点之前20日已形成底背离结构）
         if not self._check_macd_divergence(anchor_df):
             return []
         
@@ -422,9 +422,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         lookback_days = self.params['lookback_days']
         criteria.append(f"1. 深度下跌：从最近{lookback_days}个交易日内的最高点下跌幅度超过{decline_threshold:.0f}%")
         
-        # 条件2：MACD底背离
+        # 条件2：MACD底背离（放量长阳日前20日已形成底背离结构）
         macd_divergence_days = self.params['macd_divergence_days']
-        criteria.append(f"2. MACD底背离：在最近{macd_divergence_days}个交易日内，价格创新低但MACD不创新低")
+        criteria.append(f"2. MACD底背离：放量长阳日之前{macd_divergence_days}个交易日内，价格两次探底创新低但MACD未创新低（底背离结构已形成）")
         
         # 条件3：放量反弹
         price_increase_threshold = self.params['price_increase_threshold'] * 100
