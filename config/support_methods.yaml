@@ -77,6 +77,11 @@ strategies:
     support_method: ma20
     description: 趋势起点策略，使用20日均线作为支撑位
 
+  # 金叉不绿策略
+  GoldenCrossNotGreenStrategy:
+    support_method: ma20
+    description: MACD水上金叉策略，使用20日均线作为支撑位
+
   # 金三角策略
   GoldenTriangleStrategy:
     support_method: ma20

@@ -721,12 +721,18 @@ class BacktestEngine:
                 dates.append(current_date)
             
             # 4. 结束结算：计算剩余持仓市值（不创建虚拟卖出记录）
+            # 使用前一交易日收盘价进行结算，与主循环每日资产计算保持一致
             if positions:
                 logger.info("计算剩余持仓市值")
                 final_date = date_range[-1]
+                # 使用前一交易日收盘价，与主循环结算逻辑一致（避免未来函数）
+                prev_trading_day = self._get_previous_trading_day(final_date)
+                prev_day_str = prev_trading_day.strftime('%Y-%m-%d') if prev_trading_day else final_date.strftime('%Y-%m-%d')
                 for position in positions:
-                    # 计算当前市值（最后一日收盘价）
-                    current_price = self._get_stock_price(position['stock_code'], final_date, 'close')
+                    # 计算当前市值（使用前一交易日收盘价）
+                    current_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
+                    if current_price is None or current_price <= 0:
+                        current_price = position['buy_price']
                     current_value = current_price * position['quantity']
                     current_capital += current_value
                     logger.info(f"剩余持仓: {position['stock_code']} {position['stock_name']}, "
@@ -2129,7 +2135,8 @@ class BacktestEngine:
             if stock_code in self.stock_data_cache:
                 df = self.stock_data_cache[stock_code]
                 # 查找目标日期之前最近的有效收盘价
-                df_before = df[df['date'] < date_str].head(1)
+                # 数据按日期升序排列，使用 iloc[-1:] 确保取到最接近目标日期的最近一天
+                df_before = df[df['date'] < date_str].iloc[-1:]
                 if not df_before.empty and 'close' in df_before.columns:
                     prev_close = df_before.iloc[0]['close']
                     if prev_close is not None and not pd.isna(prev_close):
