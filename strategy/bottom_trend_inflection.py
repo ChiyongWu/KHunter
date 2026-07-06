@@ -4,11 +4,12 @@
 选股条件（三个条件都必须满足）：
 1. 深度下跌：从半年内最高点计算，下跌幅度超过45%
 2. MACD底背离：历史中已形成底背离结构（两次探底，价格新低但MACD不新低）
-3. 放量反弹：涨幅超过8%，当日成交量是前十日成交量均值的2.5倍以上
+3. 放量反弹：最近3-5个交易日内出现，涨幅超过8%，成交量是前十日成交量均值的2.5倍以上
 
 核心设计：以"放量长阳日"为锚点，回溯检查：
 - C1 深度下跌：以锚点当时的价格计算
 - C2 MACD底背离：在锚点之前的历史区间中查找已形成的底背离结构
+- 放量长阳日限定在最近3-5个交易日内，避免信号过于陈旧
 
 策略特点：
 - 捕捉底部反转机会
@@ -38,7 +39,9 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             'volume_ratio_threshold': 2.5,     # 成交量倍数阈值（2.5倍，相对于前10日均量）
             'price_increase_threshold': 0.08,  # 涨幅阈值（8%）
             'volume_ma_period': 10,            # 成交量均值周期（10日）
-            'macd_divergence_days': 20         # MACD底背离判断的时间窗口（交易日）
+            'macd_divergence_days': 20,        # MACD底背离判断的时间窗口（交易日）
+            'surge_search_start': 3,           # 放量长阳搜索起始偏移（第3个交易日起）
+            'surge_search_end': 5,             # 放量长阳搜索结束偏移（第5个交易日止）
         }
         
         # 合并用户参数
@@ -140,7 +143,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if latest['volume'] <= 0 or pd.isna(latest['close']):
             return []
         
-        # Step 1: 寻找放量长阳日（最近10个交易日内）
+        # Step 1: 寻找放量长阳日（最近3-5个交易日内）
         surge_result = self._find_volume_surge(df_with_indicators)
         if not surge_result:
             return []
@@ -175,7 +178,7 @@ class BottomTrendInflectionStrategy(BaseStrategy):
     
     def _find_volume_surge(self, df):
         """
-        在最近10个交易日内寻找放量长阳日，并验证子条件
+        在最近 surge_search_start ~ surge_search_end 个交易日内寻找放量长阳日
         
         放量长阳定义：
         1. 当日涨幅 > 8%（相对前一日收盘）
@@ -185,9 +188,10 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         - 起涨点距120日最低点 <= 15%
         - 放量日后收盘价未有效跌破长阳开盘价（支撑验证）
         
-        FIX 缺陷1: 最低点查找限定在放量日之前的数据
-        FIX 缺陷2: 支撑检查使用收盘价 >= 开盘价，而非最低价
-        FIX 缺陷3: 放量日=最新日时，无后续数据 → 支撑条件满足
+        搜索范围：
+        - 跳过最近 surge_search_start-1 天，从第 surge_search_start 天开始
+        - 最远搜索到第 surge_search_end 天
+        - 默认 3~5：只检查第3、4、5个交易日（0=最新，跳过最近2天）
         
         参数：
             df: 完整的股票数据（倒序，包含指标列）
@@ -196,19 +200,24 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             - (surge_date_str, surge_pos, surge_row) 元组 如果找到
             - None 如果未找到
         """
-        if df.empty or len(df) < 11:
+        surge_start = self.params['surge_search_start']  # 如 3
+        surge_end = self.params['surge_search_end']      # 如 5
+        
+        # 需要 surge_end+1 天数据（候选日 + 1 天用于计算涨幅）
+        if df.empty or len(df) <= surge_end:
             return None
         
-        # 获取最近10个交易日的数据（需要前一日计算涨幅，所以取11条）
-        recent_10_days = df.head(11)
         lookback_days = self.params['lookback_days']
         price_threshold = self.params['price_increase_threshold']
         vol_threshold = self.params['volume_ratio_threshold']
         
-        # 遍历最近10个交易日，寻找放量反弹
-        for i in range(len(recent_10_days) - 1):
-            current_day = recent_10_days.iloc[i]
-            prev_day = recent_10_days.iloc[i + 1]
+        # 遍历第 surge_start ~ surge_end 个交易日（0-based: surge_start-1 到 surge_end-1）
+        for i in range(surge_start - 1, surge_end):
+            if i >= len(df) - 1:
+                break
+            
+            current_day = df.iloc[i]
+            prev_day = df.iloc[i + 1]
             
             # 检查数据有效性
             if pd.isna(current_day['close']) or pd.isna(current_day['volume']):
@@ -228,14 +237,10 @@ class BottomTrendInflectionStrategy(BaseStrategy):
             if volume_ratio < vol_threshold:
                 continue
             
-            # 找到放量长阳日，获取在完整df中的位置
-            surge_day_idx = df[df['date'] == current_day['date']].index
-            if surge_day_idx.empty:
-                continue
-            surge_pos = surge_day_idx[0]
+            # 放量长阳日在df中的位置即为 i
+            surge_pos = i
             
             # 子条件检查1: 起涨点距最低点距离
-            # FIX: 最低点从放量日往前120天找，不包含放量日之后的数据
             anchor_data = df.iloc[surge_pos: surge_pos + lookback_days]
             if anchor_data.empty:
                 continue
@@ -250,13 +255,10 @@ class BottomTrendInflectionStrategy(BaseStrategy):
                 continue
             
             # 子条件检查2: 回调支撑条件
-            # FIX: 使用收盘价 >= 开盘价（而非最低价 >= 开盘价），更符合实际交易
             support_price = current_day['open']
             
-            # FIX: 放量日就是最新日(surge_pos=0)，无后续天数 → 支撑条件满足
-            if surge_pos == 0:
-                pass  # 无后续数据，支撑自然成立
-            else:
+            # 放量日之后到最新日之间的数据（索引更小的行）
+            if surge_pos > 0:
                 after_surge = df.iloc[:surge_pos]
                 # 检查放量日后每个交易日的收盘价是否都不低于长阳开盘价
                 if (after_surge['close'] < support_price).any():
@@ -426,10 +428,12 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         macd_divergence_days = self.params['macd_divergence_days']
         criteria.append(f"2. MACD底背离：放量长阳日之前{macd_divergence_days}个交易日内，价格两次探底创新低但MACD未创新低（底背离结构已形成）")
         
-        # 条件3：放量反弹
+        # 条件3：放量反弹（在最近3-5个交易日内）
         price_increase_threshold = self.params['price_increase_threshold'] * 100
         volume_ratio_threshold = self.params['volume_ratio_threshold']
         volume_ma_period = self.params['volume_ma_period']
-        criteria.append(f"3. 放量反弹：涨幅超过{price_increase_threshold:.0f}%，且成交量是前{volume_ma_period}日均量的{volume_ratio_threshold:.1f}倍以上")
+        surge_start = self.params['surge_search_start']
+        surge_end = self.params['surge_search_end']
+        criteria.append(f"3. 放量反弹：最近{surge_start}-{surge_end}个交易日内出现，涨幅超过{price_increase_threshold:.0f}%，且成交量是前{volume_ma_period}日均量的{volume_ratio_threshold:.1f}倍以上")
         
         return criteria
