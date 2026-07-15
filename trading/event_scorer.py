@@ -13,6 +13,7 @@
   5. 龙虎榜（top_list）- 5天
   6. 个股异常波动（stk_shock）- 10天
   7. ST状态（stock_basic）- 实时
+  8. 减持计划公告（AKShare巨潮披露）- 180天
 
 正面事件（加分）：
   - 业绩预增（增幅>50%）：+20分（20天）
@@ -33,6 +34,7 @@
   - 被ST或*ST：-100分
   - 业绩暴雷（预减>80%或巨亏）：-100分
   - 大股东减持：-100分
+  - 减持计划公告（预披露）：-100分（一律否决）
 
 综合公式：
   事件驱动得分 = 50 + Σ(正面事件加分) + Σ(负面事件减分)
@@ -40,6 +42,7 @@
 """
 
 import json
+import re
 import time
 import logging
 from datetime import datetime, timedelta
@@ -49,6 +52,13 @@ import pandas as pd
 
 # 导入事件驱动详情模型
 from trading.stock_score_models import EventDetail
+# 减持计划数据源解耦：关键词常量与数据层统一来自 trading.reduce_plan_cache
+from trading import reduce_plan_cache as rpc
+from trading.reduce_plan_cache import (
+    REDUCE_PLAN_KEYWORDS, REDUCE_PLAN_EXCLUDE, REDUCE_PLAN_VALIDITY,
+    is_reduce_plan_title,
+)
+from trading import reduce_plan_cache as rpc
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
@@ -90,6 +100,12 @@ NEGATIVE_SCORES = {
     "大宗交易折价": -10,     # 大宗交易折价>5%
     "龙虎榜净卖出": -10,     # 龙虎榜净卖出
 }
+
+# 减持计划公告（预披露）配置 —— 数据源：直连巨潮 hisAnnouncement/query（见 trading.reduce_plan_cache）
+# 减持计划利空 > 已实施减持，用户确认：所有减持计划公告一律触发一票否决
+# 关键词/排除词/有效期统一定义在 trading.reduce_plan_cache（单一权威源），本模块直接复用
+# 减持计划否决分值（与 VETO_SCORE 一致，一律否决）
+REDUCE_PLAN_VETO = VETO_SCORE  # 名称:减持计划否决分;类型:int;必填:否;默认:-100;备注:用户确认所有减持计划一律否决
 
 # Tushare API 重试配置
 MAX_RETRIES = 3        # 最大重试次数
@@ -928,6 +944,11 @@ class EventScorer:
         if is_major_sell:
             logger.warning(f"股票 {stock_code} 一票否决: {sell_reason}")
             return True, sell_reason
+        # 条件4：检查减持计划公告（预披露），用户确认一律否决
+        is_reduce_plan, plan_reason = self._check_reduce_plan(stock_code, formatted_date)
+        if is_reduce_plan:
+            logger.warning(f"股票 {stock_code} 一票否决: {plan_reason}")
+            return True, plan_reason
         return False, ""
 
     def _check_forecast_crash(self, stock_code: str, score_date: str) -> Tuple[bool, str]:
@@ -987,3 +1008,73 @@ class EventScorer:
                 if any(kw in holder_type for kw in ["大股东", "控股股东", "实际控制人", "5%以上"]):
                     return True, f"大股东减持（{holder_type}）"
         return False, ""
+
+    def _is_reduce_plan(self, title: str) -> bool:
+        """
+        判断公告标题是否为"减持计划（预披露）"公告（委托纯函数，便于单测）。
+
+        参数:
+            title: 公告标题文本
+        返回:
+            bool: 是否为减持计划公告
+        """
+        # 委托给 reduce_plan_cache 的纯函数（关键词权威源，避免重复定义）
+        return is_reduce_plan_title(title)
+
+    def _check_reduce_plan(self, stock_code: str, score_date: str) -> Tuple[bool, str]:
+        """
+        经本地缓存（数据层）核查减持计划公告（预披露）
+
+        减持计划利空大于已实施减持，用户确认所有减持计划公告一律触发一票否决。
+        优先读取离线刷新的本地缓存文件（评分零网络请求，免疫巨潮限流）；
+        缓存缺失或过期才回退实时调用巨潮并落盘，失败则沿用旧缓存避免漏判。
+
+        参数:
+            stock_code: 股票代码（6位数字）
+            score_date: 评分日期（YYYYMMDD 格式）
+        返回:
+            Tuple[bool, str]: (是否命中减持计划, 原因描述)
+        """
+        # 计算有效期起始日期（用于过滤缓存中仍有效的计划）
+        start_date = self._get_start_date(score_date, REDUCE_PLAN_VALIDITY)
+
+        def _match(plans):
+            # 在计划列表中找到有效期内命中的减持计划
+            for p in plans:
+                ann_date = p.get("ann_date", "")
+                # 上界约束：公告日不得晚于评分日。防止回测/历史重放时误用
+                # 尚未发布的"未来公告"造成提前函数（look-ahead bias）。
+                # 实盘 score_date=当天时该上界恒成立（缓存公告均<=当天），无副作用。
+                if ann_date and start_date <= ann_date <= score_date:
+                    return True, f"减持计划公告：{p.get('title', '')}"
+            return False, ""
+
+        # 优先读取本地缓存文件（离线阶段批量刷新，评分零网络请求）
+        updated_date, plans = rpc.get_plans(stock_code)
+        if rpc.is_fresh(updated_date, score_date):
+            hit, reason = _match(plans)
+            # 缓存新鲜：直接判定，命中即否决
+            if hit:
+                return hit, reason
+            return False, ""
+        # 缓存缺失或过期：回退实时调用巨潮（保留重试退避），成功后落盘
+        try:
+            fresh_plans = rpc.fetch_reduce_plans(stock_code, score_date)
+            # 实时拉取失败（限流/异常）返回 None：不写缓存，进入 except 沿用旧缓存
+            if fresh_plans is None:
+                raise RuntimeError("减持计划实时拉取失败")
+            # 落盘（即便为空也刷新 updated_date，避免每日重复实时请求）
+            # 仅实盘（评分日=当天）写回实盘缓存；回测/历史重放不写回，避免污染真实缓存
+            if score_date == datetime.now().strftime("%Y%m%d"):
+                rpc.upsert_plan(stock_code, fresh_plans, score_date)
+            hit, reason = _match(fresh_plans)
+            if hit:
+                return hit, reason
+            return False, ""
+        except Exception as e:
+            logger.error(f"减持计划实时查询异常: {stock_code}, {e}")
+            # 实时失败：沿用旧缓存（不漏判）；无旧缓存则降级未命中
+            hit, reason = _match(plans)
+            if hit:
+                return hit, reason
+            return False, ""
