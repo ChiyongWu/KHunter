@@ -21,6 +21,15 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class PTradeFeedbackError(Exception):
+    """PTrade 反馈处理异常
+
+    反馈文件不完整（Fund/Hold 任一缺失）或解析失败时抛出，
+    用于终止反馈处理流程，由调用方（sync_portfolio_from_ptrade）捕获并安全返回。
+    """
+
+
 # 默认反馈文件目录（相对于项目根目录）
 DEFAULT_FEEDBACK_DIR = "data/running/ptrade_feedback"
 
@@ -37,6 +46,10 @@ EXCHANGE_SUFFIX_MAP = {
     "沪A": ".SH",
     "上海A股": ".SH",
 }
+
+# ETF 代码前缀（KHunter 只处理股票，ETF 由其他系统管理）
+# 沪市 ETF: 51xxxx, 50xxxx, 588xxx / 深市 ETF: 15xxxx, 16xxxx
+ETF_CODE_PREFIXES = ('15', '16', '50', '51', '588')
 
 
 class PTradeFeedbackHandler:
@@ -71,14 +84,20 @@ class PTradeFeedbackHandler:
         # 解析 ptrade 子配置
         ptrade_cfg = config.get('ptrade', {}) if config else {}
         # PTrade 反馈文件所在目录（来自配置或默认值）
-        feedback_dir_rel = ptrade_cfg.get('feedback_dir', DEFAULT_FEEDBACK_DIR)
-        self.feedback_dir = os.path.join(project_root, feedback_dir_rel)
+        # 支持绝对路径（如 D:/ptrade/input）和相对路径（如 data/running/ptrade_feedback）
+        feedback_dir_cfg = ptrade_cfg.get('feedback_dir', DEFAULT_FEEDBACK_DIR)
+        if os.path.isabs(feedback_dir_cfg):
+            self.feedback_dir = feedback_dir_cfg
+        else:
+            self.feedback_dir = os.path.join(project_root, feedback_dir_cfg)
         # PTrade 是否启用
         self.enabled = ptrade_cfg.get('enabled', True) if ptrade_cfg else True
         # 返回文件读取模式
         self.feedback_mode = ptrade_cfg.get('feedback_mode', 'file') if ptrade_cfg else 'file'
         # KHunter 运行数据目录
         self.running_dir = os.path.join(project_root, DEFAULT_RUNNING_DIR)
+        # ETF 持仓市值累积（read_holdings 跳过 ETF 时暂存，供 build_portfolio 使用）
+        self._etf_market_value = 0.0
         # 初始资金（来自 trading.initial_capital 或默认值）
         trading_cfg = config.get('trading', {}) if config else {}
         self.initial_capital = float(trading_cfg.get(
@@ -242,6 +261,7 @@ class PTradeFeedbackHandler:
             raise FileNotFoundError(f"Hold 文件不存在: {hold_file}")
 
         holdings = []
+        self._etf_market_value = 0.0  # 重置 ETF 市值累积值
         with open(hold_file, 'r', encoding='gbk') as f:
             reader = csv.reader(f)
             # 读取表头并构建列名索引
@@ -267,6 +287,14 @@ class PTradeFeedbackHandler:
                 # 提取关键字段
                 trade_category = _safe_str(col_map.get("交易类别", 3))
                 stock_code_raw = _safe_str(col_map.get("证券代码", 4))
+                # ETF 过滤：KHunter 只处理股票，ETF 由其他系统管理
+                # 跳过 ETF 持仓但累积其市值，确保总资产不因过滤而减少
+                if stock_code_raw and stock_code_raw.startswith(ETF_CODE_PREFIXES):
+                    etf_mv = _safe_float(col_map.get("证券市值", 14))
+                    self._etf_market_value += etf_mv
+                    logger.info(f"PTrade 反馈: 跳过 ETF {stock_code_raw} "
+                                f"市值={etf_mv}，不纳入 KHunter 持仓，计入 ETF 资产")
+                    continue
                 stock_name = _safe_str(col_map.get("证券名称", 5))
                 quantity = _safe_int(col_map.get("持有数量", 6))
                 available_volume = _safe_int(col_map.get("可用数量", 7))
@@ -371,18 +399,30 @@ class PTradeFeedbackHandler:
             }
             new_positions[code] = position
         # 构建 portfolio
-        cash = fund["available_cash"]
+        # total_asset 来自 Fund 文件，包含 ETF 市值，不因过滤 ETF 持仓而扣减
+        total_asset = fund["total_asset"]
+        # 从股票持仓自算 market_value（不含 ETF），与 positions 保持一致
+        stock_market_value = round(sum(p["market_value"] for p in new_positions.values()), 2)
+        etf_mv = round(self._etf_market_value, 2)
+        # 可用余额通过「总资产 - 持仓金额」反算，而非直接取 Fund 可用资金列：
+        # Fund 可用资金列不含未成交委托冻结资金，直接用会偏小；
+        # 用总资产（含冻结、ETF）减去持仓市值（股票 + ETF）反推得到含冻结的可用余额
+        cash = round(total_asset - stock_market_value - etf_mv, 2)
         portfolio = {
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "cash": cash,
-            "total_asset": fund["total_asset"],
-            "market_value": fund["market_value"],
+            "total_asset": total_asset,                   # Fund 文件原始总资产，含 ETF
+            "market_value": stock_market_value,           # 仅股票市值（与 positions 一致）
+            "etf_market_value": etf_mv,                   # ETF 市值（独立追踪，不计入 market_value）
             "initial_capital": self.initial_capital,
             "positions": new_positions,
         }
-        logger.info(
-            f"PTrade 反馈: 构建 portfolio 完成 - "
-            f"现金={cash}, 总资产={fund['total_asset']}, 持仓数={len(new_positions)}")
+        log_msg = (f"PTrade 反馈: 构建 portfolio 完成 - "
+                   f"现金(总资产-持仓反算)={cash}, 总资产={total_asset}, "
+                   f"股票市值={stock_market_value}, 持仓数={len(new_positions)}")
+        if etf_mv > 0:
+            log_msg += f", ETF市值={etf_mv}"
+        logger.info(log_msg)
         return portfolio
 
     # ========== 主流程 ==========
@@ -401,12 +441,20 @@ class PTradeFeedbackHandler:
         Returns:
             处理结果 {success, portfolio_file, fund_data, holdings}
         """
-        # 步骤1: 检查文件
-        if not self.check_feedback_exists(feedback_date):
-            return {
-                "success": False,
-                "error": f"PTrade 反馈文件不存在: {feedback_date}",
-            }
+        # 步骤1: 检查文件完整性（Fund 与 Hold 必须同时存在）
+        # 文件不完整属于不可恢复的异常，直接抛出 PTradeFeedbackError 终止处理，
+        # 而非返回失败字典；调用方（sync_portfolio_from_ptrade）已用 try/except 包裹，
+        # 捕获异常后安全返回 False，不会写入不完整的 portfolio
+        fund_file = os.path.join(self.feedback_dir, f"Fund_{feedback_date}.csv")
+        hold_file = os.path.join(self.feedback_dir, f"Hold_{feedback_date}.csv")
+        missing_files = []
+        if not os.path.isfile(fund_file):
+            missing_files.append(f"Fund_{feedback_date}.csv")
+        if not os.path.isfile(hold_file):
+            missing_files.append(f"Hold_{feedback_date}.csv")
+        if missing_files:
+            raise PTradeFeedbackError(
+                f"反馈文件不完整: 缺少 {', '.join(missing_files)}")
         # 步骤2: 构建新 portfolio（自动模式不继承旧数据，内部读取 fund+holdings）
         portfolio = self.build_portfolio(feedback_date)
         # 步骤3: 保存（按交易日日期命名）
