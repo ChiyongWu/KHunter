@@ -94,6 +94,21 @@ class KlineUpdater:
             logger.info(f"目标更新日期: {target_date}")
             logger.info("=" * 60)
             
+            # 幂等保护：若上次更新日期已达到或超过目标更新日期，说明数据已是最新，直接跳过拉取避免重复请求
+            if last_update_date and last_update_date >= target_date:
+                # 记录跳过原因，便于运维在日志中确认幂等生效
+                logger.info(f"上次更新日期({last_update_date})与目标更新日期({target_date})一致或更新，跳过K线更新（数据已是最新）")
+                # 返回成功且零增零更的结果，保证上层统计与状态正常
+                return {
+                    'success': True,  # 标记为成功，避免上层误判为失败
+                    'added': 0,       # 新增K线条数为 0
+                    'updated': 0,     # 更新K线条数为 0
+                    'failed': 0,      # 失败股票数为 0
+                    'rebuilt': 0,     # 除权重建次数为 0
+                    'message': f'K线数据已是最新（上次更新: {last_update_date}），跳过更新',
+                    'total_time': (datetime.now() - start_time).total_seconds()
+                }
+            
             logger.info(f"开始更新K线数据: {len(stock_codes)} 只股票")
             
             # 第0步：检查数据源是否已准备好目标日期数据
@@ -393,7 +408,7 @@ class KlineUpdater:
         【TickFlow 版】使用 TickFlow 批量 API 一次获取一批股票的K线数据并批量保存
 
         TickFlow API 成功但个别股票无数据 → 正常（不降级），仅标记为 failed
-        TickFlow API 失败（限流/网络）→ 降级到腾讯财经逐只获取
+        TickFlow API 失败（限流/网络）→ 降级到腾讯财经批量并发获取（2线程，0.3s间隔）
 
         参数：
             batch_codes: 股票代码列表
@@ -414,18 +429,21 @@ class KlineUpdater:
                 days=days
             )
 
-            # TickFlow API 失败时，降级到腾讯财经逐只获取
+            # TickFlow API 失败时，降级到腾讯财经批量并发获取
             if not api_ok:
-                logger.warning(f"TickFlow API 失败，降级到腾讯财经逐只获取 {len(batch_codes)} 只...")
-                for code in batch_codes:
-                    if code in kline_data:
-                        continue  # 已有数据则跳过
-                    try:
-                        df = self.stock_data_fetcher.fetch_stock_update(code, days=days)
-                        if df is not None and len(df) > 0:
-                            kline_data[code] = df
-                    except Exception as e:
-                        logger.debug(f"腾讯财经降级获取 {code} 失败: {e}")
+                logger.warning(f"TickFlow API 失败，降级到腾讯财经批量获取 {len(batch_codes)} 只...")
+                # 仅获取 kline_data 中没有的股票
+                missing_codes = [c for c in batch_codes if c not in kline_data]
+                if missing_codes:
+                    # days 换算年份（腾讯财经按年份取历史），最少取 1 年
+                    years = max(1, days // 250 + 1)
+                    tencent_results = self.stock_data_fetcher._fetch_stock_batch_tencent(
+                        missing_codes, years=years, concurrency=2
+                    )
+                    # 腾讯财经返回全量历史，截取最近 days 天
+                    for code, df_full in tencent_results.items():
+                        if df_full is not None and len(df_full) > 0:
+                            kline_data[code] = df_full.tail(days).copy()
                 logger.info(f"腾讯财经降级补充: {len(kline_data)}/{len(batch_codes)} 只有数据")
 
             # 批量保存到数据库
