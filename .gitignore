@@ -44,7 +44,7 @@ reports/
 *.log
 
 # Configuration files (local)
-config/config.yaml
+# config/config.yaml 已纳入版本管理（自 2026-07-19 起跟踪，含流水线/数据源等运行配置；部署时按环境调整本地绝对路径，如 D:/ptrade/output）
 config/tushare_config.json
 
 # 备份文件
@@ -122,6 +122,8 @@ data/running/task_history.json
 data/running/last_exdividend_date.json
 data/running/ptrade_feedback/
 data/running/KHunter*.md
+data/running/reduce_plan_cache.json
+data/running/reduce_plan_cache.json.lock
 
 # 根目录其他一次性脚本
 fix_*.py
