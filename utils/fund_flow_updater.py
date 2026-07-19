@@ -259,6 +259,11 @@ class FundFlowUpdater:
             # 计算天数差
             days_diff = (target - last_date).days
             
+            # 若上次更新日期已达到或超过目标日期，说明数据已是最新，直接返回 0（由调用方短路跳过）
+            if days_diff <= 0:
+                logger.debug(f"上次更新日期 {last_update_date} 已 >= 目标日期 {target_date}，无需获取，返回 0")
+                return 0
+            
             # 为了确保获取到所有新数据，多获取2天
             days_to_fetch = max(days_diff + 2, 5)
             

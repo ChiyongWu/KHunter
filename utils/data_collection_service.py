@@ -3,6 +3,7 @@
 用于管理数据初始化和更新的业务逻辑
 """
 
+import json
 import logging
 import threading
 import time
@@ -688,14 +689,17 @@ class DataCollectionService:
         执行更新任务（在后台线程中运行）
         
         流程:
-        1. 检查交易时间和更新条件
-        2. 检测并初始化新股票
-        3. 获取所有股票列表
-        4. 查询上次更新日期
+        1. 检查交易时间和更新条件（得到 target_date）
+        2. 查询上次更新日期（前置）并进行幂等判断：若数据已最新则跳过全部更新步骤
+        3. 检测并初始化新股票
+        4. 获取所有股票列表
         5. 更新K线数据
         6. 更新资金流向数据
         7. 更新股票市值信息
-        8. 记录更新完成时间
+        8. 刷新减持计划缓存
+        9. 记录更新完成
+        10. 计算并保存市场温度
+        11. 计算并保存风控状态
         
         Args:
             task_id: 任务ID
@@ -724,7 +728,9 @@ class DataCollectionService:
                     'fund_flow_updated': 0,
                     'fund_flow_failed': 0,
                     'market_cap_updated': 0,
-                    'market_cap_failed': 0
+                    'market_cap_failed': 0,
+                    'reduce_plan_refreshed': 0,
+                    'reduce_plan_failed': 0
                 }
             
             self._add_update_log(f"✓ 更新任务 {task_id} 已启动")
@@ -747,11 +753,54 @@ class DataCollectionService:
             # 记录目标更新日期
             self._add_update_log(f"✓ 目标更新日期: {target_date}")
             
-            # 记录更新开始
+            # 记录更新开始（已弃用空操作，保留以兼容流程日志）
             validator.record_update_start(target_date)
             
-            # 【第2步】检测并初始化新股票（优先级最高）
-            self._add_update_log("【第2步】检测并初始化新股票...")
+            # 【第2步】查询上次更新日期（前置，用于幂等判断）
+            self._add_update_log("【第2步】查询上次更新日期...")
+            try:
+                last_update_date = validator.get_last_update_date()
+                
+                # 如果没有记录，使用默认日期（3天前），视为需要更新
+                if not last_update_date:
+                    last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+                
+                self._add_update_log(f"✓ 上次更新日期: {last_update_date}")
+            
+            except Exception as e:
+                self._add_update_log(f"✗ 查询上次更新日期失败: {str(e)}")
+                logger.error(f"查询上次更新日期失败: {str(e)}")
+                last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+            
+            # 【幂等保护】数据已是最新则跳过全部更新步骤，直接进入后续流程（策略运行）
+            # 判断依据：上次更新完成日期(last_update_date) >= 目标更新日期(target_date)
+            if last_update_date and last_update_date >= target_date:
+                # 记录跳过原因，便于运维在日志中确认幂等生效
+                self._add_update_log(
+                    f"ℹ 数据已是最新（上次更新日期 {last_update_date} >= 目标更新日期 {target_date}），"
+                    f"跳过全部更新步骤（新股票/股票列表/K线/资金流向/市值/减持缓存/市场温度/风控），直接结束更新任务"
+                )
+                logger.info(
+                    f"数据已是最新（{last_update_date} >= {target_date}），幂等跳过全部更新步骤，"
+                    f"流水线将直接进入策略运行"
+                )
+                # 闭合更新状态：标记为完成且成功，确保上层 PipelineOrchestrator 判定为 success 并继续执行策略
+                with self.update_lock:
+                    self.update_status['status'] = 'completed'   # 任务整体完成
+                    self.update_status['success'] = 1            # 标记为成功，避免上层误判为失败
+                    self.update_status['skipped'] = False        # 非 skipped，确保进入策略运行
+                    self.update_status['already_latest'] = True  # 标记数据已最新（供前端/通知展示）
+                    self.update_status['end_time'] = datetime.now().isoformat()
+                    self.update_status['message'] = f'数据已是最新（{last_update_date}），跳过全部更新步骤'
+                # 幂等写入完成记录（覆盖同一 target_date 的 update_log，状态保持 completed，不影响下次幂等判断）
+                try:
+                    validator.record_update_complete(target_date, {})
+                except Exception as e:
+                    logger.warning(f"记录幂等跳过完成异常（可忽略）: {str(e)}")
+                return
+            
+            # 【第3步】检测并初始化新股票（优先级最高）
+            self._add_update_log("【第3步】检测并初始化新股票...")
             try:
                 # 创建新股票检测器
                 stock_data_fetcher = StockDataFetcher()
@@ -794,8 +843,8 @@ class DataCollectionService:
                 self._add_update_log(f"⚠ 新股票检测异常: {str(e)}")
                 logger.warning(f"新股票检测异常: {str(e)}")
             
-            # 【第3步】获取所有股票列表
-            self._add_update_log("【第3步】获取所有股票列表...")
+            # 【第4步】获取所有股票列表
+            self._add_update_log("【第4步】获取所有股票列表...")
             try:
                 sql = "SELECT DISTINCT code FROM stock_basic ORDER BY code"
                 result = self.db_manager.query(sql)
@@ -807,22 +856,6 @@ class DataCollectionService:
                 self._add_update_log(f"✗ 获取股票列表失败: {str(e)}")
                 logger.error(f"获取股票列表失败: {str(e)}")
                 stock_codes = []
-            
-            # 【第4步】查询上次更新日期
-            self._add_update_log("【第4步】查询上次更新日期...")
-            try:
-                last_update_date = validator.get_last_update_date()
-                
-                # 如果没有记录，使用默认日期（3天前）
-                if not last_update_date:
-                    last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
-                
-                self._add_update_log(f"✓ 上次更新日期: {last_update_date}")
-            
-            except Exception as e:
-                self._add_update_log(f"✗ 查询上次更新日期失败: {str(e)}")
-                logger.error(f"查询上次更新日期失败: {str(e)}")
-                last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
             
             # 【第5步】更新K线数据
             if not update_types or 'kline' in update_types:
@@ -931,8 +964,41 @@ class DataCollectionService:
                 with self.update_lock:
                     self.update_status['totalStats']['market_cap_failed'] = len(stock_codes)
             
-            # 【第8步】记录更新完成
-            self._add_update_log("【第8步】记录更新完成...")
+            # 【第8步】刷新减持计划缓存（离线批量拉取候选池，落盘本地缓存）
+            self._add_update_log("【第8步】刷新减持计划缓存...")
+            try:
+                from trading.reduce_plan_cache import refresh_reduce_plan_cache
+                # 读取候选池股票代码（结构：pool[].stock.stock_code）
+                pool_codes = []
+                pool_file = Path(self.data_dir) / "running" / "buy_candidate_pool.json"
+                if pool_file.exists():
+                    try:
+                        with open(pool_file, 'r', encoding='utf-8') as pf:
+                            pool_data = json.load(pf)
+                        for item in pool_data.get('pool', []):
+                            sc = item.get('stock', {}).get('stock_code', '')
+                            if sc:
+                                pool_codes.append(sc)
+                    except Exception as pe:
+                        logger.warning("读取候选池失败: %s", pe)
+                if pool_codes:
+                    # 目标更新日期 YYYY-MM-DD 转 YYYYMMDD 作为刷新日期
+                    score_dt = target_date.replace('-', '')
+                    rp_stats = refresh_reduce_plan_cache(pool_codes, score_dt)
+                    with self.update_lock:
+                        self.update_status['totalStats']['reduce_plan_refreshed'] = rp_stats.get('refreshed', 0)
+                        self.update_status['totalStats']['reduce_plan_failed'] = rp_stats.get('failed', 0)
+                    self._add_update_log(
+                        f"✓ 减持计划缓存刷新完成: 刷新 {rp_stats.get('refreshed',0)} 只，失败 {rp_stats.get('failed',0)} 只"
+                    )
+                else:
+                    self._add_update_log("ℹ 候选池为空，跳过减持计划缓存刷新")
+            except Exception as e:
+                self._add_update_log(f"⚠ 减持计划缓存刷新异常(不影响其他步骤): {str(e)}")
+                logger.warning(f"减持计划缓存刷新异常: {str(e)}")
+
+            # 【第9步】记录更新完成
+            self._add_update_log("【第9步】记录更新完成...")
             try:
                 # 汇总统计信息
                 stats = {
@@ -955,7 +1021,7 @@ class DataCollectionService:
                 self._add_update_log(f"✗ 记录更新完成失败: {str(e)}")
                 logger.error(f"记录更新完成失败: {str(e)}")
             
-            # 【第9步】计算并保存市场温度
+            # 【第10步】计算并保存市场温度
             self._add_update_log("【第9步】计算并保存市场温度...")
             try:
                 # 导入市场温度计算器
@@ -989,7 +1055,7 @@ class DataCollectionService:
                 self._add_update_log(f"⚠ 市场温度计算失败: {str(e)}")
                 logger.warning(f"市场温度计算失败: {str(e)}")
             
-            # 【第10步】计算并保存风控状态
+            # 【第11步】计算并保存风控状态
             self._add_update_log("【第10步】计算并保存风控状态...")
             try:
                 from utils.risk_controller import RiskController
