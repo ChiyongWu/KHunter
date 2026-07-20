@@ -3802,15 +3802,19 @@ class StrategyRunner:
                                     continue
                         # ========== 涨幅检查结束 ==========
                         
-                        # ========== 重复信号检查：避免追高（仅首次建仓）==========
-                        # 直接从信号文件中读取昨天和前天的信号，判断是否重复
+                        # ========== 重复信号检查：信号去重（仅首次建仓，与冷却期无关）==========
+                        # 说明：此检查用于抑制"同一标的连续多天冒出首仓买入信号却未成交"的噪声，
+                        # 属于信号级别去重，与买入候选池的"冷却期"(_check_cool_down/is_cooling，
+                        # 因资金流向异常而冷却 3 天)是完全独立的两套机制，互不影响。
+                        # 直接从信号文件中读取前 3 个交易日的信号，判断是否重复
                         from utils.trade_date_utils import get_previous_trading_day
                         prev_day1 = get_previous_trading_day(trade_date)
                         prev_day2 = get_previous_trading_day(prev_day1)
+                        prev_day3 = get_previous_trading_day(prev_day2)
                         
                         has_repeat_signal = False
                         repeat_date = None
-                        for check_date in [prev_day1, prev_day2]:
+                        for check_date in [prev_day1, prev_day2, prev_day3]:
                             signals_file = self.running_dir / f"signals_{check_date}.json"
                             if signals_file.exists():
                                 try:
