@@ -59,7 +59,7 @@ strategies:
     description: 趋势加速拐点策略
 
   Strategy2560Selection:
-    win_rate: 0.28
+    win_rate: 0.3
     profit_loss_ratio: 3.2
     description: 2560战法选股策略
 

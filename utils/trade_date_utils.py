@@ -108,12 +108,12 @@ def is_trading_day(date_str: str) -> bool:
         date_str_fmt = date_str
         display_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
     
-    # 1. 优先从内存缓存查找
+    # 1. 优先从内存缓存查找（命中直接返回True）
     _ensure_cache_loaded()
-    if _trading_calendar_cache:
-        return display_str in _trading_calendar_cache
+    if _trading_calendar_cache and display_str in _trading_calendar_cache:
+        return True
     
-    # 2. 内存缓存为空，尝试从 Tushare 查询
+    # 2. 缓存未命中（缓存为空 或 日期超出缓存范围），回退到 Tushare 查询
     try:
         import tushare as ts
         import json

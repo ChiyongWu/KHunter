@@ -24,7 +24,7 @@ if exist "requirements.txt" (
 :: Start scheduler (daemon mode)
 echo.
 echo Starting scheduler daemon...
-start "KHunter Scheduler" python main.py schedule
+:: start "KHunter Scheduler" python main.py schedule
 
 :: Start server
 echo.

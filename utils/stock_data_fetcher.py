@@ -952,8 +952,7 @@ class StockDataFetcher:
         """
         抓取近期数据用于增量更新（单次请求，不做重试）
 
-        数据源策略：使用 TickFlow 批量接口获取前复权数据。
-        不做单只股票重试，由调用方 kline_updater 在批次层做限流控制和重试。
+        数据源策略：优先 TickFlow 批量接口，失败时自动降级到腾讯财经。
 
         参数：
             stock_code: 股票代码
@@ -962,13 +961,23 @@ class StockDataFetcher:
         返回：
             增量数据DataFrame（前复权数据），失败返回 None
         """
-        # 使用 TickFlow 批量接口获取 K 线数据（前复权）
+        # 一级数据源：TickFlow 批量接口获取 K 线数据（前复权）
         try:
             results, api_ok = self._fetch_stock_batch_tickflow([stock_code], days)
             if stock_code in results:
                 return results[stock_code]
         except Exception as e:
             logger.debug(f"【增量更新】TickFlow 获取 {stock_code} 失败: {e}")
+
+        # 二级数据源：腾讯财经降级获取（前复权）
+        try:
+            years = max(1, days // 250 + 1)
+            df = self._fetch_stock_history_http(stock_code, years=years)
+            if df is not None and len(df) > 0:
+                # 腾讯财经返回全量历史，只取最近 days 天
+                return df.tail(days)
+        except Exception as e:
+            logger.debug(f"【增量更新】腾讯财经获取 {stock_code} 失败: {e}")
 
         return None
 

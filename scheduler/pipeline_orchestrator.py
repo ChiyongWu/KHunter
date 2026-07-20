@@ -484,9 +484,9 @@ class PipelineOrchestrator:
                 except Exception as e:
                     logger.warning("  读取海龟策略配置失败，使用默认值: %s", e)
 
-            # 日志显示实际使用的任务策略
+            # 日志显示实际使用的任务策略（兼容 selection_strategy 和 strategy_names 两种 key）
             task_summary = ", ".join(
-                "[" + ",".join(t.get('strategy_names', ['?'])) + "]/" + t.get('timing_strategy', '?')
+                "[" + ",".join([t.get('selection_strategy', '')] if t.get('selection_strategy') else t.get('strategy_names', ['?'])) + "]/" + t.get('timing_strategy', '?')
                 for t in tasks
             )
             logger.info("  任务数: %d, 策略: %s", len(tasks), task_summary)
@@ -528,12 +528,18 @@ class PipelineOrchestrator:
                     details["position_count"] = len(portfolio)
 
                     # ===== 策略信息 =====
-                    # 从加载的 tasks 中提取
+                    # 从加载的 tasks 中提取（兼容两种 key：selection_strategy 和 strategy_names）
                     all_strategies = []
                     timing = 'support'
                     for t in tasks:
-                        names = t.get('strategy_names', [])
-                        all_strategies.extend(names)
+                        sel = t.get('selection_strategy', None)
+                        if sel:
+                            # 单个策略（_load_historical_tasks 生成或 Web 端传入）
+                            all_strategies.append(sel)
+                        else:
+                            # 多策略列表（Web 端批量运行传入）
+                            names = t.get('strategy_names', [])
+                            all_strategies.extend(names)
                         timing = t.get('timing_strategy', timing)
                     details["selection_strategies"] = list(set(all_strategies))  # 去重
                     details["timing_strategy"] = timing
@@ -697,13 +703,13 @@ class PipelineOrchestrator:
                 "task_history.json 最新记录中 strategies 为空，"
                 "请先通过界面/API 手动运行一次策略"
             )
-        # 构建 run_strategies_batch 需要的 tasks（strategy_names + timing_strategy）
+        # 每个策略拆分为独立 task（与 Web 端 /api/strategy/run-batch 格式一致）
         tasks = [{
-            'strategy_names': strategies,
+            'selection_strategy': s,
             'timing_strategy': timing_strategy,
-        }]
-        logger.info("  从 task_history.json 加载历史任务: 策略=%s, 择时=%s",
-                     strategies, timing_strategy)
+        } for s in strategies]
+        logger.info("  从 task_history.json 加载历史任务: 策略=%s, 择时=%s (共 %d 个任务)",
+                     strategies, timing_strategy, len(tasks))
         return tasks
 
     def _build_summary(self, result: PipelineResult) -> str:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Web 服务器 - A股量化选股系统前端
 """
 from trading.strategy_runner import StrategyRunner
@@ -107,6 +107,7 @@ from main import QuantSystem
 import threading
 from utils.selection_record_manager import SelectionRecordManager
 from utils.ranking_manager import RankingManager
+from scheduler.feishu_commander import get_commander
 from utils.db_initializer import init_databases_if_needed
 from utils.stock_filter import StockFilter
 from utils.data_collection_service import get_data_collection_service
@@ -1944,7 +1945,6 @@ def get_update_status():
 
 
 
-
 @app.route('/api/selection-history', methods=['GET'])
 def get_selection_history():
     """
@@ -2013,7 +2013,6 @@ def get_selection_history():
 
 
 # ==================== 股票分析相关路由 ====================
-
 
 
 
@@ -3411,7 +3410,6 @@ def get_strategy_runner(auto_init=False):
 
 
 
-
 @app.route('/api/strategy/run-batch', methods=['POST'])
 def run_strategy_batch():
     """
@@ -3474,18 +3472,8 @@ def run_strategy_batch():
                 config['exit_atr'] = 2.0
                 config['base_position_amount'] = 20000
         
-        # 执行批量任务
+        # 执行批量任务（内部已通过 _save_batch_task_config 保存 task_history）
         results = runner.run_strategies_batch(tasks, config)
-        
-        if results.get('status') == 'success':
-            # 获取择时策略（所有任务使用相同的择时策略）
-            timing_strategy = tasks[0].get('timing_strategy', 'support') if tasks else 'support'
-            runner.save_task_record({
-                'strategies': [task.get('selection_strategy', '') for task in tasks],
-                'timing_strategy': timing_strategy,
-                'initial_capital': config.get('initial_capital', 300000),
-                'mode': 'realtime'
-            })
         
         return jsonify(results)
     except Exception as e:
@@ -3592,6 +3580,40 @@ def get_strategy_status():
     except Exception as e:
         logger.error(f"获取策略运行状态失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)})
+
+
+def _get_ptrade_total_asset(runner, working_date: str):
+    """从 PTrade 反馈（Fund 文件）读取权威总资产
+
+    PTrade 导出的「总资产」列已包含未成交委托冻结资金、ETF 市值等，
+    比「可用资金 + 重算持仓市值」口径更准确，可避免总资产偏小。
+    读取失败（如反馈文件缺失或解析异常）时返回 None，由调用方回退自算。
+
+    Args:
+        runner: 策略运行器（提供 main_config 以定位 feedback_dir）
+        working_date: 工作日期 YYYY-MM-DD
+
+    Returns:
+        float 总资产（含 ETF/冻结），或 None
+    """
+    try:
+        # 延迟导入避免模块加载时的循环依赖
+        from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
+        # feedback_dir 由 main_config.ptrade.feedback_dir 指定（如 D:/ptrade/input，绝对路径直接使用）
+        main_config = getattr(runner, 'main_config', None)
+        handler = PTradeFeedbackHandler(
+            project_root=str(project_root), config=main_config)
+        # 工作日期 YYYY-MM-DD → 反馈日期 YYYYMMDD
+        feedback_date = working_date.replace('-', '')
+        fund = handler.read_fund(feedback_date)
+        total_asset = fund.get('total_asset')
+        if total_asset:
+            logger.info(f"总资产采用 PTrade 反馈值: {total_asset} (日期 {feedback_date})")
+            return float(total_asset)
+    except Exception as e:
+        # 反馈文件缺失或解析失败时回退自算，不影响接口可用性
+        logger.warning(f"读取 PTrade 总资产失败，将回退自算: {e}")
+    return None
 
 
 @app.route('/api/portfolio')
@@ -3713,12 +3735,36 @@ def get_portfolio():
                         'hold_days': pos.get('hold_days', pos.get('holding_days', 0))
                     })
         
-        # 计算总资产和盈亏率（用新价格计算）
-        total_assets = available_cash + total_value
-        total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
-        
-        # 获取当前运行模式（手动/自动），前端据此控制按钮显隐
+        # 计算总资产和盈亏率
+        # 运行模式决定总资产来源：自动模式才读 PTrade 反馈；手动模式维持原有自算逻辑
         run_mode = getattr(runner, 'run_mode', 'manual')
+        if run_mode == 'auto':
+            # 自动模式才读 PTrade 反馈（Fund 文件「总资产」权威值，含冻结、ETF 市值）
+            # 无反馈（文件缺失/解析失败/总资为0）说明 PTrade 同步异常，终止返回错误
+            ptrade_total_asset = _get_ptrade_total_asset(runner, working_date)
+            if ptrade_total_asset is not None:
+                total_assets = ptrade_total_asset
+            else:
+                logger.error(
+                    f"【前端-持仓】自动模式下未获取到 PTrade 总资产，PTrade 同步可能失败，终止返回")
+                return jsonify({
+                    "success": False,
+                    "error": "PTrade反馈数据未就绪，无法计算总资产",
+                    "data": {
+                        "positions": positions_list,
+                        "available_cash": available_cash,
+                        "total_assets": 0,
+                        "total_profit_percent": 0,
+                        "initial_capital": initial_capital,
+                        "run_mode": "auto",
+                        "ptrade_enabled": True,
+                        "message": "请等待PTrade反馈文件生成后刷新页面"
+                    }
+                })
+        else:
+            # 手动模式维持原有逻辑：不读 PTrade 反馈，总资产用「可用资金 + 持仓市值」自算
+            total_assets = available_cash + total_value
+        total_profit_percent = ((total_assets - initial_capital) / initial_capital) * 100
         
         # 返回持仓信息和统计数据
         return jsonify({
@@ -4257,6 +4303,9 @@ def run_web_server(host='0.0.0.0', port=5000, debug=False):
     # 初始化日志系统
     from utils.log_config import LogConfig
     LogConfig.setup_logging()
+
+    get_commander().start_polling()
+
     
     # 打印所有注册的路由
     print("\n注册的路由:")
@@ -4478,6 +4527,43 @@ def update_risk_config():
             'success': False,
             'message': f'更新风控配置失败: {str(e)}'
         }), 500
+
+@app.route('/api/feishu/callback', methods=['POST'])
+def feishu_callback():
+    """
+    飞书 Event Subscription 回调端点
+
+    接收飞书推送的消息事件，解析指令并执行对应的 KHunter 操作。
+
+    支持两种事件类型:
+      - url_verification: 飞书配置回调 URL 时的验证请求
+      - event_callback: 实际消息事件（im.message.receive_v1）
+
+    需要在飞书开放平台的应用中配置:
+      - 事件回调 URL: http://<host>:<port>/api/feishu/callback
+      - 订阅 im.message.receive_v1 事件
+      - 添加 im:message 权限
+
+    返回:
+        验证请求返回 challenge，事件请求返回空确认
+    """
+    try:
+        body = request.get_json(force=True)
+        if not body:
+            return jsonify({"error": "empty body"}), 400
+
+        logger.debug("收到飞书回调: %s", json.dumps(body, ensure_ascii=False)[:500])
+
+
+
+        commander = get_commander()
+        result = commander.handle_callback(body)
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error("飞书回调处理异常: %s", e)
+        return jsonify({}), 200
 
 
 if __name__ == '__main__':

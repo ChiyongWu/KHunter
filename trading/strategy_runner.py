@@ -7,6 +7,7 @@
 import sqlite3
 import datetime
 import logging
+import os
 import threading
 import numpy as np
 import pandas as pd
@@ -344,15 +345,21 @@ class StrategyRunner:
             strategy_list = []
             timing_strategy = 'support'
             for t in tasks:
-                # 优先取 selection_strategy（web 端传入），回退到 strategy_names（流水线传入）
-                sel = t.get('selection_strategy', None)
-                if not sel:
-                    names = t.get('strategy_names', [])
-                    sel = names[0] if names else ''
-                class_name = get_english_name(sel) if sel else ''
-                if class_name:
-                    strategy_list.append(class_name)
                 timing_strategy = t.get('timing_strategy', 'support')
+                # 优先取 selection_strategy（web 端传入，单个策略），回退到 strategy_names（流水线传入，多策略列表）
+                sel = t.get('selection_strategy', None)
+                if sel:
+                    # 单个策略：直接映射类名
+                    class_name = get_english_name(sel) if sel else ''
+                    if class_name:
+                        strategy_list.append(class_name)
+                else:
+                    # 多策略列表：遍历所有策略名
+                    names = t.get('strategy_names', [])
+                    for name in names:
+                        class_name = get_english_name(name) if name else ''
+                        if class_name:
+                            strategy_list.append(class_name)
             # 过滤空字符串，确保不写入无效记录
             strategy_list = [s for s in strategy_list if s]
             # 标准格式记录
@@ -364,10 +371,8 @@ class StrategyRunner:
                 'mode': 'realtime',
                 'status': 'completed'
             }
-            history.append(record)
-            if len(history) > 30:
-                history = history[-30:]
-            self._save_task_history(history)
+            # 与 save_task_record 保持一致：只保留最后一次任务记录
+            self._save_task_history([record])
             logger.info(f"任务配置已保存到 task_history.json (策略: {strategy_list}, 择时: {timing_strategy})")
         except Exception as e:
             logger.warning(f"保存任务配置失败（不阻断主流程）: {e}")
@@ -1313,6 +1318,22 @@ class StrategyRunner:
         
         return default_config
     
+    @classmethod
+    def _resolve_path(cls, path_str: str, fallback_dir: Path) -> Path:
+        """解析路径：若为绝对路径直接使用，否则相对于 fallback_dir 拼接
+
+        Args:
+            path_str: 配置中的路径字符串（如 "D:/ptrade/output" 或 "data/running/to_ptrade"）
+            fallback_dir: 当 path_str 为相对路径时的基准目录
+
+        Returns:
+            解析后的绝对路径 Path 对象
+        """
+        p = Path(path_str)
+        if p.is_absolute():
+            return p
+        return fallback_dir / p
+
     # 默认配置参数（统一管理，避免硬编码分散在多处）
     _DEFAULT_CONFIG = {
         'initial_capital': 300000,
@@ -1454,16 +1475,33 @@ class StrategyRunner:
             目标交易日字符串
         """
         from utils.trade_date_utils import is_trading_day
+        # 输入校验：防止非法日期导致 strptime 异常
+        if not start_date or not isinstance(start_date, str):
+            logger.warning(f"_get_future_trading_day 收到非法 start_date: {start_date}，使用当日兜底")
+            start_date = datetime.date.today().strftime('%Y-%m-%d')
+        if not isinstance(days, int) or days <= 0:
+            logger.warning(f"_get_future_trading_day 收到非法 days: {days}，使用 1 兜底")
+            days = 1
         
         current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
         trading_days_found = 0
+        # 最大搜索范围：目标交易日数的 10 倍日历日（足够覆盖长假期）
+        # 上限 365 天，防止死循环导致 date overflow
+        max_calendar_days = min(days * 10, 365)
         
-        while trading_days_found < days:
+        for _ in range(max_calendar_days):
             current_date += datetime.timedelta(days=1)
             if is_trading_day(current_date.strftime('%Y-%m-%d')):
                 trading_days_found += 1
+                if trading_days_found >= days:
+                    return current_date.strftime('%Y-%m-%d')
         
-        return current_date.strftime('%Y-%m-%d')
+        # 兜底：搜索窗口内找不到足够交易日，直接用日历日推算
+        logger.warning(f"_get_future_trading_day 在 {max_calendar_days} 天内未找到 {days} 个交易日，"
+                       f"使用日历日兜底: {start_date} + {days * 7 // 5} 天")
+        base_date = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+        fallback_date = base_date + datetime.timedelta(days=max(days * 7 // 5, days))
+        return fallback_date.strftime('%Y-%m-%d')
     
     def _has_kline_data(self, date: str) -> bool:
         """检查指定日期是否有K线数据
@@ -1506,12 +1544,12 @@ class StrategyRunner:
         Returns:
             工作日期字符串 (YYYY-MM-DD)
         """
-        # 同一进程内工作日期不变，优先返回缓存
-        if self._cached_working_date is not None:
-            return self._cached_working_date
-        
         today = datetime.datetime.now()
         today_str = today.strftime('%Y-%m-%d')
+
+        # 缓存仅在当日有效（跨日后或盘中→盘后切换时强制重新计算）
+        if self._cached_working_date is not None and self._cached_working_date == today_str:
+            return self._cached_working_date
         
         # 优先检查是否是交易日
         if is_trading_day(today_str):
@@ -1557,7 +1595,7 @@ class StrategyRunner:
         """
         # 仅自动模式处理
         if getattr(self, 'run_mode', 'manual') != 'auto':
-            logger.debug(f"当前运行模式为 manual，跳过 PTrade 反馈处理")
+            logger.info(f"【PTrade反馈】当前运行模式为 {getattr(self, 'run_mode', 'manual')}，跳过 PTrade 反馈处理")
             return False
         
         # 检查 ptrade.enabled 配置
@@ -1598,6 +1636,8 @@ class StrategyRunner:
         """
         # 只自动模式 + ptrade enabled 时才同步
         if not self._should_process_ptrade_feedback():
+            logger.info(f"【PTrade同步】_should_process_ptrade_feedback 返回 False，"
+                        f"run_mode={getattr(self, 'run_mode', 'N/A')}，跳过同步")
             return False
 
         # PTrade 反馈文件按交易日命名（如 20260626），需要将工作日期转为 YYYYMMDD
@@ -1607,7 +1647,7 @@ class StrategyRunner:
         # 防重复同步：同一天只执行一次 PTrade 同步
         # 多个并发 API 请求可能同时触发此方法，避免重复处理
         if getattr(self, '_ptrade_synced_feedback_date', '') == feedback_date:
-            logger.debug(f"【PTrade同步】今日已同步过 feedback_date={feedback_date}，跳过重复调用")
+            logger.info(f"【PTrade同步】今日已同步过 feedback_date={feedback_date}，跳过重复调用")
             return True
         # 构建 portfolio 文件路径（使用传入的日期，表示当日系统运行结果）
         portfolio_file = self.running_dir / f"portfolio_{portfolio_date}.json"
@@ -1621,7 +1661,12 @@ class StrategyRunner:
                 config=getattr(self, 'main_config', None))
             # 检查 PTrade 反馈文件是否存在
             if not temp_handler.check_feedback_exists(feedback_date):
-                logger.debug(f"【PTrade同步】反馈文件不存在: {feedback_date}，跳过")
+                # 打印实际检查的路径，方便排查
+                fund_path = os.path.join(temp_handler.feedback_dir, f"Fund_{feedback_date}.csv")
+                hold_path = os.path.join(temp_handler.feedback_dir, f"Hold_{feedback_date}.csv")
+                logger.warning(f"【PTrade同步】反馈文件不存在: feedback_date={feedback_date}，"
+                               f"feedback_dir={temp_handler.feedback_dir}，"
+                               f"Fund存在={os.path.isfile(fund_path)}，Hold存在={os.path.isfile(hold_path)}")
                 return False
             # 自动模式下 PTrade 数据是唯一真实数据源，始终处理（不依赖 mtime 比较）
             # mtime 比较可能因 initialize_daily_data 保存操作更新文件时间而误判跳过
@@ -1719,8 +1764,8 @@ class StrategyRunner:
         
         # 检查是否已经初始化过（以工作日期判断，避免同一天重复初始化）
         if date in self._initialized_dates:
-            logger.debug(f"【数据初始化】{date} 已经初始化过，跳过")
-            return False
+            logger.info(f"【数据初始化】{date} 已经初始化过，数据已在内存中，无需重复初始化")
+            return True  # 已初始化，数据就绪，上层不应误判为失败
         # 立即标记为已初始化，防止并发 API 请求重复触发
         self._initialized_dates.add(date)
         
@@ -2095,9 +2140,12 @@ class StrategyRunner:
             import csv
             from pathlib import Path
             
-            # PTrade集成：信号CSV按执行日期命名，保存到 data/running/to_ptrade/
+            # PTrade集成：信号CSV按执行日期命名，保存到 ptrade.signal_dir 配置的目录
+            # 支持绝对路径（如 D:/ptrade/output）和相对路径（如 data/running/to_ptrade）
             # 文件名格式: KHunter_signals_YYYYMMDD.csv，便于回测追溯历史信号
-            ptrade_dir = self.running_dir / "to_ptrade"
+            signal_dir_raw = self.main_config.get('ptrade', {}).get(
+                'signal_dir', 'data/running/to_ptrade') if self.main_config else 'data/running/to_ptrade'
+            ptrade_dir = self._resolve_path(signal_dir_raw, self.running_dir)
             ptrade_dir.mkdir(parents=True, exist_ok=True)
             
             # 从信号文件名中提取信号日期（T日），格式 YYYYMMDD
@@ -2169,28 +2217,22 @@ class StrategyRunner:
             
             # 卖出信号排在买入信号前面：卖出释放资金后再买入
             csv_data.sort(key=lambda r: (0 if r['side'] == 'sell' else 1))
-            
+
+            # KHunter 只处理股票信号，写入单一 CSV 文件
             # 写入CSV文件（UTF-8编码，兼容PTrade批量埋单）
-            # 文件名含执行日期，每日不覆盖，便于回测追溯
             with open(pt_csv_file, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=csv_columns)
                 writer.writeheader()
                 writer.writerows(csv_data)
-            
-            logger.info(f"PTrade格式CSV信号文件已保存到: {pt_csv_file}")
-            
+
+            logger.info(f"PTrade 股票信号 CSV 已保存到: {pt_csv_file} ({len(csv_data)} 条)")
+
             # 保存 CSV 路径，供上层编排器报告使用
             signal_csv_path = str(pt_csv_file)
-            
+
             # 清理旧信号文件，控制文件数量（PTrade 上传文件数有限制）
             # 保留最近 MAX_PTRADE_CSV_FILES 个文件，删除更早的
             import glob as _glob
-            # 清理旧的固定文件名残留（无日期的旧格式）
-            old_fixed = ptrade_dir / "KHunter_signals.csv"
-            if old_fixed.exists():
-                old_fixed.unlink()
-                logger.info(f"已删除旧格式残留文件: {old_fixed.name}")
-            # 扫描所有日期命名文件，按日期排序，保留最新的
             pattern = str(ptrade_dir / "KHunter_signals_*.csv")
             existing = sorted(_glob.glob(pattern))
             existing.sort(reverse=True)  # 按日期降序（最新在前）
@@ -2208,7 +2250,7 @@ class StrategyRunner:
                     logger.warning(f"清理过期文件失败 {fpath_obj.name}: {e}")
             if kept > 0:
                 logger.info(f"信号文件清理完成: 保留 {kept} 个 (上限 {MAX_PTRADE_CSV_FILES})")
-            
+
             # 返回 CSV 文件路径，供上层编排器报告使用
             return signal_csv_path
             
@@ -4368,7 +4410,7 @@ class StrategyRunner:
             self._save_portfolio(self.portfolio, str(portfolio_file))
             logger.info(f"持仓信息已保存到: {portfolio_file}")
             
-            # 保存本次任务配置到 task_history.json，供定时流水线读取历史任务
+            # 保存批量任务配置到 task_history.json
             self._save_batch_task_config(tasks, working_date)
             logger.info(f"批量策略执行完成")
             return {

@@ -1,18 +1,25 @@
 """
-KHunter 自动交易策略 (PTrade 云端部署脚本)
-============================================
+KHunter + ETFHunter 自动交易策略 (PTrade 云端统一部署脚本)
+===========================================================
 本文件同时维护在:
   1. KHunter 本地:  trading/ptrade/khunter_auto_trade.py  (git 版本控制)
   2. PTrade 云端:   /home/fly/notebook/khunter_auto_trade.py (策略执行)
 
 功能:
-  9:31 开盘读取 KHunter 信号文件并提交委托（通过 run_daily 定时触发，等第一笔行情落地）
+  9:31 开盘读取双系统信号文件（KHunter 股票 + ETFHunter ETF）并提交委托
 
-处理顺序（两阶段）:
-  阶段一: 收集全部信号，分类为卖出/买入
+双信号文件支持:
+  - ETF 信号文件:   ETFHunter_signals_{YYYYMMDD}.csv  (ETFHunter 系统生成)
+  - 股票信号文件:   KHunter_signals_{YYYYMMDD}.csv     (KHunter 系统生成)
+  - 两个文件独立可选（任一缺失不影响另一方处理）
+
+处理顺序（多级优先级排序）:
+  第一优先级=卖出优于买入; 第二优先级=ETF买入优于股票买入
+  → ETF卖出 → 股票卖出 → ETF买入 → 股票买入
+
+  阶段一: 收集全部信号，按优先级排序，分类为卖出/买入
   阶段二: 先提交全部卖出委托，轮询等待成交到账
   阶段三: 卖出资金到账后，再处理买入委托（卖出未成交，但是等待时间已过，仍然执行买入）
-  - 卖出未成交时买入不会被执行，确保资金到位后再买
 
 买入过滤规则:
   - 688 科创板 → 不买入（暂无科创板交易权限）
@@ -27,7 +34,8 @@ KHunter 自动交易策略 (PTrade 云端部署脚本)
 
 反馈机制:
   - PTrade 原生自动导出 Fund_/Hold_ CSV 文件（不需要策略中手动生成）
-  - KHunter 端 PTradeFeedbackHandler 读取 Fund_/Hold_ 文件更新 portfolio
+  - KHunter 端 PTradeFeedbackHandler 读取 Fund_/Hold_（仅处理股票持仓，ETF 跳过）
+  - ETFHunter 端独立解析 Fund_/Hold_（仅处理 ETF 持仓，股票跳过）
 
 在 PTrade 策略模块中配置:
   策略类型: 股票
@@ -40,8 +48,10 @@ import time
 from datetime import datetime
 
 # ============ 全局常量 ============
-# 信号文件模板（{} 填入执行日期 YYYYMMDD，与 KHunter 端命名一致）
-SIGNAL_FILE = "KHunter_signals_{}.csv"
+# 信号文件模板（{} 填入执行日期 YYYYMMDD）
+# KHunter 生成股票信号，ETFHunter 生成 ETF 信号，PTrade 端合并处理
+SIGNAL_FILE_ETF = "ETFHunter_signals_{}.csv"      # ETFHunter ETF信号文件
+SIGNAL_FILE_STOCK = "KHunter_signals_{}.csv"       # KHunter 股票信号文件
 
 # 定时触发时间
 MORNING_EXEC_TIME = '9:31'    # 开盘信号处理时间（9:31，等行情落地后再执行）
@@ -337,17 +347,72 @@ def _wait_sell_orders_filled(sell_orders, context, max_wait=120, poll_interval=3
     return filled_count
 
 
+def _read_signal_csv(file_path, today_str):
+    """
+    读取单个信号 CSV 文件，返回 DataFrame 或 None
+
+    自动尝试多种编码（UTF-8/GBK），校验 exec_date 列与当日的匹配性。
+
+    Args:
+        file_path: 信号 CSV 文件的完整路径
+        today_str: 当日日期字符串 YYYYMMDD
+
+    Returns:
+        pd.DataFrame 或 None（文件不存在/解析失败/日期不匹配）
+    """
+    # 读取信号文件（容错多种编码，优先 UTF-8）
+    df = None
+    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1']:
+        try:
+            df = pd.read_csv(file_path, encoding=enc)
+            log.info(f"[KHunter] 读取 {len(df)} 条信号 (编码: {enc}) 文件: {file_path}")
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except Exception as e:
+            log.error(f"[KHunter] 编码 {enc} 读取失败: {e}")
+            continue
+    if df is None:
+        log.error(f"[KHunter] 所有编码尝试均失败，无法读取信号文件: {file_path}")
+        return None
+
+    # 防御：清理列名首尾空格（CSV 生成方可能引入尾随空格）
+    df.columns = df.columns.str.strip()
+
+    # 校验执行日期：exec_date 必须与当日相同
+    if 'exec_date' in df.columns and len(df) > 0:
+        csv_exec_date = str(df.iloc[0]['exec_date']).strip().replace('-', '')
+        if csv_exec_date != today_str:
+            log.error(f"[KHunter] 信号执行日期 {csv_exec_date} ≠ 当日 {today_str}，"
+                      f"信号不属于当日，跳过文件")
+            return None
+        log.info(f"[KHunter] 信号执行日期校验通过: {csv_exec_date} == {today_str}")
+    else:
+        log.warning("[KHunter] 信号文件缺少 exec_date 列，无法校验日期，继续处理（兼容旧格式）")
+    return df
+
+
 def process_khunter_signals(context, today_str):
     """
-    读取 KHunter 信号文件并提交委托（两阶段处理：先卖后买）
+    读取双系统信号文件（KHunter 股票 + ETFHunter ETF）并提交委托
 
-    两阶段处理流程:
-      阶段一: 收集所有信号，先提交全部卖出委托，等待成交到账
-      阶段二: 卖出资金到账后，再处理买入委托
+    双信号文件:
+      - KHunter_signals_{YYYYMMDD}.csv     (KHunter 股票信号)
+      - ETFHunter_signals_{YYYYMMDD}.csv   (ETFHunter ETF信号)
+      任一文件缺失不影响另一方处理。
+
+    优先级排序:
+      ① 卖出优先于买入（ETF卖出 > 股票卖出 > ETF买入 > 股票买入）
+      ② 买入中 ETF 优先于股票
+
+    三阶段处理:
+      阶段一: 收集全部信号，按优先级排序
+      阶段二: 先提交全部卖出委托，等待成交到账
+      阶段三: 卖出资金到账后，再处理买入委托（ETF买入优先）
 
     买入规则:
       1. 获取当前价
-      2. 当前价偏离信号价（昨收）±3% 不买入
+      2. 当前价偏离信号价 ±3% 不买入
       3. 买入前检查可用资金是否充足（此时已包含卖出回款）
       4. 买入时按当前价下单
 
@@ -356,54 +421,71 @@ def process_khunter_signals(context, today_str):
         today_str: 当日日期字符串 YYYYMMDD
     """
     # 构造信号文件完整路径（用 get_research_path 获取研究模块路径）
-    # 按执行日期匹配文件: KHunter_signals_YYYYMMDD.csv
     research_dir = get_research_path()
-    signal_filename = SIGNAL_FILE.format(today_str)
-    file_path = _join_path(research_dir, UPLOAD_DIRNAME, signal_filename)
-    log.info(f"[KHunter] 查找信号文件: {file_path}")
 
-    # 检查文件是否存在
-    if not _file_exists(file_path):
-        log.warning(f"[KHunter] 信号文件不存在: {file_path}，跳过今日交易")
+    # 定义信号文件列表: (文件名模板, 信号来源标识)
+    signal_sources = [
+        (SIGNAL_FILE_ETF, 'etf'),
+        (SIGNAL_FILE_STOCK, 'stock'),
+    ]
+
+    # 读取所有可用的信号文件，合并为带来源标记的 DataFrame
+    all_dfs = []  # 收集各来源的 DataFrame
+    source_count = {'etf': 0, 'stock': 0}
+    for file_template, source_type in signal_sources:
+        file_name = file_template.format(today_str)
+        file_path = _join_path(research_dir, UPLOAD_DIRNAME, file_name)
+        log.info(f"[KHunter] 查找{source_type}信号文件: {file_path}")
+
+        if not _file_exists(file_path):
+            log.info(f"[KHunter] {source_type}信号文件不存在: {file_path}，跳过")
+            continue
+
+        df = _read_signal_csv(file_path, today_str)
+        if df is None or len(df) == 0:
+            continue
+
+        # 标记来源类型并加入合并列表
+        df['_source_type'] = source_type
+        all_dfs.append(df)
+        source_count[source_type] = len(df)
+
+    # 无可用信号时退出
+    if not all_dfs:
+        log.warning("[KHunter] 所有信号文件均不可用，跳过今日交易")
         return
 
-    # 读取信号文件（容错多种编码，优先 UTF-8）
-    df = None
-    # 尝试编码列表：UTF-8 优先，GBK/GB18030 作为回退（Windows 生成中文文件常见）
-    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1']:
-        try:
-            df = pd.read_csv(file_path, encoding=enc)
-            log.info(f"[KHunter] 读取到 {len(df)} 条信号 (编码: {enc})")
-            break
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-        except Exception as e:
-            log.error(f"[KHunter] 编码 {enc} 读取失败: {e}")
-            continue
-    if df is None:
-        log.error(f"[KHunter] 所有编码尝试均失败，无法读取信号文件")
-        return
+    # 合并所有信号
+    df = pd.concat(all_dfs, ignore_index=True)
+    log.info(f"[KHunter] 信号合并完成: ETF {source_count['etf']}条, 股票 {source_count['stock']}条, "
+             f"合计 {len(df)} 条")
 
-    # 防御：清理列名首尾空格（CSV 生成方可能引入尾随空格）
-    df.columns = df.columns.str.strip()
+    # 按优先级排序: (side_priority, source_priority)
+    # sell=0 优先于 buy=1; etf=0 优先于 stock=1
+    def _signal_sort_key(row):
+        side = str(row.get('side', '')).strip().lower()
+        side_priority = 0 if side == 'sell' else 1
+        source_priority = 0 if row.get('_source_type', 'etf') == 'etf' else 1
+        return (side_priority, source_priority)
 
-    # 校验执行日期：exec_date 必须与当日相同（KHunter端已计算好T+1交易日）
-    # 防御处理：去掉连字符（兼容 2026-06-16 和 20260616 两种格式）
-    if 'exec_date' in df.columns and len(df) > 0:
-        csv_exec_date = str(df.iloc[0]['exec_date']).strip().replace('-', '')
-        if csv_exec_date != today_str:
-            log.error(f"[KHunter] 信号执行日期 {csv_exec_date} ≠ 当日 {today_str}，"
-                      f"信号不属于当日，跳过全部信号")
-            return
-        log.info(f"[KHunter] 信号执行日期校验通过: {csv_exec_date} == {today_str}")
-    else:
-        log.warning("[KHunter] 信号文件缺少 exec_date 列，无法校验日期，继续处理（兼容旧格式）")
+    # 转换为可排序的列表并按优先级排序
+    all_signals = []
+    for idx, row in df.iterrows():
+        all_signals.append((_signal_sort_key(row), idx, row))
+    all_signals.sort(key=lambda x: x[0])
+
+    # 重新构建有序 DataFrame
+    sorted_rows = [item[2] for item in all_signals]
+    df = pd.DataFrame(sorted_rows).reset_index(drop=True)
 
     # ========== 阶段一：收集所有信号，分类为卖出/买入 ==========
-    sell_signals = []   # (idx, signal_id, symbol, volume) - 卖出信号
-    buy_signals = []    # (idx, signal_id, symbol, volume, price) - 买入信号
+    sell_signals = []   # (idx, signal_id, symbol, volume, source_type) - 卖出信号
+    buy_signals = []    # (idx, signal_id, symbol, volume, price, source_type) - 买入信号
     parse_skip_count = 0
     star_market_skip_count = 0  # 科创板跳过计数
+    # 按来源分类统计
+    sell_source_count = {'etf': 0, 'stock': 0}
+    buy_source_count = {'etf': 0, 'stock': 0}
 
     for idx, row in df.iterrows():
         try:
@@ -413,6 +495,7 @@ def process_khunter_signals(context, today_str):
             side = row['side']
             volume = int(row['order_volume'])
             price = float(row['order_price'])
+            src = row.get('_source_type', 'etf')  # 信号来源: etf/stock
         except (KeyError, ValueError, TypeError) as e:
             log.error(f"[KHunter] 信号行#{idx} 数据解析失败: {e}，跳过该信号")
             parse_skip_count += 1
@@ -424,16 +507,19 @@ def process_khunter_signals(context, today_str):
             continue
 
         if side == 'sell':
-            sell_signals.append((idx, signal_id, symbol, volume))
+            sell_signals.append((idx, signal_id, symbol, volume, src))
+            sell_source_count[src] = sell_source_count.get(src, 0) + 1
         elif side == 'buy':
             # 科创板权限检查: 688 开头跳过（暂无科创板交易权限）
             if symbol.startswith('688'):
                 log.info(f"[KHunter] {symbol} 科创板暂无交易权限，跳过买入信号")
                 star_market_skip_count += 1
                 continue
-            buy_signals.append((idx, signal_id, symbol, volume, price))
+            buy_signals.append((idx, signal_id, symbol, volume, price, src))
+            buy_source_count[src] = buy_source_count.get(src, 0) + 1
 
-    log.info(f"[KHunter] 信号分类: 卖出{len(sell_signals)}条, 买入{len(buy_signals)}条, "
+    log.info(f"[KHunter] 信号分类: 卖出{len(sell_signals)}条(ETF {sell_source_count['etf']}/股票 {sell_source_count['stock']}), "
+             f"买入{len(buy_signals)}条(ETF {buy_source_count['etf']}/股票 {buy_source_count['stock']}), "
              f"解析跳过{parse_skip_count}条, 科创板跳过{star_market_skip_count}条")
 
     # ========== 阶段二：先提交全部卖出委托 ==========
@@ -441,7 +527,7 @@ def process_khunter_signals(context, today_str):
     sell_skip_count = 0
     sell_orders = []  # (signal_id, order_id, symbol, volume) - 用于后续等待成交
 
-    for idx, signal_id, symbol, volume in sell_signals:
+    for idx, signal_id, symbol, volume, src in sell_signals:
         # 检查持仓数量
         pos = get_position(symbol)
         if pos is None or pos.enable_amount < volume:
@@ -460,11 +546,12 @@ def process_khunter_signals(context, today_str):
             'price': 0,  # 市价单不设限价
             'price_type': 'market',
             'signal_id': signal_id,
+            'source_type': src,
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         sell_orders.append((signal_id, order_id, symbol, volume))
         sell_count += 1
-        log.info(f"[KHunter] 卖出委托: {symbol} {volume}股 order_id={order_id}")
+        log.info(f"[KHunter] 卖出委托[{src}]: {symbol} {volume}股 order_id={order_id}")
 
     log.info(f"[KHunter] 卖出阶段完成: 提交{sell_count}条, 跳过{sell_skip_count}条")
 
@@ -489,7 +576,7 @@ def process_khunter_signals(context, today_str):
     tracked_cash = context.portfolio.cash  # 可用资金快照（跟随买入递减）
     reserved_cash = 0.0  # 已占用的资金（仅用于日志累计）
 
-    for idx, signal_id, symbol, volume, price in buy_signals:
+    for idx, signal_id, symbol, volume, price, src in buy_signals:
         # 规则1: 获取当前价（参照 ptradesample 使用 get_position(symbol).last_sale_price）
         try:
             current_pos = get_position(symbol)
@@ -554,6 +641,7 @@ def process_khunter_signals(context, today_str):
             'signal_price': price,         # 保留原始信号价供参考
             'price_type': 'current',       # 标记为按当前价下单
             'signal_id': signal_id,
+            'source_type': src,
             'submit_time': context.current_dt.strftime('%H:%M:%S')
         }
         buy_count += 1
@@ -561,7 +649,7 @@ def process_khunter_signals(context, today_str):
         tracked_cash -= required_amount
         reserved_cash += required_amount  # 日志累计
 
-        log.info(f"[KHunter] 买入委托: {symbol} {volume}股 "
+        log.info(f"[KHunter] 买入委托[{src}]: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
                  f"偏离={(current_price/price-1)*100:+.2f}% "
                  f"占用 {required_amount:.0f} (累计占用 {reserved_cash:.0f}) order_id={order_id}")
