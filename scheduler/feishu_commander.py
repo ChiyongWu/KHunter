@@ -19,6 +19,7 @@
 
 import json as jmod
 import logging
+import re
 import threading
 import time as time_module
 from typing import Optional
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 FEISHU_LIST_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
 FEISHU_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+
+# 耗时指令：同一时刻仅允许一个实例运行，防止并发触发（对齐 etfhunter 的流水线并发保护）
+_HEAVY_COMMANDS = {"pipeline", "data_update", "strategy_run"}
 
 
 class FeishuCommander:
@@ -47,10 +51,14 @@ class FeishuCommander:
         self.command_timeout = cmd_config.get("command_timeout_minutes", 15) * 60
         self.config = config
         self.trigger_prefix = cmd_config.get("trigger_prefix", "")
+        self.mention_trigger = cmd_config.get("mention_trigger", "")  # 本应用飞书群 @mention 触发词
         self._token = None
         self._token_expire = 0.0
         self._last_message_id = None
         self._running = False
+        # 并发保护：避免同一耗时指令被重复触发并发执行（与轮询线程解耦）
+        self._cmd_lock = threading.Lock()
+        self._active_cmds = set()
         logger.info("FeishuCommander: enabled=%s, chat_id=%s, poll=%ds",
                      self.enabled, self.chat_id, self.poll_interval)
 
@@ -100,17 +108,25 @@ class FeishuCommander:
         messages = self._list_messages(token)
         if not messages:
             return
-        newest_user_id = None
+        # 首次轮询：仅记录最新消息ID，跳过历史消息，避免启动时重复执行旧指令（对齐 etfhunter）
+        if self._last_message_id is None and messages:
+            self._last_message_id = messages[0].get("message_id", "")
+            logger.info("首次轮询，跳过历史消息，记录起始ID: %s", self._last_message_id)
+            return
+        newest_id = None
         for msg in messages:
             msg_id = msg.get("message_id", "")
-            msg_type = msg.get("msg_type", "")
             sender = msg.get("sender", {})
-            sender_type = sender.get("sender_type", "")
-            if sender_type == "app":
-                continue
+            # 列表按创建时间倒序，命中已处理的最旧消息即停止（游标断点）
             if self._last_message_id and msg_id == self._last_message_id:
                 break
-            if msg_type != "text":
+            # 记录已扫描到的最新消息ID：无论是否命中指令都推进游标，
+            # 否则被忽略的消息会每轮重复拉取、重复打印日志（修复刷屏根因）
+            if newest_id is None:
+                newest_id = msg_id
+            if sender.get("sender_type") == "app":
+                continue
+            if msg.get("msg_type", "") != "text":
                 continue
             text = self._extract_text_content(msg.get("body", {}).get("content", ""))
             if not text:
@@ -121,10 +137,8 @@ class FeishuCommander:
             chat_id = msg.get("chat_id", "")
             logger.info("Command: %s (msg %s)", command, msg_id)
             self._execute_command(command, chat_id)
-            if newest_user_id is None:
-                newest_user_id = msg_id
-        if newest_user_id:
-            self._last_message_id = newest_user_id
+        if newest_id:
+            self._last_message_id = newest_id
 
     def _list_messages(self, token: str) -> list:
         try:
@@ -181,6 +195,21 @@ class FeishuCommander:
 
     def _parse_command(self, text: str) -> Optional[str]:
         t = text.strip()
+        logger.debug("Feishu parse raw=%r", t)  # 诊断：打印飞书真实消息文本格式
+        # 剥离本应用的 @mention 前缀（对齐 etfhunter 的鲁棒做法）
+        # 飞书群聊 @ 机器人渲染变体较多（@khunter / @KHunter / @(khunter) 等），
+        # 只要文本含 @<mention> 子串即视为对本应用提及，且仅移除提及词本身，
+        # 不贪婪吃掉后续指令文本（避免 @KHunter跑流水线 把指令也吞掉）。
+        mention = self.mention_trigger
+        if mention:
+            mention_pat = re.compile(r'@\s*\(?' + re.escape(mention) + r'\)?\s*', re.IGNORECASE)
+            if not mention_pat.search(t):
+                return None
+            t = mention_pat.sub('', t, count=1).strip()
+            # 仅 @ 提及但无指令文本时，默认执行完整流水线
+            # （对齐 etfhunter：裸 @etfhunter -> pipeline，确保 @ 机器人一定有反应）
+            if not t:
+                return "pipeline"
         if self.trigger_prefix:
             if not t.startswith(self.trigger_prefix):
                 return None
@@ -201,7 +230,29 @@ class FeishuCommander:
         return None
 
     def _execute_command(self, command: str, chat_id: str):
+        """将指令派发到后台线程执行，避免阻塞轮询线程（对齐 etfhunter 的 _pipeline_worker）。
+
+        耗时指令（流水线/数据更新/策略）同一时刻仅允许一个实例运行，
+        重复触发时直接提示并跳过，防止并发执行。
+        """
         logger.info("Exec: %s", command)
+        # 耗时指令并发保护：已在运行时直接提示并跳过，避免重复触发
+        if command in _HEAVY_COMMANDS:
+            with self._cmd_lock:
+                if command in self._active_cmds:
+                    self._send_text(chat_id, "指令「" + command + "」正在执行中，请稍候...")
+                    return
+                self._active_cmds.add(command)
+        # 放入后台线程执行，轮询线程立即返回，保证后续消息仍可及时响应
+        threading.Thread(
+            target=self._execute_command_worker,
+            args=(command, chat_id),
+            daemon=True,
+            name="feishu-cmd-" + command,
+        ).start()
+
+    def _execute_command_worker(self, command: str, chat_id: str):
+        """后台线程：实际执行指令逻辑（与轮询线程解耦，避免阻塞）。"""
         try:
             if command == "pipeline":
                 self._run_pipeline()
@@ -216,6 +267,11 @@ class FeishuCommander:
         except Exception as e:
             logger.error("Exec failed: %s - %s", command, e)
             self._send_text(chat_id, "Execution failed: " + str(e))
+        finally:
+            # 指令结束，释放并发保护标记（仅耗时指令）
+            if command in _HEAVY_COMMANDS:
+                with self._cmd_lock:
+                    self._active_cmds.discard(command)
 
     def _run_pipeline(self):
         from scheduler.pipeline_orchestrator import PipelineOrchestrator
@@ -335,37 +391,28 @@ class FeishuCommander:
             logger.error("Send error: %s", e)
 
     def handle_callback(self, body: dict) -> dict:
+        """飞书事件回调入口（仅用于 URL 验证，不再处理指令）。
+
+        系统采用"仅轮询"模式接收指令：指令由后台轮询线程从群聊拉取并执行，
+        回调通道只保留飞书开放平台要求的 URL 验证响应，收到消息事件时直接
+        忽略，避免与轮询通道重复执行同一指令（双通道去重根因消除）。
+
+        返回:
+            - url_verification / 含 challenge: {"challenge": value}（保留验证能力）
+            - event_callback / 其他事件: {}（忽略，不执行任何指令）
+        """
         event_type = body.get("type", "")
+        # 飞书配置回调 URL 时的验证请求，必须原样返回 challenge
         if event_type == "url_verification":
-            challenge = body.get("challenge", "")
-            return {"challenge": challenge}
+            return {"challenge": body.get("challenge", "")}
         challenge = body.get("challenge")
         if challenge:
             return {"challenge": challenge}
-        if event_type == "event_callback":
-            event = body.get("event", {})
-            if event.get("type") == "im.message.receive_v1":
-                threading.Thread(target=self._handle_callback_message, args=(event,), daemon=True).start()
+        # 消息事件等一律忽略：指令统一由轮询通道（_poll_loop）处理
+        logger.info("Feishu callback event=%s ignored (poll-only mode)", event_type)
         return {}
 
-    def _handle_callback_message(self, event: dict):
-        try:
-            if not self.enabled:
-                return
-            message = event.get("message", {})
-            chat_id = message.get("chat_id", "")
-            if message.get("message_type") != "text":
-                return
-            text = self._extract_text_content(message.get("content", "{}"))
-            if not text:
-                return
-            command = self._parse_command(text)
-            if not command:
-                return
-            logger.info("Callback cmd: %s", command)
-            self._execute_command(command, chat_id)
-        except Exception as e:
-            logger.error("Callback error: %s", e)
+
 
 
 def get_commander(config: dict = None):
