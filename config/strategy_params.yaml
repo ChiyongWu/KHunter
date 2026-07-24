@@ -1322,7 +1322,7 @@ strategies:
         min: 0.02
         type: float
       min_volume_ratio:
-        default: 1.2
+        default: 1.5
         description: 最小量能倍数，当日成交量需要是前5日均量的此倍数以上
         display_name: 量能倍数
         group: 选股条件
@@ -1364,7 +1364,7 @@ strategies:
       ma10_period: 10
       ma_period: 25
       min_price_change: 0.05
-      min_volume_ratio: 1.2
+      min_volume_ratio: 1.5
       strategy_weight: 70
       vol_ma_long: 60
       vol_ma_short: 5
