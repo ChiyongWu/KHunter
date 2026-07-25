@@ -255,6 +255,13 @@ class BacktestEngine:
             # 回测配置：买入股票池遍历顺序（0=正序老股票优先，1=倒序新加入股票优先）
             engine_config = self._load_engine_config()
             reverse_pool_order = engine_config.get('reverse_pool_order', 0)
+
+            # 股票池移除模式：config 传入优先，其次配置文件（backtest_engine_config.yaml）的 pool_mode，最后默认 persistent
+            self.pool_mode = config.get('pool_mode') or engine_config.get('pool_mode', 'persistent')
+            if self.pool_mode not in ('persistent', 'rotation'):
+                logger.warning(f"未知 pool_mode={self.pool_mode}，回退为 persistent")
+                self.pool_mode = 'persistent'
+            logger.info(f"股票池模式 pool_mode={self.pool_mode}（来源：{'config' if config.get('pool_mode') else 'config_file'}）")
             # 股票累计买入次数计数器 {stock_code: buy_count}
             stock_buy_count = {}
             
@@ -331,7 +338,9 @@ class BacktestEngine:
                 # 检查股票池移除条件（在选股之前执行，使用前一日收盘价）
                 if self.buy_candidate_pool:
                     logger.info(f"开始检查股票池移除条件，当前股票池数量: {len(self.buy_candidate_pool)}")
-                    removed = self._check_pool_removal(current_date, config)
+                    # 构造当前持仓代码集合：轮动模式下用于移除非持仓候选
+                    held_codes = {pos.get('stock_code') for pos in positions if pos.get('stock_code')}
+                    removed = self._check_pool_removal(current_date, config, held_codes=held_codes)
                     if removed:
                         logger.info(f"股票池移除 {len(removed)} 只股票")
                 
@@ -1470,7 +1479,7 @@ class BacktestEngine:
         
         raise KeyError(f"策略 {strategy_name} 未配置股票池移除参数，请在 config/pool_removal_config.yaml 中添加")
 
-    def _check_pool_removal(self, current_date, config):
+    def _check_pool_removal(self, current_date, config, held_codes=None):
         """检查股票池中需要移除的股票
         
         移除条件（满足任一即移除）：
@@ -1485,13 +1494,31 @@ class BacktestEngine:
         - 20日线性回归斜率 > 0
         - 20日R²拟合度 >= 0.3
         
+        股票池模式（pool_mode，由 config 控制）：
+        - persistent（默认）：维持现状，仅按上述条件移除，池跨交易日累积
+        - rotation（轮动）：在条件移除之前，先把池中“非持仓”候选全部轮出，
+          仅保留当前已持仓候选；持仓候选仍走上述条件移除。即每日可买池 =
+          已持仓 + 当日新选，历史老候选每日被轮出。
+        
         Args:
             current_date: 当前交易日期
-            config: 回测配置
+            config: 回测配置（含 pool_mode）
+            held_codes: 当前持仓股票代码集合，轮动模式下用于移除非持仓候选
             
         Returns:
             list: 移除的候选列表
         """
+        # 股票池移除模式：config 传入优先，其次实例属性（已由 run_backtest 融合配置文件），最后默认 persistent
+        pool_mode = config.get('pool_mode') or getattr(self, 'pool_mode', 'persistent')
+        if pool_mode not in ('persistent', 'rotation'):
+            logger.warning(f"未知 pool_mode={pool_mode}，回退为 persistent")
+            pool_mode = 'persistent'
+        # 当前持仓代码集合（轮动模式用于移除非持仓候选）；缺省为空集
+        if held_codes is None:
+            held_codes = set()
+        else:
+            held_codes = set(held_codes)
+        
         removed_candidates = []
         remaining_candidates = []
         
@@ -1509,6 +1536,13 @@ class BacktestEngine:
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
             strategy_name = candidate.get('strategy_name', '')
+            
+            # 轮动模式：非持仓候选直接轮出，不参与条件判断（持仓候选仍走下方条件移除）
+            if pool_mode == 'rotation' and stock_code not in held_codes:
+                removed_candidates.append(candidate)
+                logger.info(f"【轮出】{current_date} {stock_code} {stock_name}: "
+                           f"轮动模式移除非持仓候选（当前持仓 {len(held_codes)} 只）")
+                continue
             
             # 获取策略的移除配置
             removal_config = self._get_strategy_removal_config(strategy_name)
