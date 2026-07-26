@@ -652,7 +652,9 @@ class StrategyRunner:
 
         # 第1步：一次SQL获取选股日有K线的活跃股票（退市/停牌自动排除）
         step1_start = datetime.now()
-        active_codes = self.db_manager.get_active_stock_codes(current_date)
+        # 向前回看5个交易日，解除对"当日"K线的强依赖：
+        # 当日K线未入库(盘后延迟)时，只要近5日有K线即视为活跃，避免预加载整体跳过
+        active_codes = self.db_manager.get_active_stock_codes(current_date, lookback_days=5)
         step1_time = (datetime.now() - step1_start).total_seconds()
         total_stocks = len(self.db_manager.list_all_stocks())
         logger.info(f"[预加载-第1步] 选股日{current_date}有效股票: {len(active_codes)} 只, "
@@ -660,7 +662,11 @@ class StrategyRunner:
                     f"耗时 {step1_time:.1f}s")
 
         if not active_codes:
-            logger.warning("没有活跃股票数据，跳过预加载")
+            # 升级为 error：预加载整体失败属异常(近5日均无K线才可能触发)
+            # 注意：此处"不"设置 self._preload_date，保留 need_reload 重试能力，
+            # 避免当日固化导致后续运行不再重试预加载
+            logger.error("【预加载】近5日均无活跃股票数据，跳过本次预加载；"
+                         "未设置预加载日期以保留重试，请核查K线入库情况")
             return
 
         # 第2步：一次SQL批量加载活跃股票K线（仅限定日期范围）
@@ -1073,7 +1079,14 @@ class StrategyRunner:
             # 获取股票数据
             df = self.stock_filtered_cache.get(stock_code)
             if df is None:
-                logger.debug(f"【股票池移除】{stock_code} {stock_name} 缓存无数据，跳过检查")
+                # 老股票(>=min_hold_days)缓存无数据属异常，升级为 warning 让滞留可见；
+                # 新股票数据尚未覆盖属正常，保持 debug
+                if hold_days >= min_hold_days:
+                    logger.warning(f"【股票池移除】{stock_code} {stock_name} 持有{hold_days}天但缓存无数据，"
+                                   f"移除检查被跳过(可能预加载未覆盖)，请核查数据")
+                else:
+                    logger.debug(f"【股票池移除】{stock_code} {stock_name} 缓存无数据"
+                                 f"(持有{hold_days}天<{min_hold_days})，跳过检查")
                 remaining.append(candidate)
                 continue
             
@@ -1081,7 +1094,13 @@ class StrategyRunner:
             # 注意：缓存数据是正序排列的（最旧日期在前面），iloc[-1] 才是最新
             df_for_support = df[df['date'] <= current_date].copy()
             if len(df_for_support) < 20:
-                logger.debug(f"【股票池移除】{stock_code} {stock_name} 数据不足{len(df_for_support)}天<20，跳过检查")
+                # 老股票数据不足属异常，升级为 warning；新股票保持 debug
+                if hold_days >= min_hold_days:
+                    logger.warning(f"【股票池移除】{stock_code} {stock_name} 持有{hold_days}天但数据不足"
+                                   f"{len(df_for_support)}天<20，支撑位检查被跳过，请核查数据")
+                else:
+                    logger.debug(f"【股票池移除】{stock_code} {stock_name} 数据不足"
+                                 f"{len(df_for_support)}天<20，跳过检查")
                 remaining.append(candidate)
                 continue
             price_for_check = df_for_support.iloc[-1]['close']  # 正序数据，iloc[-1] 为最新
@@ -1101,7 +1120,18 @@ class StrategyRunner:
             should_remove = False
             
             # 条件1: 破支撑位移除
-            support_level = candidate.get('support_level', 0.0)
+            # 支撑位语义：ma20 方法使用"当前动态 MA20"(每日随行情刷新)，
+            # 契合原设计"支撑位选入时确定、ma20 除外可变化"的约定；
+            # 其余方法(key_close_5/key_open/key_close)保留加入时固定的 support_level
+            support_method = candidate.get('support_method', 'unknown')
+            if support_method == 'ma20' and len(df_for_support) >= 20:
+                # 动态 MA20：取截至 current_date 最近20日收盘均值
+                dynamic_ma20 = round(float(df_for_support['close'].tail(20).mean()), 2)
+                # 刷新为动态支撑位，使移除判定与前端展示保持一致
+                candidate['support_level'] = dynamic_ma20
+                support_level = dynamic_ma20
+            else:
+                support_level = candidate.get('support_level', 0.0)
             if support_level > 0 and price_for_check > 0:
                 if price_for_check < support_level * 0.98:
                     should_remove = True
@@ -1682,8 +1712,10 @@ class StrategyRunner:
                 # 合并旧 portfolio 中的追踪字段（PTrade Hold CSV 不包含这些字段）
                 # add_count 丢失会导致已加仓股票被误判为首次加仓，加仓数量计算错误
                 # self.portfolio 此时可能为空，需从上一个交易日 portfolio 文件加载旧数据
-                old_portfolio = self._load_previous_portfolio_for_merge(portfolio_date)
-                self._merge_tracking_fields(old_portfolio, new_positions)
+                # 依据 PTrade 反馈数量与前一日本地数量差推导加仓次数（当天只算一次）
+                prev_portfolio = self._load_previous_portfolio_for_merge(portfolio_date)
+                working_date = self.get_working_date()
+                self._reconcile_tracking_from_ptrade(prev_portfolio, new_positions, working_date)
                 self.portfolio = self._normalize_portfolio_keys(new_positions)
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
@@ -1996,57 +2028,63 @@ class StrategyRunner:
             return {}
 
     @staticmethod
-    def _merge_tracking_fields(old_portfolio: Dict, new_positions: Dict):
-        """将旧 portfolio 中的追踪字段合并到 PTrade 新建的持仓数据中
-        
-        PTrade Hold CSV 只包含基本持仓信息（代码、数量、成本价等），不包含
-        add_count、last_add_date 等 KHunter 内部追踪字段。这些字段丢失会导致：
-        - 已加仓的股票被误判为首次加仓（add_count 重置为0）
-        - 加仓数量和价格计算错误
-        - 策略信号生成偏差
-        
-        本方法将旧数据中的追踪字段合并到新持仓中，确保 PTrade 覆盖不丢失状态。
-        
+    def _reconcile_tracking_from_ptrade(prev_portfolio: Dict, new_positions: Dict, working_date: str):
+        """依据 PTrade 反馈数量与前一日本地数量的差值，推导并记录加仓次数。
+
+        KHunter 为日线级别系统，每天只交易一次，加仓为跨日事件。该方法在
+        PTrade 同步时用"可验证事实（持仓数量）"推导 add_count，取代原先依赖
+        内存合并的脆弱机制，避免历史加仓计数在同步中被回退/丢失。
+
+        规则（锚定"上一交易日 portfolio 文件"为固定基准，当天只算一次）：
+          - 前一日无持仓(prev_qty==0) → 当日为建仓，add_count=0；
+          - 前一日有持仓且 反馈数量>prev_qty → 当日加仓一次，
+            add_count = prev_add_count + 1，并记录 last_add_date/last_add_price；
+          - 反馈数量==prev_qty → 当日未加仓，add_count 不变；
+          - 反馈数量<prev_qty → 减仓/卖出，add_count 保留前一日值。
+
         Args:
-            old_portfolio: 合并前的旧持仓字典 {stock_code: {...}}
-            new_positions: PTrade 构建的新持仓字典 {stock_code.SZ: {...}}，会被原地修改
+            prev_portfolio: 上一交易日 portfolio 文件中的旧持仓 {code: {...}}
+            new_positions: PTrade 构建的新持仓（原地修改，目标）
+            working_date: 当前工作日 YYYY-MM-DD（用于记录 last_add_date）
         """
-        # PTrade 代码可能带 .SZ/.SH 后缀，需要同时尝试匹配
+        # 遍历 PTrade 返回的每只持仓，按数量差推导加仓计数
         for new_code, new_pos in new_positions.items():
-            # 尝试多种方式匹配旧持仓中的对应条目
-            old_pos = old_portfolio.get(new_code)  # 精确匹配
-            if not old_pos:
+            # PTrade 代码可能带 .SZ/.SH 后缀，需尝试两种匹配方式
+            prev_pos = prev_portfolio.get(new_code)  # 精确匹配
+            if not prev_pos:
                 # 去除 PTrade 后缀再匹配（如 002179.SZ → 002179）
                 clean_code = new_code.replace('.SZ', '').replace('.SH', '')
-                old_pos = old_portfolio.get(clean_code)
-            if not old_pos:
-                continue  # 新开仓股票，无旧数据可合并
-            
-            # 数量一致性校验：PTrade 实际持仓 vs 旧 portfolio 记录
-            # PTrade 可能未执行加仓委托，若数量未增加则 add_count 不应递增
-            new_qty = new_pos.get('quantity', 0)
-            old_qty = old_pos.get('quantity', 0)
-            stock_name = new_pos.get('stock_name', new_code)
-            old_add_count = old_pos.get('add_count', 0)
-            
-            if new_qty < old_qty:
-                # PTrade 数量少于预期，加仓可能未执行或部分成交
-                # 此时 add_count 不可靠，跳过合并，避免误判加仓次数
-                logger.warning(
-                    f"【PTrade同步】{stock_name}({new_code}) PTrade数量({new_qty}) "
-                    f"< 持仓记录({old_qty})，加仓可能未完全执行，"
-                    f"跳过 add_count={old_add_count} 合并")
+                prev_pos = prev_portfolio.get(clean_code)
+
+            # 前一日无该股票记录 → 当日为建仓，add_count 保持 0（不算加仓）
+            if not prev_pos:
+                new_pos['add_count'] = 0
                 continue
-            
-            # 保留旧 portfolio 中的加仓追踪字段（PTrade Hold CSV 无法提供）
-            preserved_count = 0
-            for field in ['add_count', 'last_add_date', 'last_add_price']:
-                if field in old_pos:
-                    new_pos[field] = old_pos[field]
-                    preserved_count += 1
-            if preserved_count > 0:
-                logger.info(f"【PTrade同步】{stock_name}({new_code}) 保留追踪字段: "
-                           f"add_count={old_add_count}, 合并字段数={preserved_count}")
+
+            # 取出前一日数量与已加仓次数（固定基准，不随当日同步变化）
+            prev_qty = prev_pos.get('quantity', 0)
+            prev_count = prev_pos.get('add_count', 0)
+            new_qty = new_pos.get('quantity', 0)
+            stock_name = new_pos.get('stock_name', new_code)
+
+            # 前一日无持仓视为建仓，不计入加仓次数
+            if prev_qty == 0:
+                new_pos['add_count'] = 0
+                logger.info(f"【PTrade同步】{stock_name}({new_code}) 前一日无持仓，判定为建仓，add_count=0")
+                continue
+
+            # 反馈数量 > 前一日数量 → 当日发生加仓，计数 +1（当天只算一次）
+            if new_qty > prev_qty:
+                new_pos['add_count'] = prev_count + 1
+                new_pos['last_add_date'] = working_date
+                new_pos['last_add_price'] = new_pos.get('cost_price', new_pos.get('buy_price'))
+                logger.info(f"【PTrade同步】{stock_name}({new_code}) 当日加仓："
+                           f"前一日{prev_qty}→反馈{new_qty}，add_count={prev_count}→{prev_count + 1}")
+            else:
+                # 反馈数量未增加（未加仓或减仓/卖出），保留前一日计数与追踪字段
+                new_pos['add_count'] = prev_count
+                new_pos['last_add_date'] = prev_pos.get('last_add_date')
+                new_pos['last_add_price'] = prev_pos.get('last_add_price')
 
     @staticmethod
     def _normalize_portfolio_keys(positions: Dict) -> Dict:

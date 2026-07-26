@@ -965,23 +965,35 @@ class DBManager:
             logger.debug(f"获取所有股票名称失败: {str(e)}")
             return {}
 
-    def get_active_stock_codes(self, target_date: str) -> set:
+    def get_active_stock_codes(self, target_date: str, lookback_days: int = 0) -> set:
         """
-        批量获取指定日期有K线数据的股票代码集合（一次SQL替代逐个检查）
+        批量获取指定日期(或向前回看窗口)有K线数据的股票代码集合（一次SQL替代逐个检查）
 
-        用于退市/停牌过滤：选股日无K线的股票会被排除在结果集外
+        用于退市/停牌过滤：选股日无K线的股票会被排除在结果集外。
+        lookback_days 用于解除对"当日"K线的强依赖——当当日K线尚未入库
+        (盘后数据延迟)时，向前回看若干交易日，只要窗口内有K线即视为活跃，
+        避免预加载因当日数据缺失而整体跳过。
 
         Args:
             target_date: 目标日期，格式YYYY-MM-DD
+            lookback_days: 向前回看交易日天数，默认0表示仅取当日(原行为，向后兼容)
 
         Returns:
-            set: 当日有K线数据的股票代码集合
+            set: 有K线数据的股票代码集合
         """
         try:
-            sql = "SELECT DISTINCT code FROM stock_kline WHERE date = ?"
-            results = self.query(sql, (target_date,))
+            if lookback_days and lookback_days > 0:
+                # 窗口模式：取 [target_date - lookback_days, target_date] 内有K线的股票
+                sql = "SELECT DISTINCT code FROM stock_kline WHERE date BETWEEN date(?, ?) AND ?"
+                results = self.query(sql, (target_date, f'-{lookback_days} days', target_date))
+                logger.info(f"[批量] 获取 {target_date} 前{lookback_days}日有效股票: "
+                            f"{len(results) if results else 0} 只")
+            else:
+                # 默认模式：仅取当日(向后兼容选股场景)
+                sql = "SELECT DISTINCT code FROM stock_kline WHERE date = ?"
+                results = self.query(sql, (target_date,))
+                logger.info(f"[批量] 获取 {target_date} 有效股票: {len(results) if results else 0} 只")
             codes = {row['code'] for row in results} if results else set()
-            logger.info(f"[批量] 获取 {target_date} 有效股票: {len(codes)} 只")
             return codes
         except Exception as e:
             logger.error(f"获取有效股票代码失败: {str(e)}")
