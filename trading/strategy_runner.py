@@ -1715,7 +1715,12 @@ class StrategyRunner:
                 # 依据 PTrade 反馈数量与前一日本地数量差推导加仓次数（当天只算一次）
                 prev_portfolio = self._load_previous_portfolio_for_merge(portfolio_date)
                 working_date = self.get_working_date()
-                self._reconcile_tracking_from_ptrade(prev_portfolio, new_positions, working_date)
+                # 加载持久化追踪账本，作为 add_count 等字段的权威累积基准
+                position_tracking = self._load_position_tracking()
+                # 以账本为基准推导加仓次数，结果同时写回 new_positions 与账本
+                self._reconcile_tracking_from_ptrade(prev_portfolio, new_positions, working_date, position_tracking)
+                # 持久化账本，确保跨 PTrade 同步不丢失追踪字段
+                self._save_position_tracking(position_tracking)
                 self.portfolio = self._normalize_portfolio_keys(new_positions)
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
@@ -2027,64 +2032,190 @@ class StrategyRunner:
             logger.warning(f"【合并追踪】加载上一交易日 portfolio 失败: {e}")
             return {}
 
+    def _load_position_tracking(self) -> Dict:
+        """加载持仓追踪账本（持久化加仓追踪字段的权威来源）
+
+        账本独立于每日 portfolio 文件，避免 PTrade 同步重建持仓时丢失 add_count 等字段。
+        文件不存在或异常时返回空字典，由 reconcile 逻辑回退到 prev_portfolio 数量差初始化。
+        账本与 portfolio 同目录（self.running_dir），随运行数据一起管理。
+
+        Returns:
+            持仓追踪字典 {stock_code: {quantity, add_count, first_buy_date, buy_date,
+            last_add_date, last_add_price, last_updated}}
+        """
+        # 账本路径与 portfolio 同目录，集中管理运行期数据
+        tracking_file = self.running_dir / "position_tracking.json"
+        # 文件不存在时返回空字典，不阻断同步主流程
+        if not tracking_file.exists():
+            logger.debug(f"【持仓追踪】账本不存在: {tracking_file}，返回空")
+            return {}
+        try:
+            with open(tracking_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            logger.info(f"【持仓追踪】已加载账本: {len(data)} 条")
+            return data
+        except Exception as e:
+            # 账本损坏不应中断主流程，回退为空字典
+            logger.warning(f"【持仓追踪】加载账本失败: {e}，返回空")
+            return {}
+
+    def _save_position_tracking(self, tracking: Dict) -> None:
+        """持久化持仓追踪账本到 JSON 文件
+
+        将 add_count 等追踪字段落盘，作为跨 PTrade 同步的权威来源，
+        彻底解耦于 PTrade 重建逻辑。
+
+        Args:
+            tracking: 持仓追踪字典 {stock_code: {...}}
+        """
+        # 账本与 portfolio 同目录，集中管理运行期数据
+        tracking_file = self.running_dir / "position_tracking.json"
+        try:
+            with open(tracking_file, 'w', encoding='utf-8') as f:
+                json.dump(tracking, f, ensure_ascii=False, indent=2)
+            logger.info(f"【持仓追踪】账本已保存: {len(tracking)} 条 -> {tracking_file}")
+        except Exception as e:
+            # 账本保存失败仅告警，不影响当日 portfolio 同步结果
+            logger.warning(f"【持仓追踪】保存账本失败: {e}")
+
+    def _sync_tracking_on_add(self, stock_code: str, position: Dict, add_date: str, add_price: float) -> None:
+        """加仓执行后同步更新持久化追踪账本
+
+        本地或 PTrade 加仓成交后，将加仓计数与事实写入账本并落盘，
+        作为跨 PTrade 同步的权威来源，避免 add_count 被重建持仓覆盖丢失。
+
+        Args:
+            stock_code: 股票代码（纯数字）
+            position: 更新后的持仓字典（含最新 quantity/add_count）
+            add_date: 加仓日期 YYYY-MM-DD
+            add_price: 加仓价格
+        """
+        # 加载现有账本，保留其他股票的追踪记录
+        tracking = self._load_position_tracking()
+        # 合并当前股票的历史基准（首次建仓日等）
+        prev = tracking.get(stock_code, {})
+        tracking[stock_code] = {
+            'quantity': position.get('quantity', 0),
+            'add_count': position.get('add_count', 0),
+            'first_buy_date': prev.get('first_buy_date', position.get('buy_date')),
+            'buy_date': position.get('buy_date', add_date),
+            'last_add_date': add_date,
+            'last_add_price': add_price,
+            'last_updated': add_date,
+        }
+        # 落盘账本，保证加仓事实持久化
+        self._save_position_tracking(tracking)
+
     @staticmethod
-    def _reconcile_tracking_from_ptrade(prev_portfolio: Dict, new_positions: Dict, working_date: str):
-        """依据 PTrade 反馈数量与前一日本地数量的差值，推导并记录加仓次数。
+    def _reconcile_tracking_from_ptrade(prev_portfolio: Dict, new_positions: Dict,
+                                        working_date: str, tracking: Dict):
+        """依据 PTrade 反馈数量与基准（账本优先，回退上一交易日）数量差值推导加仓次数。
 
-        KHunter 为日线级别系统，每天只交易一次，加仓为跨日事件。该方法在
-        PTrade 同步时用"可验证事实（持仓数量）"推导 add_count，取代原先依赖
-        内存合并的脆弱机制，避免历史加仓计数在同步中被回退/丢失。
+        以持久化账本 tracking 为权威累积基准，替代脆弱的"上一交易日文件 add_count"链，
+        避免首次加仓当天文件缺字段导致链条永久断裂。账本缺失时回退 prev_portfolio 数量差。
+        推导结果同步写回 new_positions 与 tracking。
 
-        规则（锚定"上一交易日 portfolio 文件"为固定基准，当天只算一次）：
-          - 前一日无持仓(prev_qty==0) → 当日为建仓，add_count=0；
-          - 前一日有持仓且 反馈数量>prev_qty → 当日加仓一次，
-            add_count = prev_add_count + 1，并记录 last_add_date/last_add_price；
-          - 反馈数量==prev_qty → 当日未加仓，add_count 不变；
-          - 反馈数量<prev_qty → 减仓/卖出，add_count 保留前一日值。
+        规则（账本优先，回退上一交易日 portfolio 文件）：
+          - 基准无持仓(base_qty==0) → 全新建仓，add_count=0；
+          - 反馈数量>基准数量 → 当日加仓一次，add_count=基准+1；
+          - 反馈数量<=基准数量 → 未加仓/减仓，保留基准计数与追踪字段。
 
         Args:
             prev_portfolio: 上一交易日 portfolio 文件中的旧持仓 {code: {...}}
             new_positions: PTrade 构建的新持仓（原地修改，目标）
             working_date: 当前工作日 YYYY-MM-DD（用于记录 last_add_date）
+            tracking: 持久化持仓追踪账本（原地修改，权威基准与输出）
         """
         # 遍历 PTrade 返回的每只持仓，按数量差推导加仓计数
         for new_code, new_pos in new_positions.items():
-            # PTrade 代码可能带 .SZ/.SH 后缀，需尝试两种匹配方式
-            prev_pos = prev_portfolio.get(new_code)  # 精确匹配
-            if not prev_pos:
-                # 去除 PTrade 后缀再匹配（如 002179.SZ → 002179）
-                clean_code = new_code.replace('.SZ', '').replace('.SH', '')
-                prev_pos = prev_portfolio.get(clean_code)
+            # 统一去除 PTrade 可能带的后缀，保证与账本/池代码一致
+            clean_code = new_code.replace('.SZ', '').replace('.SH', '')
+            # 优先以持久化账本为权威基准（跨同步不丢失）
+            track_pos = tracking.get(clean_code) or tracking.get(new_code)
+            # 回退基准：上一交易日 portfolio 文件
+            prev_pos = prev_portfolio.get(new_code) or prev_portfolio.get(clean_code)
 
-            # 前一日无该股票记录 → 当日为建仓，add_count 保持 0（不算加仓）
-            if not prev_pos:
+            # 提取基准数量、计数与追踪字段（账本优先）
+            if track_pos:
+                base_qty = track_pos.get('quantity', 0)
+                base_count = track_pos.get('add_count', 0)
+                base_first_buy = track_pos.get('first_buy_date')
+                base_buy_date = track_pos.get('buy_date')
+                base_last_add_date = track_pos.get('last_add_date')
+                base_last_add_price = track_pos.get('last_add_price')
+                has_base = True
+            elif prev_pos:
+                base_qty = prev_pos.get('quantity', 0)
+                base_count = prev_pos.get('add_count', 0)
+                base_first_buy = prev_pos.get('first_buy_date', prev_pos.get('buy_date'))
+                base_buy_date = prev_pos.get('buy_date')
+                base_last_add_date = prev_pos.get('last_add_date')
+                base_last_add_price = prev_pos.get('last_add_price')
+                has_base = True
+            else:
+                has_base = False
+
+            # 无基准记录 → 视为全新建仓，初始化账本
+            if not has_base:
                 new_pos['add_count'] = 0
+                tracking[clean_code] = {
+                    'quantity': new_pos.get('quantity', 0),
+                    'add_count': 0,
+                    'first_buy_date': new_pos.get('buy_date'),
+                    'buy_date': new_pos.get('buy_date'),
+                    'last_add_date': None,
+                    'last_add_price': None,
+                    'last_updated': working_date,
+                }
                 continue
 
-            # 取出前一日数量与已加仓次数（固定基准，不随当日同步变化）
-            prev_qty = prev_pos.get('quantity', 0)
-            prev_count = prev_pos.get('add_count', 0)
+            # 基准数量为 0 → 视为建仓，不计入加仓次数
+            if base_qty == 0:
+                new_pos['add_count'] = 0
+                tracking[clean_code] = {
+                    'quantity': new_pos.get('quantity', 0),
+                    'add_count': 0,
+                    'first_buy_date': new_pos.get('buy_date'),
+                    'buy_date': new_pos.get('buy_date'),
+                    'last_add_date': None,
+                    'last_add_price': None,
+                    'last_updated': working_date,
+                }
+                logger.info(f"【PTrade同步】{new_pos.get('stock_name', new_code)} 前无持仓，判定为建仓，add_count=0")
+                continue
+
+            # 反馈数量 > 基准数量 → 当日加仓，计数 +1（当天只算一次）
             new_qty = new_pos.get('quantity', 0)
-            stock_name = new_pos.get('stock_name', new_code)
-
-            # 前一日无持仓视为建仓，不计入加仓次数
-            if prev_qty == 0:
-                new_pos['add_count'] = 0
-                logger.info(f"【PTrade同步】{stock_name}({new_code}) 前一日无持仓，判定为建仓，add_count=0")
-                continue
-
-            # 反馈数量 > 前一日数量 → 当日发生加仓，计数 +1（当天只算一次）
-            if new_qty > prev_qty:
-                new_pos['add_count'] = prev_count + 1
+            if new_qty > base_qty:
+                new_count = base_count + 1
+                new_pos['add_count'] = new_count
                 new_pos['last_add_date'] = working_date
                 new_pos['last_add_price'] = new_pos.get('cost_price', new_pos.get('buy_price'))
-                logger.info(f"【PTrade同步】{stock_name}({new_code}) 当日加仓："
-                           f"前一日{prev_qty}→反馈{new_qty}，add_count={prev_count}→{prev_count + 1}")
+                tracking[clean_code] = {
+                    'quantity': new_qty,
+                    'add_count': new_count,
+                    'first_buy_date': base_first_buy,
+                    'buy_date': working_date,
+                    'last_add_date': working_date,
+                    'last_add_price': new_pos.get('last_add_price'),
+                    'last_updated': working_date,
+                }
+                logger.info(f"【PTrade同步】{new_pos.get('stock_name', new_code)}({new_code}) 当日加仓："
+                           f"基准{base_qty}→反馈{new_qty}，add_count={base_count}→{new_count}")
             else:
-                # 反馈数量未增加（未加仓或减仓/卖出），保留前一日计数与追踪字段
-                new_pos['add_count'] = prev_count
-                new_pos['last_add_date'] = prev_pos.get('last_add_date')
-                new_pos['last_add_price'] = prev_pos.get('last_add_price')
+                # 数量未增加（未加仓或减仓/卖出），保留基准计数与追踪字段
+                new_pos['add_count'] = base_count
+                new_pos['last_add_date'] = base_last_add_date
+                new_pos['last_add_price'] = base_last_add_price
+                tracking[clean_code] = {
+                    'quantity': new_qty,
+                    'add_count': base_count,
+                    'first_buy_date': base_first_buy,
+                    'buy_date': base_buy_date,
+                    'last_add_date': base_last_add_date,
+                    'last_add_price': base_last_add_price,
+                    'last_updated': working_date,
+                }
 
     @staticmethod
     def _normalize_portfolio_keys(positions: Dict) -> Dict:
@@ -2935,6 +3066,10 @@ class StrategyRunner:
                     existing_pos['last_add_price'] = buy_price
                     # 更新加仓次数
                     existing_pos['add_count'] = existing_pos.get('add_count', 0) + 1
+                    # 同步持久化追踪账本，确保 PTrade 同步覆盖后不丢失加仓计数
+                    self._sync_tracking_on_add(
+                        stock_code, existing_pos,
+                        signal.get('date', self.get_working_date()), buy_price)
                     
                     # 扣减资金（买入金额 + 佣金 + 过户费）
                     if hasattr(self, 'current_total_capital'):
