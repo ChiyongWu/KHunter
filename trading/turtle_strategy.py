@@ -296,7 +296,9 @@ class TurtleStrategy(TimingStrategy):
                 # 检查持仓盈利状态：盈利必须超过2%
                 profit_ratio = (current_price - entry_price) / entry_price if entry_price > 0 else 0
                 if profit_ratio > 0.02:  # 盈利超过2%
-                    last_add_price = position.get('last_add_price', entry_price)
+                    # last_add_price 可能为空(None/0)：首次加仓以入场价为基准，
+                    # 故缺失时回退 entry_price（避免 None + float 抛 TypeError）
+                    last_add_price = position.get('last_add_price') or entry_price
                     add_threshold = last_add_price + self.add_atr * latest['atr']
 
                     if latest['high'] >= add_threshold:

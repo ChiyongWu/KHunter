@@ -2184,6 +2184,12 @@ class StrategyRunner:
                 logger.info(f"【PTrade同步】{new_pos.get('stock_name', new_code)} 前无持仓，判定为建仓，add_count=0")
                 continue
 
+            # 用账本记录的首次买入日覆盖 PTrade 同步日（build_portfolio 无建仓日期
+            # 字段，会把 buy_date 硬编码为同步日），保证移动止损"买入以来最高价"
+            # 的区间从真实建仓日开始计算，而非被截断为"同步日以来"
+            if base_first_buy:
+                new_pos['buy_date'] = base_first_buy
+
             # 反馈数量 > 基准数量 → 当日加仓，计数 +1（当天只算一次）
             new_qty = new_pos.get('quantity', 0)
             if new_qty > base_qty:
@@ -2216,6 +2222,25 @@ class StrategyRunner:
                     'last_add_price': base_last_add_price,
                     'last_updated': working_date,
                 }
+
+        # 清理已清仓股票的追踪记录：加仓信息只针对有持仓的股票，
+        # 实盘已无持仓（不在本次 PTrade 反馈中）则账本不保留，避免残留计数
+        # 导致该股票重新建仓时被误判为"未加仓/沿用旧计数"
+        present_codes = set()
+        for code in new_positions:
+            # 同时纳入原始代码与去后缀代码，确保带 .SZ/.SH 后缀的反馈也能匹配
+            present_codes.add(code)
+            present_codes.add(code.replace('.SZ', '').replace('.SH', ''))
+        for code in [c for c in tracking if c not in present_codes]:
+            logger.info(f"【PTrade同步】{code} 实盘已无持仓，清除追踪账本记录")
+            del tracking[code]
+
+        # 兜底：确保每只持仓都携带 first_buy_date 字段，供移动止损"买入以来最高价"
+        # 直接使用，避免每日检查（仅 load_portfolio、不重新 reconcile）时 buy_date 仍
+        # 为 PTrade 同步日导致区间被截断。缺失时回退到 buy_date
+        for _pos in new_positions.values():
+            if not _pos.get('first_buy_date'):
+                _pos['first_buy_date'] = _pos.get('buy_date')
 
     @staticmethod
     def _normalize_portfolio_keys(positions: Dict) -> Dict:
@@ -2273,7 +2298,36 @@ class StrategyRunner:
             logger.info(f"持仓信息已保存到: {portfolio_file}")
         except Exception as e:
             logger.error(f"保存持仓文件失败: {str(e)}")
-    
+
+    def _merge_tracking_into_portfolio(self):
+        """从持久化账本合并追踪字段到当前持仓，保证择时加仓编号与移动止损区间正确。
+
+        每日买入检查/执行仅 load_portfolio，而 portfolio 文件常缺失 add_count、
+        last_add_date、last_add_price、first_buy_date 等由 sync/reconcile 维护、
+        以账本 position_tracking 为权威的字段，导致：①择时加仓误判为"加仓#1"（实际
+        已加仓多次，如 000526 账本 add_count=1 却显示加仓#1）；②移动止损"买入以来
+        最高价"区间被同步日截断。以账本为准覆盖这些字段，确保 ||当前持仓|| 与账本一致。
+        """
+        # 每日检查路径未必加载账本，按需加载（sync 路径已加载则复用，避免重复 IO）
+        if not hasattr(self, 'position_tracking') or not self.position_tracking:
+            self.position_tracking = self._load_position_tracking()
+        # 以账本为权威的追踪字段列表
+        for code, pos in self.portfolio.items():
+            # 账本键为无后缀代码，持仓键可能带 .SZ/.SH 后缀，两种都查，避免漏合
+            track = self.position_tracking.get(code)
+            if track is None:
+                track = self.position_tracking.get(code.replace('.SZ', '').replace('.SH', ''))
+            if not track:
+                continue  # 账本无记录（全新本地建仓）则保留 portfolio 原值
+            # 加仓次数以账本为准，确保择时信号"加仓#N"编号正确
+            pos['add_count'] = track.get('add_count', pos.get('add_count', 0))
+            # 首次建仓日以账本为准（移动止损"买入以来"区间从真实建仓日开始）
+            if not pos.get('first_buy_date'):
+                pos['first_buy_date'] = track.get('first_buy_date') or pos.get('buy_date')
+            # 加仓历史补全（供展示/审计），缺失或为空时以账本覆盖
+            pos['last_add_date'] = track.get('last_add_date')
+            pos['last_add_price'] = track.get('last_add_price')
+
     def _load_signals(self, signals_file: str) -> List:
         """加载信号历史
         
@@ -3231,7 +3285,9 @@ class StrategyRunner:
             # 加载持仓信息
             portfolio_data = self._load_portfolio(str(portfolio_file))
             self.portfolio = self._normalize_portfolio_keys(portfolio_data.get('positions', {}))
-            
+            # 合并账本追踪字段（add_count/first_buy_date 等），保证择时加仓编号正确
+            self._merge_tracking_into_portfolio()
+
             # 加载信号
             self.signals = self._load_signals(str(signals_file))
             
@@ -3549,6 +3605,71 @@ class StrategyRunner:
             logger.error(f"获取股票名称失败 {stock_code}: {str(e)}")
             return stock_code
     
+    def _calc_trailing_stop(self, buy_price, current_price, holding_df,
+                            enable_trailing_stop=True, base_stop_level=-6,
+                            trailing_trigger_threshold=5):
+        """计算移动止损价(通用方法，便于单元测试)
+
+        直接基于持仓期K线的最高价计算移动止损：
+        - 持仓期最高收益率 >= 触发阈值(默认5%)：移动止损 = 最高价 × 92%
+        - 否则(或未启用/无数据)：固定止损 = 买入价 × (1 + 基础止损)
+
+        Args:
+            buy_price: 买入价
+            current_price: 当前价(无持仓期数据时兜底作为最高价)
+            holding_df: 持仓期K线DataFrame(需含 'high' 列)，来自持久化数据库
+            enable_trailing_stop: 是否启用移动止损
+            base_stop_level: 基础止损百分比(默认 -6)
+            trailing_trigger_threshold: 触发移动止损的最低收益率(%)
+
+        Returns:
+            (stop_price, current_stop, highest_price, highest_price_return)
+        """
+        # 默认按固定止损初始化(买入价 × (1 - 6%))
+        current_stop = base_stop_level / 100
+        highest_price = current_price  # 无数据时以当前价作为最高价
+        highest_price_return = 0
+        stop_price = buy_price * (1 + current_stop)
+
+        # 仅在启用且有持仓期数据时计算移动止损
+        if enable_trailing_stop and holding_df is not None and not holding_df.empty:
+            highest_price = holding_df['high'].max()  # 持仓期最高价
+            # 最高收益率 = (最高价 - 买入价) / 买入价
+            highest_price_return = (highest_price - buy_price) / buy_price * 100
+            # 达到触发阈值才启用移动止损(最高价 × 92%)
+            if highest_price_return >= trailing_trigger_threshold:
+                stop_price = highest_price * 0.92
+                current_stop = (stop_price - buy_price) / buy_price
+
+        return stop_price, current_stop, highest_price, highest_price_return
+
+    def _resolve_first_buy_date(self, stock_code: str, position: Dict) -> str:
+        """从持久化账本解析首次建仓日（移动止损"买入以来"区间的权威起点）
+
+        直接使用 position_tracking.json（持久化账本）的 first_buy_date，而非依赖
+        self.portfolio（其 buy_date 为 PTrade 同步日、且键可能带后缀导致合并查不到）。
+        账本无记录时回退到 portfolio 的 first_buy_date / buy_date。
+
+        Args:
+            stock_code: 持仓键（可能带 .SZ/.SH 后缀）
+            position: 当前持仓字典（可能缺失 first_buy_date）
+
+        Returns:
+            首次建仓日 YYYY-MM-DD（缺失时回退为空字符串）
+        """
+        # 优先直接读取持久化账本（权威来源），避免内存 merge 因键格式不一致漏合
+        ledger = getattr(self, 'position_tracking', None)
+        if not ledger:
+            ledger = self._load_position_tracking()
+        # 账本键为无后缀代码，持仓键可能带后缀，两种都试
+        track = ledger.get(stock_code)
+        if track is None:
+            track = ledger.get(stock_code.replace('.SZ', '').replace('.SH', ''))
+        if track and track.get('first_buy_date'):
+            return track.get('first_buy_date')
+        # 账本无记录时回退 portfolio 字段（本地建仓等场景）
+        return position.get('first_buy_date') or position.get('buy_date', '')
+
     def _execute_sell_operations(self, trade_date: str, config: Dict = None) -> List[Dict]:
         """执行卖出操作
         
@@ -3630,7 +3751,9 @@ class StrategyRunner:
                 current_price = df.iloc[0]['close']
                 open_price = df.iloc[0]['open']
                 buy_price = position['buy_price']
-                buy_date = position.get('buy_date', '')
+                # 直接读取持久化账本解析首次建仓日（权威），避免 portfolio 的 buy_date
+                # 为 PTrade 同步日、或键带后缀导致 merge 查不到，使移动止损区间被截断
+                buy_date = self._resolve_first_buy_date(stock_code, position)
                 profit_rate = (current_price - buy_price) / buy_price
 
                 # 更新持仓的现价（确保前端显示最新价格）
@@ -3644,38 +3767,29 @@ class StrategyRunner:
                 base_stop_level = -6  # 基础止损固定为-6%
                 trailing_trigger_threshold = 5  # 触发移动止损的最低收益率
 
-                # 计算当前止损线（默认使用基础止损）
-                current_stop = base_stop_level / 100
-                highest_price_return = 0
-                highest_price = current_price  # 默认使用当前价
+                # 移动止损：直接基于持仓期K线(持久化数据库)最高价计算
+                # 先确定持仓期K线来源：优先持久化数据库(建仓日到当日)，缺数据兜底用近期数据
+                holding_df = None
+                data_source = 'none'
+                if enable_trailing_stop and buy_date:
+                    # _get_stock_data_from_db 内部已按数据库代码规范(去后缀)查询，避免
+                    # 内存缓存键格式(无后缀)与持仓键(带后缀)不一致导致查不到、移动止损失效
+                    # 注意：实盘收盘后运行(>15:00)，当日OHLC已完整，纳入持仓期计算
+                    holding_df = self._get_stock_data_from_db(stock_code, buy_date, trade_date)
+                    if holding_df is not None and not holding_df.empty:
+                        data_source = 'db'
+                # 兜底：建仓日缺失或持久化读取失败时，使用已抓取的近期数据
+                if holding_df is None or holding_df.empty:
+                    if df is not None and not df.empty:
+                        holding_df = df.copy()
+                        data_source = 'recent_df'
+                # 调用通用移动止损计算(含最高价/最高收益率/止损价)，便于单元测试
+                stop_price, current_stop, highest_price, highest_price_return = \
+                    self._calc_trailing_stop(buy_price, current_price, holding_df,
+                                             enable_trailing_stop, base_stop_level,
+                                             trailing_trigger_threshold)
 
-                if enable_trailing_stop:
-                    # 从持仓期间的历史数据中获取最高价
-                    # 注意：实盘在收盘后运行(>15:00)，当日OHLC已完整，应纳入持仓期计算
-                    # 与回测不同：回测在次日开盘判断，只看前一交易日之前的数据
-                    holding_df = None
-                    cache_df = None
-                    # 优先从 filtered_cache 获取，回退到 data_cache
-                    if buy_date:
-                        if stock_code in self.stock_filtered_cache:
-                            cache_df = self.stock_filtered_cache[stock_code]
-                        elif stock_code in self.stock_data_cache:
-                            cache_df = self.stock_data_cache[stock_code]
-                        # 筛选买入日期到当日之间的数据（含当日，收盘后执行）
-                        if cache_df is not None:
-                            holding_df = cache_df[(cache_df['date'] >= buy_date) & (cache_df['date'] <= trade_date)].copy()
-                            if not holding_df.empty:
-                                highest_price = holding_df['high'].max()
-                                highest_price_return = (highest_price - buy_price) / buy_price * 100
-
-                    # 移动止损逻辑：
-                    # - 最高收益 < 5%：使用固定止损 -6%
-                    # - 最高收益 >= 5%：移动止损 = 持仓期间最高价 × 92%
-                    if highest_price_return >= trailing_trigger_threshold:
-                        stop_price = highest_price * 0.92
-                        current_stop = (stop_price - buy_price) / buy_price
-
-                    logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}, 数据来源={'filtered_cache' if stock_code in self.stock_filtered_cache else 'data_cache' if cache_df is not None else 'none'}")
+                logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}, 数据来源={data_source}")
                 # ========== 移动止损逻辑结束 ==========
 
                 # 记录择时信号详情
@@ -4317,11 +4431,13 @@ class StrategyRunner:
             # 用户点击执行 = 明确要运行策略，不因旧 daily 文件存在而跳过
             # 策略运行锁 (_strategy_run_lock) 已防止并发重复执行
             
-            # 加载持仓信息
+            # 加载持仓信息（无条件执行：原代码误缩进进 auto 失败分支导致 portfolio_file 未定义）
             portfolio_file = self.running_dir / f"portfolio_{working_date}.json"
             portfolio_data = self._load_portfolio(str(portfolio_file))
             self.portfolio = self._normalize_portfolio_keys(portfolio_data.get('positions', {}))
-            
+            # 合并账本追踪字段（add_count/first_buy_date 等），保证择时加仓编号正确
+            self._merge_tracking_into_portfolio()
+
             # 加载信号历史
             signals_file = self.running_dir / f"signals_{working_date}.json"
             self.signals = self._load_signals(str(signals_file))
