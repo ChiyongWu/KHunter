@@ -52,6 +52,42 @@ EXCHANGE_SUFFIX_MAP = {
 ETF_CODE_PREFIXES = ('15', '16', '50', '51', '588')
 
 
+def _read_csv(file_path, encoding='gbk'):
+    """单次读取 CSV 文件，不做重试。
+
+    设计原则：读取反馈文件时若发生异常（如 PTrade 正在写入导致文件被占用/不完整），
+    直接抛出明确异常交由上层 alert 用户，不做重试或回退，避免展示错误数据。
+
+    Args:
+        file_path: CSV 文件路径
+        encoding: 文件编码（PTrade 导出默认为 gbk）
+
+    Returns:
+        (headers, rows): 表头列表与有效数据行列表（已过滤空行）
+
+    Raises:
+        PTradeFeedbackError: 读取或解析失败时抛出，含明确上下文
+    """
+    try:
+        with open(file_path, 'r', encoding=encoding) as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            # 过滤完全为空的行，避免后续解析空行导致误判
+            rows = [r for r in reader if r and any(c.strip() for c in r)]
+    except (PermissionError, OSError, IOError, UnicodeDecodeError, csv.Error) as e:
+        # 读取失败（如文件被 PTrade 占用/正在写入）直接抛明确异常，由上层 alert 用户
+        raise PTradeFeedbackError(
+            f"读取反馈文件失败: {file_path} - {type(e).__name__}: {e}") from e
+    except Exception as e:
+        # 其他非预期错误也统一抛明确异常，不静默吞掉
+        raise PTradeFeedbackError(
+            f"读取反馈文件失败: {file_path} - {e}") from e
+    # 表头缺失同样视为异常，直接抛出
+    if not headers:
+        raise PTradeFeedbackError(f"反馈文件表头为空: {file_path}")
+    return headers, rows
+
+
 class PTradeFeedbackHandler:
     """PTrade 反馈处理器
 
@@ -195,42 +231,48 @@ class PTradeFeedbackHandler:
 
         Returns:
             {available_cash, total_asset, market_value}
+
+        Raises:
+            PTradeFeedbackError: 文件缺失或数值解析异常时抛出
         """
         fund_file = os.path.join(
             self.feedback_dir, f"Fund_{date_str}.csv")
         if not os.path.isfile(fund_file):
-            raise FileNotFoundError(f"Fund 文件不存在: {fund_file}")
-
-        with open(fund_file, 'r', encoding='gbk') as f:
-            reader = csv.reader(f)
-            # 读取表头并构建列名索引
-            headers = next(reader)
-            # 构建列名 → 列索引映射
-            col_map = {h.strip(): i for i, h in enumerate(headers)}
-            # 读取数据行
-            for row in reader:
-                if not row or all(c.strip() == '' for c in row):
-                    continue
-                # 安全提取 float 值
-                def _safe_float(idx):
-                    if idx < len(row) and row[idx].strip():
-                        return float(row[idx].strip())
-                    return 0.0
-                # 使用列名定位关键字段
-                available_cash = _safe_float(col_map.get("可用资金", 3))
-                total_asset = _safe_float(col_map.get("总资产", 5))
-                market_value = _safe_float(col_map.get("证券市值", 9))
-                result = {
-                    "available_cash": round(available_cash, 2),
-                    "total_asset": round(total_asset, 2),
-                    "market_value": round(market_value, 2),
-                }
-                logger.info(
-                    f"PTrade 反馈: 解析资金数据 {date_str} - "
-                    f"可用资金={result['available_cash']}, "
-                    f"总资产={result['total_asset']}, "
-                    f"证券市值={result['market_value']}")
-                return result
+            # 文件缺失直接抛明确异常，交由 sync 层安全返回
+            raise PTradeFeedbackError(f"Fund 文件不存在: {fund_file}")
+        # 读取 CSV（单次读取，异常直接抛明确异常交由上层 alert 用户）
+        headers, rows = _read_csv(fund_file)
+        if not headers:
+            raise PTradeFeedbackError(f"Fund 文件表头为空: {fund_file}")
+        # 构建列名 → 列索引映射
+        col_map = {h.strip(): i for i, h in enumerate(headers)}
+        # 安全提取 float 值（非数值内容抛明确异常，便于定位坏数据）
+        def _safe_float(row, idx, name):
+            if idx < len(row) and row[idx].strip():
+                try:
+                    return float(row[idx].strip())
+                except (ValueError, TypeError):
+                    raise PTradeFeedbackError(
+                        f"Fund 文件数值解析失败: {name}={row[idx]!r} (文件 {fund_file})")
+            return 0.0
+        # 遍历数据行，取首个有效行
+        for row in rows:
+            if not row or all(c.strip() == '' for c in row):
+                continue
+            available_cash = _safe_float(row, col_map.get("可用资金", 3), "可用资金")
+            total_asset = _safe_float(row, col_map.get("总资产", 5), "总资产")
+            market_value = _safe_float(row, col_map.get("证券市值", 9), "证券市值")
+            result = {
+                "available_cash": round(available_cash, 2),
+                "total_asset": round(total_asset, 2),
+                "market_value": round(market_value, 2),
+            }
+            logger.info(
+                f"PTrade 反馈: 解析资金数据 {date_str} - "
+                f"可用资金={result['available_cash']}, "
+                f"总资产={result['total_asset']}, "
+                f"证券市值={result['market_value']}")
+            return result
         # 无数据行
         return {"available_cash": 0.0, "total_asset": 0.0, "market_value": 0.0}
 
@@ -254,75 +296,92 @@ class PTradeFeedbackHandler:
 
         Returns:
             持仓列表 [{stock_code, stock_name, quantity, ...}]
+
+        Raises:
+            PTradeFeedbackError: 文件缺失或数值解析异常时抛出
         """
         hold_file = os.path.join(
             self.feedback_dir, f"Hold_{date_str}.csv")
         if not os.path.isfile(hold_file):
-            raise FileNotFoundError(f"Hold 文件不存在: {hold_file}")
-
+            # 文件缺失直接抛明确异常，交由 sync 层安全返回
+            raise PTradeFeedbackError(f"Hold 文件不存在: {hold_file}")
+        # 读取 CSV（单次读取，异常直接抛明确异常交由上层 alert 用户）
+        headers, rows = _read_csv(hold_file)
+        if not headers:
+            raise PTradeFeedbackError(f"Hold 文件表头为空: {hold_file}")
+        # 构建列名 → 列索引映射
+        col_map = {h.strip(): i for i, h in enumerate(headers)}
         holdings = []
         self._etf_market_value = 0.0  # 重置 ETF 市值累积值
-        with open(hold_file, 'r', encoding='gbk') as f:
-            reader = csv.reader(f)
-            # 读取表头并构建列名索引
-            headers = next(reader)
-            col_map = {h.strip(): i for i, h in enumerate(headers)}
 
-            for row in reader:
-                if not row or all(c.strip() == '' for c in row):
-                    continue
-                # 安全提取值
-                def _safe_str(idx):
-                    if idx < len(row):
-                        return row[idx].strip()
-                    return ""
+        def _safe_str(row, idx):
+            if idx < len(row):
+                return row[idx].strip()
+            return ""
 
-                def _safe_int(idx):
-                    val = row[idx].strip() if idx < len(row) else "0"
-                    return int(float(val)) if val else 0
+        def _safe_int(row, idx, name):
+            val = row[idx].strip() if idx < len(row) else "0"
+            if not val:
+                return 0
+            try:
+                return int(float(val))
+            except (ValueError, TypeError):
+                # 非数值内容（如被截断的半行）抛明确异常，便于定位坏数据
+                raise PTradeFeedbackError(
+                    f"Hold 文件数值解析失败: {name}={val!r} (文件 {hold_file})")
 
-                def _safe_float(idx):
-                    val = row[idx].strip() if idx < len(row) else "0"
-                    return float(val) if val else 0.0
-                # 提取关键字段
-                trade_category = _safe_str(col_map.get("交易类别", 3))
-                stock_code_raw = _safe_str(col_map.get("证券代码", 4))
-                # ETF 过滤：KHunter 只处理股票，ETF 由其他系统管理
-                # 跳过 ETF 持仓但累积其市值，确保总资产不因过滤而减少
-                if stock_code_raw and stock_code_raw.startswith(ETF_CODE_PREFIXES):
-                    etf_mv = _safe_float(col_map.get("证券市值", 14))
-                    self._etf_market_value += etf_mv
-                    logger.info(f"PTrade 反馈: 跳过 ETF {stock_code_raw} "
-                                f"市值={etf_mv}，不纳入 KHunter 持仓，计入 ETF 资产")
-                    continue
-                stock_name = _safe_str(col_map.get("证券名称", 5))
-                quantity = _safe_int(col_map.get("持有数量", 6))
-                available_volume = _safe_int(col_map.get("可用数量", 7))
-                profit_loss = _safe_float(col_map.get("盈亏金额", 8))
-                cost_price = _safe_float(col_map.get("成本价", 13))
-                market_value = _safe_float(col_map.get("证券市值", 14))
-                # 推导 suffix 并构造完整代码
-                suffix = self._get_stock_suffix(trade_category, stock_code_raw)
-                stock_code = f"{stock_code_raw}{suffix}"
-                # 反算当前价
-                if quantity > 0:
-                    current_price = round(market_value / quantity, 2)
-                else:
-                    current_price = 0.0
-                holding = {
-                    "stock_code": stock_code,
-                    "stock_name": stock_name,
-                    "quantity": quantity,
-                    "available_volume": available_volume,
-                    "buy_price": round(cost_price, 4),
-                    "market_value": round(market_value, 2),
-                    "current_price": current_price,
-                    "profit_loss": round(profit_loss, 2),
-                }
-                holdings.append(holding)
-                logger.info(
-                    f"PTrade 反馈: 持仓 {stock_code} {stock_name} "
-                    f"数量={quantity} 成本价={cost_price} 市值={market_value}")
+        def _safe_float(row, idx, name):
+            val = row[idx].strip() if idx < len(row) else "0"
+            if not val:
+                return 0.0
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                raise PTradeFeedbackError(
+                    f"Hold 文件数值解析失败: {name}={val!r} (文件 {hold_file})")
+
+        for row in rows:
+            if not row or all(c.strip() == '' for c in row):
+                continue
+            # 提取关键字段
+            trade_category = _safe_str(row, col_map.get("交易类别", 3))
+            stock_code_raw = _safe_str(row, col_map.get("证券代码", 4))
+            # ETF 过滤：KHunter 只处理股票，ETF 由其他系统管理
+            # 跳过 ETF 持仓但累积其市值，确保总资产不因过滤而减少
+            if stock_code_raw and stock_code_raw.startswith(ETF_CODE_PREFIXES):
+                etf_mv = _safe_float(row, col_map.get("证券市值", 14), "证券市值")
+                self._etf_market_value += etf_mv
+                logger.info(f"PTrade 反馈: 跳过 ETF {stock_code_raw} "
+                            f"市值={etf_mv}，不纳入 KHunter 持仓，计入 ETF 资产")
+                continue
+            stock_name = _safe_str(row, col_map.get("证券名称", 5))
+            quantity = _safe_int(row, col_map.get("持有数量", 6), "持有数量")
+            available_volume = _safe_int(row, col_map.get("可用数量", 7), "可用数量")
+            profit_loss = _safe_float(row, col_map.get("盈亏金额", 8), "盈亏金额")
+            cost_price = _safe_float(row, col_map.get("成本价", 13), "成本价")
+            market_value = _safe_float(row, col_map.get("证券市值", 14), "证券市值")
+            # 推导 suffix 并构造完整代码
+            suffix = self._get_stock_suffix(trade_category, stock_code_raw)
+            stock_code = f"{stock_code_raw}{suffix}"
+            # 反算当前价
+            if quantity > 0:
+                current_price = round(market_value / quantity, 2)
+            else:
+                current_price = 0.0
+            holding = {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "quantity": quantity,
+                "available_volume": available_volume,
+                "buy_price": round(cost_price, 4),
+                "market_value": round(market_value, 2),
+                "current_price": current_price,
+                "profit_loss": round(profit_loss, 2),
+            }
+            holdings.append(holding)
+            logger.info(
+                f"PTrade 反馈: 持仓 {stock_code} {stock_name} "
+                f"数量={quantity} 成本价={cost_price} 市值={market_value}")
         return holdings
 
     # ========== 代码转换 ==========

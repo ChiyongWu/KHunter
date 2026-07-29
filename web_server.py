@@ -3634,9 +3634,30 @@ def get_portfolio():
         working_date = runner.get_working_date()
         run_mode = getattr(runner, 'run_mode', 'manual')
         
-        # 查找工作日的 portfolio 文件（自动模式下已由 initialize_daily_data 通过 PTrade 写入）
+        # 查找工作日的 portfolio 文件（自动模式下应由 initialize_daily_data 通过 PTrade 同步写入当日文件）
         # 整个过程 PTrade 反馈数据只在 initialize_daily_data 中读取一次
         portfolio_path, found_date, _ = runner.find_latest_portfolio_file(working_date)
+
+        # 自动模式：必须加载「当日」portfolio 文件。
+        # 若回退到历史文件（found_date != working_date），说明当日 PTrade 同步未成功，
+        # 不能把旧数据当作当日持仓展示，应提示数据未就绪而非显示错误数据。
+        if run_mode == 'auto' and found_date != working_date:
+            logger.error(
+                f"【前端-持仓】自动模式下 {working_date} 的 portfolio 文件未生成（最新为 {found_date}），PTrade 同步可能失败")
+            return jsonify({
+                "success": False,
+                "error": "PTrade反馈数据未就绪，无法获取持仓信息",
+                "data": {
+                    "positions": {},
+                    "cash": 0,
+                    "total_asset": 0,
+                    "initial_capital": getattr(runner, 'initial_capital', 300000),
+                    "run_mode": "auto",
+                    "ptrade_enabled": True,
+                    "message": "请等待PTrade反馈文件生成后刷新页面"
+                }
+            })
+
         if portfolio_path is None:
             portfolio_path = str(runner.running_dir / f"portfolio_{working_date}.json")
         
@@ -4531,21 +4552,20 @@ def update_risk_config():
 @app.route('/api/feishu/callback', methods=['POST'])
 def feishu_callback():
     """
-    飞书 Event Subscription 回调端点
+    飞书 Event Subscription 回调端点（仅用于 URL 验证，不处理指令）
 
-    接收飞书推送的消息事件，解析指令并执行对应的 KHunter 操作。
+    KHunter 飞书指令采用"仅轮询"模式：指令由后台轮询线程从群聊拉取并执行，
+    本端点仅保留飞书开放平台要求的 URL 验证响应（url_verification），
+    收到消息事件（event_callback）时由 handle_callback 直接忽略，不执行任何指令，
+    以避免与轮询通道重复执行同一指令。
 
-    支持两种事件类型:
-      - url_verification: 飞书配置回调 URL 时的验证请求
-      - event_callback: 实际消息事件（im.message.receive_v1）
-
-    需要在飞书开放平台的应用中配置:
+    飞书开放平台配置（如需保留事件订阅可达性）:
       - 事件回调 URL: http://<host>:<port>/api/feishu/callback
-      - 订阅 im.message.receive_v1 事件
+      - 订阅 im.message.receive_v1 事件（推送将被忽略）
       - 添加 im:message 权限
 
     返回:
-        验证请求返回 challenge，事件请求返回空确认
+        验证请求返回 challenge，其他事件返回空确认（不触发指令）
     """
     try:
         body = request.get_json(force=True)

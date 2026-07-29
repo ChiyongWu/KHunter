@@ -1737,7 +1737,9 @@ class StrategyRunner:
                     f"【PTrade同步】处理失败: {result.get('error')}")
                 return False
         except Exception as e:
-            logger.warning(f"【PTrade同步】同步异常: {str(e)}")
+            # 同步异常（如反馈文件读取失败）被安全捕获，返回 False 避免中断流程；
+            # 异常信息含类型便于排查（如 PTrade 文件被占用导致的瞬时错误）
+            logger.warning(f"【PTrade同步】同步异常: {type(e).__name__}: {str(e)}")
             return False
 
     def check_if_processed(self, date: str) -> bool:

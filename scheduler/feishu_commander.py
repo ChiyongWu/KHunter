@@ -37,6 +37,22 @@ FEISHU_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_typ
 # 耗时指令：同一时刻仅允许一个实例运行，防止并发触发（对齐 etfhunter 的流水线并发保护）
 _HEAVY_COMMANDS = {"pipeline", "data_update", "strategy_run"}
 
+# 指令展示描述：用于"即将执行"预回复消息，向用户说明接下来要执行的具体任务
+_COMMAND_DESC = {
+    "pipeline": {
+        "name": "完整流水线",
+        "detail": "依次执行：数据更新 → 策略运行 → 信号汇总",
+    },
+    "data_update": {
+        "name": "数据更新",
+        "detail": "拉取全市场股票基础信息、日K线、财务基本面数据",
+    },
+    "strategy_run": {
+        "name": "策略运行",
+        "detail": "基于最新数据筛选买入候选、生成卖出信号",
+    },
+}
+
 
 class FeishuCommander:
 
@@ -254,12 +270,15 @@ class FeishuCommander:
     def _execute_command_worker(self, command: str, chat_id: str):
         """后台线程：实际执行指令逻辑（与轮询线程解耦，避免阻塞）。"""
         try:
+            # 耗时指令在执行前先回"即将执行"提示，向用户展示具体任务并提醒等候
+            if command in _HEAVY_COMMANDS:
+                self._send_command_ack(command, chat_id)
             if command == "pipeline":
-                self._run_pipeline()
+                self._run_pipeline(chat_id)
             elif command == "data_update":
-                self._run_data_update()
+                self._run_data_update(chat_id)
             elif command == "strategy_run":
-                self._run_strategy()
+                self._run_strategy(chat_id)
             elif command == "status":
                 self._run_status()
             elif command == "help":
@@ -273,34 +292,36 @@ class FeishuCommander:
                 with self._cmd_lock:
                     self._active_cmds.discard(command)
 
-    def _run_pipeline(self):
+    def _run_pipeline(self, chat_id=None):
         from scheduler.pipeline_orchestrator import PipelineOrchestrator
         orchestrator = PipelineOrchestrator(self.config)
         logger.info("Pipeline start (feishu triggered)")
         orchestrator.run_pipeline()
         logger.info("Pipeline done")
+        # 流水线执行完毕回包到触发群（chat_id 缺省退回默认群）
+        self._send_text(chat_id, "流水线执行完成。")
 
-    def _run_data_update(self):
+    def _run_data_update(self, chat_id=None):
         from utils.data_collection_service import get_data_collection_service
         service = get_data_collection_service(self.config.get("data_dir", "data"))
         start_result = service.start_update(update_types=None)
         if start_result.get("success"):
-            self._send_text(None, "Data update started...")
+            # 注："开始执行"提示已由 _send_command_ack 统一发送，此处不再重复
             deadline = time_module.time() + self.command_timeout
             while time_module.time() < deadline:
                 progress = service.get_update_progress()
                 if not progress.get("running"):
                     status = progress.get("status", "unknown")
                     stats = progress.get("totalStats", {})
-                    msg = "Update done: " + status + "\nKline: +" + str(stats.get("kline_added", 0)) + " upd " + str(stats.get("kline_updated", 0))
-                    self._send_text(None, msg)
+                    msg = "更新完成: " + status + "\nK线: +" + str(stats.get("kline_added", 0)) + " 更新 " + str(stats.get("kline_updated", 0))
+                    self._send_text(chat_id, msg)
                     return
                 time_module.sleep(5)
-            self._send_text(None, "Update timeout")
+            self._send_text(chat_id, "更新超时")
         else:
-            self._send_text(None, "Update failed: " + start_result.get("message", "?"))
+            self._send_text(chat_id, "更新失败: " + start_result.get("message", "?"))
 
-    def _run_strategy(self):
+    def _run_strategy(self, chat_id=None):
         from utils.global_db import get_global_db
         db = get_global_db()
         data_dir = self.config.get("data_dir", "data")
@@ -323,8 +344,8 @@ class FeishuCommander:
         result = runner.run_strategies_batch(tasks=tasks, config={})
         status = "ok" if result and result.get("status") != "failed" else "fail"
         data = result.get("data", {}) if result else {}
-        msg = "Strategy " + status + "\nBuy: " + str(data.get("buy_signals", 0)) + " Sell: " + str(data.get("sell_signals", 0))
-        self._send_text(None, msg)
+        msg = "策略 " + status + "\n买入: " + str(data.get("buy_signals", 0)) + " 卖出: " + str(data.get("sell_signals", 0))
+        self._send_text(chat_id, msg)
 
     def _run_status(self):
         from utils.global_db import get_global_db
@@ -354,6 +375,22 @@ class FeishuCommander:
         sell_count = sum(1 for s in signals if s.get("signal_type") == "sell")
         msg = "Stock count: " + str(stock_count) + "\nKline: " + str(kline_count) + " (latest " + latest_kline_date + ")\nDate: " + working_date + "\nSignals: buy " + str(buy_count) + " sell " + str(sell_count)
         self._send_text(None, msg)
+
+    def _send_command_ack(self, command: str, chat_id: str):
+        """耗时指令执行前先回包：展示即将执行的具体任务并提醒用户等候。
+
+        入参:
+            command: 内部指令名（pipeline/data_update/strategy_run）
+            chat_id: 触发消息所在群，确保提示发到正确的会话
+        """
+        desc = _COMMAND_DESC.get(command)
+        if not desc:
+            return  # 非耗时指令无需预回复
+        # 组装"即将执行"提示文案（中文），列出名称、具体任务与等候提醒
+        msg = ("⏳ 收到指令，开始执行：**" + desc["name"] + "**\n"
+               "具体任务：" + desc["detail"] + "\n"
+               "预计耗时较长，请稍候；执行完成后会自动汇报结果。")
+        self._send_text(chat_id, msg)
 
     def _send_help(self, chat_id: str):
         msg = ("Commands:\n"
