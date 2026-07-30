@@ -515,14 +515,21 @@ class PipelineOrchestrator:
 
                     # ===== 获取资金信息 =====
                     sr = self.strategy_runner
-                    # 可用资金
+                    # 可用资金（PTrade 反算的真实现金余额）
                     available_cash = getattr(sr, 'current_total_capital', 0)
                     details["available_cash"] = available_cash
-                    # 总资产 = 可用资金 + 持仓市值
-                    total_assets = available_cash
+                    # 持仓（KHunter 持仓刻意不含 ETF，仅含股票）
                     portfolio = getattr(sr, 'portfolio', {})
-                    for pos in portfolio.values():
-                        total_assets += pos.get('market_value', 0) or (pos.get('quantity', 0) * pos.get('current_price', 0))
+                    # 总资产：优先使用 PTrade 反馈的真实总资产（含 ETF 市值），
+                    # 因 KHunter 持仓刻意不含 ETF，若用「可用现金 + 持仓市值」反算会漏算 ETF 市值；
+                    # 仅在未同步 PTrade（如手动/非自动模式）时回退到现金 + 持仓市值反算
+                    real_total_asset = getattr(sr, 'current_total_asset', None)
+                    if real_total_asset:
+                        total_assets = real_total_asset
+                    else:
+                        total_assets = available_cash
+                        for pos in portfolio.values():
+                            total_assets += pos.get('market_value', 0) or (pos.get('quantity', 0) * pos.get('current_price', 0))
                     details["total_assets"] = total_assets
                     # 持仓数量
                     details["position_count"] = len(portfolio)

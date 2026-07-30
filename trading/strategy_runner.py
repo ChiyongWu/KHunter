@@ -1723,6 +1723,9 @@ class StrategyRunner:
                 self._save_position_tracking(position_tracking)
                 self.portfolio = self._normalize_portfolio_keys(new_positions)
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
+                # 记录 PTrade 反馈的真实总资产（含 ETF 市值），供飞书通知等场景直接读取权威值，
+                # 避免用「可用现金 + 持仓市值」反算时漏算 ETF（KHunter 持仓不含 ETF 但总资产含 ETF）
+                self.current_total_asset = ptrade_portfolio.get('total_asset', getattr(self, 'current_total_asset', None))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
                 # 标记已同步，防止同一天重复处理
                 self._ptrade_synced_feedback_date = feedback_date
@@ -3869,8 +3872,9 @@ class StrategyRunner:
                     
                     # 持仓过期检查
                     if enable_position_expire and profit_rate <= position_expire_return_threshold:
-                        # 计算持有天数
-                        hold_days = self._calculate_hold_days(position.get('buy_date', ''), trade_date)
+                        # 计算持有天数（复用上方已解析的首次建仓日 buy_date，优先取账本 first_buy_date，
+                        # 避免直接使用 position['buy_date']——其为 PTrade 同步日，会使持有天数被算成 0）
+                        hold_days = self._calculate_hold_days(buy_date, trade_date)
                         if hold_days > position_expire_hold_days:
                             reason = f'持仓过期 (持有{hold_days}天, 收益率{profit_rate*100:.2f}%<={position_expire_return_threshold*100:.0f}%)'
                             signal_type = 'position_expire'
