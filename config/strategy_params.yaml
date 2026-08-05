@@ -2015,8 +2015,8 @@ strategies:
         min: 7
         type: int
       countdown_offset:
-        default: 4
-        description: Countdown 比较偏移 close[t] vs close[t-4]（与 Setup 前置、漏斗前置一致）
+        default: 2
+        description: Countdown 比较偏移 close[t] vs close[t-2]（DeMark 原版）
         display_name: Countdown偏移
         group: TD Countdown
         max: 5
@@ -2103,7 +2103,7 @@ strategies:
       setup_window: 9
       setup_offset: 4
       countdown_target: 9
-      countdown_offset: 4
+      countdown_offset: 2
       enable_low_filter: true
       low_drawdown_window: 60
       low_drawdown_max: 0.85

@@ -47,7 +47,7 @@ class LowTD9Strategy(BaseStrategy):
             'setup_offset': 4,                 # 比较偏移 close[t] vs close[t-4]
             # TD Countdown（9转）
             'countdown_target': 9,             # Countdown 完成目标根数
-            'countdown_offset': 4,             # 比较偏移 close[t] vs close[t-4]（与 Setup 前置、漏斗前置一致）
+            'countdown_offset': 2,             # 比较偏移 close[t] vs close[t-2]（DeMark 原版 Countdown）
             # 低位环境过滤（默认开启）
             'enable_low_filter': True,         # 是否启用低位环境过滤
             'low_drawdown_window': 60,         # 回撤计算回溯交易日
@@ -412,7 +412,7 @@ class LowTD9Strategy(BaseStrategy):
             setup_window = int(self.params.get('setup_window', 9))
             setup_offset = int(self.params.get('setup_offset', 4))
             countdown_target = int(self.params.get('countdown_target', 9))
-            countdown_offset = int(self.params.get('countdown_offset', 4))
+            countdown_offset = int(self.params.get('countdown_offset', 2))
 
             # 漏斗前置：当日就近连续满足 close[t] <= close[t-4] 的根数不足则直接剪枝，
             # 跳过昂贵的完整状态机（参见低位九转策略性能优化设计说明书）
