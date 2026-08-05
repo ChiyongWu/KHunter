@@ -1984,6 +1984,136 @@ strategies:
       volume_ma_period: 5
       volume_shrink_ratio: 0.8
     support_method: ma20
+  LowTD9Strategy:
+    color: '#0ea5e9'
+    description: 基于 TD Sequential（9转序列）的底部反转选股策略，识别买入 Setup 前置完成后、低位环境且完美信号达标的今日低位9转个股
+    display_name: 低位九转策略
+    icon: 9️⃣
+    param_details:
+      setup_window:
+        default: 9
+        description: 买入/卖出 Setup 所需连续根数
+        display_name: Setup窗口
+        group: TD Setup前置
+        max: 13
+        min: 5
+        type: int
+      setup_offset:
+        default: 4
+        description: Setup 比较偏移 close[t] vs close[t-4]
+        display_name: Setup偏移
+        group: TD Setup前置
+        max: 5
+        min: 2
+        type: int
+      countdown_target:
+        default: 9
+        description: 买入 Countdown 完成目标根数
+        display_name: 9转目标
+        group: TD Countdown
+        max: 13
+        min: 7
+        type: int
+      countdown_offset:
+        default: 4
+        description: Countdown 比较偏移 close[t] vs close[t-4]（与 Setup 前置、漏斗前置一致）
+        display_name: Countdown偏移
+        group: TD Countdown
+        max: 5
+        min: 1
+        type: int
+      enable_low_filter:
+        default: true
+        description: 是否启用低位环境过滤
+        display_name: 低位环境过滤
+        group: 低位过滤
+        type: bool
+      low_drawdown_window:
+        default: 60
+        description: 回撤计算回溯交易日
+        display_name: 回撤窗口
+        group: 低位过滤
+        max: 120
+        min: 20
+        type: int
+      low_drawdown_max:
+        default: 0.85
+        description: 距阶段高点最大比例，≤则视为低位
+        display_name: 回撤上限
+        group: 低位过滤
+        max: 1.0
+        min: 0.6
+        type: float
+      enable_ma60:
+        default: true
+        description: 是否要求收盘价小于60日均线
+        display_name: 60日均线压制
+        group: 低位过滤
+        type: bool
+      max_upwave:
+        default: 0.30
+        description: 近20日最大涨幅上限，排除主升浪中段的高位9转
+        display_name: 近20日涨幅上限
+        group: 低位过滤
+        max: 0.6
+        min: 0.1
+        type: float
+      enable_cancellation:
+        default: true
+        description: 卖出 Setup 完成则作废当前买入 Countdown
+        display_name: 取消规则
+        group: 取消规则
+        type: bool
+      enable_perfection:
+        default: true
+        description: 完美信号硬门槛，第8或第9根低点需低于第6、7根低点
+        display_name: 完美信号
+        group: 完美信号
+        type: bool
+      min_data_len:
+        default: 120
+        description: 最少历史交易日，保证 Setup+Countdown 充分回溯
+        display_name: 最少数据长度
+        group: 数据
+        max: 250
+        min: 60
+        type: int
+      min_near_run:
+        default: 7
+        description: 漏斗门槛，当日就近连续满足 close[t]<=close[t-4] 的根数（达到才跑完整状态机）
+        display_name: 漏斗近端根数
+        group: 漏斗前置
+        max: 12
+        min: 1
+        type: int
+    param_groups:
+    - description: 控制 TD Setup 前置结构的参数
+      name: TD Setup前置
+    - description: 控制 TD Countdown（9转）计数的参数
+      name: TD Countdown
+    - description: 控制低位环境过滤的参数
+      name: 低位过滤
+    - description: 控制下跌中继取消规则的参数
+      name: 取消规则
+    - description: 控制完美信号硬门槛的参数
+      name: 完美信号
+    - description: 控制漏斗前置快速剪枝的参数
+      name: 漏斗前置
+    params:
+      setup_window: 9
+      setup_offset: 4
+      countdown_target: 9
+      countdown_offset: 4
+      enable_low_filter: true
+      low_drawdown_window: 60
+      low_drawdown_max: 0.85
+      enable_ma60: true
+      max_upwave: 0.30
+      enable_cancellation: true
+      enable_perfection: true
+      min_data_len: 120
+      min_near_run: 9
+    support_method: ma20
 strategy_runner:
   check_interval: 60
   max_position_size: 0.1
