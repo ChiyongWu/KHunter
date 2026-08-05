@@ -141,6 +141,13 @@ class BaseStrategy(ABC):
         :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则跳过当日K线检查
         :return: 选股信号列表
         """
+        # 统一规范化排序：策略内部（_is_suspended/_near_run/_check_low_env/状态机）均假设
+        # "倒序、最新在前"（idx0=最新）。前端 web_server 经 read_all_stocks_kline 传入升序数据，
+        # 若此处不反转，_is_suspended 会把最新日期误判为最早日期而误杀全部股票（导致 0 命中）。
+        # 命令行路径传入的为降序，此反转对其为 no-op，不影响原有行为。
+        if len(df) >= 2 and str(df['date'].iloc[0]) < str(df['date'].iloc[-1]):
+            df = df.iloc[::-1].reset_index(drop=True)
+
         if not self._validate_data(df):
             return []
 

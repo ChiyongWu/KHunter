@@ -2112,7 +2112,7 @@ strategies:
       enable_cancellation: true
       enable_perfection: true
       min_data_len: 120
-      min_near_run: 9
+      min_near_run: 7
     support_method: ma20
 strategy_runner:
   check_interval: 60
