@@ -2114,6 +2114,105 @@ strategies:
       min_data_len: 120
       min_near_run: 7
     support_method: ma20
+  OversoldReboundStrategy:
+    color: '#f59e0b'
+    description: 识别近30交易日深度下跌(区间最高→最低跌幅>50%)后，近3交易日出现MACD底背离/底分型/低位九转任一底部特征的超跌反弹机会
+    display_name: 超跌反弹策略
+    icon: 📉
+    param_details:
+      lookback_days:
+        default: 30
+        description: 超跌检查回溯交易日数，取最近N日的最高价/最低价
+        display_name: 超跌回溯天数
+        group: 超跌深度条件
+        max: 60
+        min: 10
+        type: int
+      decline_threshold:
+        default: 0.50
+        description: 区间最高价到最低价的下跌幅度阈值（>阈值视为超跌）
+        display_name: 下跌幅度(%)
+        group: 超跌深度条件
+        max: 0.7
+        min: 0.3
+        type: float
+      bottom_window:
+        default: 3
+        description: 底部特征搜索窗口（最近N个交易日）
+        display_name: 底部特征窗口
+        group: 底部特征条件
+        max: 10
+        min: 1
+        type: int
+      macd_divergence_days:
+        default: 20
+        description: MACD底背离判断窗口（回溯N日寻找价格新低而MACD柱未同步新低）
+        display_name: 底背离窗口
+        group: MACD底背离
+        max: 40
+        min: 10
+        type: int
+      macd_fast:
+        default: 12
+        description: MACD快线EMA周期
+        display_name: MACD快线
+        group: MACD底背离
+        max: 20
+        min: 5
+        type: int
+      macd_slow:
+        default: 26
+        description: MACD慢线EMA周期
+        display_name: MACD慢线
+        group: MACD底背离
+        max: 40
+        min: 10
+        type: int
+      macd_signal:
+        default: 9
+        description: MACD信号线EMA周期
+        display_name: MACD信号
+        group: MACD底背离
+        max: 20
+        min: 5
+        type: int
+      enable_bottom_fractal:
+        default: true
+        description: 是否启用底分型特征（近3日最低价居中）
+        display_name: 启用底分型
+        group: 底部特征条件
+        type: bool
+      fractal_require_yang:
+        default: false
+        description: 底分型右侧K线是否要求阳线确认
+        display_name: 底分型阳线确认
+        group: 底部特征条件
+        type: bool
+      enable_low_td9:
+        default: true
+        description: 是否启用低位九转特征（今日完成买入Countdown第9根）
+        display_name: 启用低位九转
+        group: 底部特征条件
+        type: bool
+    param_groups:
+    - description: 控制超跌深度判断的参数
+      name: 超跌深度条件
+    - description: 控制底部特征组合的参数
+      name: 底部特征条件
+    - description: 控制MACD底背离判断的参数
+      name: MACD底背离
+    params:
+      lookback_days: 30
+      decline_threshold: 0.50
+      bottom_window: 3
+      macd_divergence_days: 20
+      macd_fast: 12
+      macd_slow: 26
+      macd_signal: 9
+      enable_bottom_fractal: true
+      fractal_require_yang: false
+      enable_low_td9: true
+    support_method: ma20
 strategy_runner:
   check_interval: 60
   max_position_size: 0.1
