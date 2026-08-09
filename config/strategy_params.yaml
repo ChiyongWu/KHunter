@@ -1761,12 +1761,12 @@ strategies:
         min: 1.0
         type: float
       n1:
-        default: 6
+        default: 1
         description: 入场通道周期，突破此周期的最高价入场
         display_name: 入场通道周期
         group: 通道参数
         max: 20
-        min: 5
+        min: 1
         type: int
       n2:
         default: 20
@@ -1845,6 +1845,112 @@ strategies:
           exit_atr: 2.0
           n_entry: 6
           n_exit: 3
+    support_method: ma20
+  LowTurtleStrategy:
+    color: '#0891b2'
+    description: 低位海龟策略，基于唐奇安通道的趋势跟踪系统（低位版），去除MA20强趋势过滤，专用于配合低位选股策略（如低位九转）使用
+    display_name: 低位海龟策略
+    icon: 🐢
+    param_details:
+      add_atr:
+        default: 0.5
+        description: 加仓ATR间隔，价格每上涨此ATR倍数加仓一次
+        display_name: 加仓ATR间隔
+        group: 加仓参数
+        max: 2.0
+        min: 0.25
+        type: float
+      atr_period:
+        default: 12
+        description: ATR计算周期
+        display_name: ATR周期
+        group: ATR参数
+        max: 30
+        min: 5
+        type: int
+      base_position_amount:
+        default: 20000
+        description: 底仓金额（元）
+        display_name: 底仓金额(元)
+        group: 仓位参数
+        max: 100000
+        min: 10000
+        type: int
+      entry_atr:
+        default: 0.02
+        description: 入场ATR比例，用于计算仓位
+        display_name: 入场ATR比例
+        group: 仓位参数
+        max: 0.05
+        min: 0.01
+        type: float
+      exit_atr:
+        default: 2.0
+        description: 出场ATR止损倍数，跌破入场价-此倍数*ATR止损
+        display_name: ATR止损倍数
+        group: 止损参数
+        max: 4.0
+        min: 1.0
+        type: float
+      n1:
+        default: 1
+        description: 入场通道周期，突破此周期的最高价入场（低位版默认1）
+        display_name: 入场通道周期
+        group: 通道参数
+        max: 20
+        min: 1
+        type: int
+      n2:
+        default: 6
+        description: 出场通道周期，跌破此周期的最低价出场（低位版默认6）
+        display_name: 出场通道周期
+        group: 通道参数
+        max: 55
+        min: 3
+        type: int
+      preset:
+        default: custom
+        description: 预设配置模式（低位版固定为custom）
+        display_name: 预设模式
+        group: 预设参数
+        options:
+        - custom
+        type: string
+    param_groups:
+    - description: 低位海龟仅自定义参数
+      name: 预设参数
+    - description: 控制唐奇安通道计算的参数
+      name: 通道参数
+    - description: 控制ATR指标计算的参数
+      name: ATR参数
+    - description: 控制止损止盈的参数
+      name: 止损参数
+    - description: 控制加仓条件的参数
+      name: 加仓参数
+    - description: 控制仓位的参数
+      name: 仓位参数
+    params:
+      add_atr: 0.5
+      atr_period: 12
+      base_position_amount: 20000
+      entry_atr: 0.02
+      exit_atr: 2.0
+      n_entry: 1
+      n_exit: 6
+      preset: custom
+    presets:
+      custom:
+        description: 低位海龟自定义配置，1日入场/6日离场，去除MA20过滤
+        display_name: 低位海龟(1/6)
+        icon: 🐢
+        params:
+          add_atr: 0.5
+          atr_period: 12
+          base_position_amount: 20000
+          entry_atr: 0.02
+          exit_atr: 2.0
+          n_entry: 1
+          n_exit: 6
     support_method: ma20
   WBottomStrategy:
     color: '#14b8a6'
@@ -2030,8 +2136,8 @@ strategies:
         min: 1
         type: int
       enable_low_filter:
-        default: true
-        description: 是否启用低位环境过滤
+        default: false
+        description: 是否启用低位环境过滤（已按需求关闭三项低位环境判定）
         display_name: 低位环境过滤
         group: 低位过滤
         type: bool
@@ -2078,8 +2184,8 @@ strategies:
         group: 完美信号
         type: bool
       min_data_len:
-        default: 120
-        description: 最少历史交易日，保证 Setup+Countdown 充分回溯
+        default: 13
+        description: 最少历史交易日，TD Setup+Countdown 结构在13根内完成判定
         display_name: 最少数据长度
         group: 数据
         max: 250
@@ -2111,7 +2217,7 @@ strategies:
       setup_offset: 4
       countdown_target: 9
       countdown_offset: 2
-      enable_low_filter: true
+      enable_low_filter: false
       low_drawdown_window: 60
       low_drawdown_max: 0.85
       enable_ma60: true

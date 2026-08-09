@@ -183,8 +183,8 @@ class BacktestEngine:
             # 修复参数传递：如果timing_params中没有对应策略的配置，尝试直接从config中获取
             strategy_params = timing_params.get(timing_strategy_name, {})
             
-            # 特殊处理：如果是海龟策略且config中直接包含海龟参数，合并到策略参数中
-            if timing_strategy_name == 'turtle':
+            # 特殊处理：如果是海龟/低位海龟策略且config中直接包含海龟参数，合并到策略参数中
+            if timing_strategy_name in ('turtle', 'low_turtle'):
                 turtle_specific_params = {
                     'n_entry': config.get('n_entry'),
                     'n_exit': config.get('n_exit'),
@@ -198,19 +198,19 @@ class BacktestEngine:
                 # 只合并非None的参数
                 turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
                 strategy_params.update(turtle_specific_params)
-            
+
             self.timing_strategy = TimingStrategyFactory.create_strategy(
                 timing_strategy_name, strategy_params
             )
             logger.info(f"初始化择时策略: {timing_strategy_name}")
-            
+
             # 存储择时策略名称和参数，用于后续日志记录和结果输出
             self.timing_strategy_name = timing_strategy_name
             self.timing_strategy_params = strategy_params
-            
-            # 记录海龟策略主要参数
-            if timing_strategy_name == 'turtle':
-                logger.info(f"海龟策略参数: n_entry={strategy_params.get('n_entry')}, "
+
+            # 记录海龟/低位海龟策略主要参数
+            if timing_strategy_name in ('turtle', 'low_turtle'):
+                logger.info(f"{timing_strategy_name}参数: n_entry={strategy_params.get('n_entry')}, "
                            f"n_exit={strategy_params.get('n_exit')}, "
                            f"atr_period={strategy_params.get('atr_period')}, "
                            f"entry_atr={strategy_params.get('entry_atr')}, "
@@ -1240,7 +1240,19 @@ class BacktestEngine:
             str: 支撑位计算方法（ma20/key_close_5/key_open/key_close）
         """
         # 从配置中查找策略对应的支撑位方法
-        strategy_config = self._support_methods_config.get(strategy_name, {})
+        strategy_config = self._support_methods_config.get(strategy_name)
+        # 中英文策略名兼容查找（调用方可能传入中文名，yaml 键为英文名）
+        if strategy_config is None:
+            try:
+                from utils.strategy_name_mapper import get_english_name, get_chinese_name
+                en = get_english_name(strategy_name)
+                zh = get_chinese_name(strategy_name)
+                strategy_config = self._support_methods_config.get(en) or self._support_methods_config.get(zh)
+            except Exception:
+                pass
+        # 未找到配置，回退默认
+        if strategy_config is None:
+            strategy_config = {}
         # 配置为字典格式，提取support_method字段
         if isinstance(strategy_config, dict):
             return strategy_config.get('support_method', 'ma20')
@@ -1273,7 +1285,7 @@ class BacktestEngine:
         # 获取策略对应的支撑位计算方法
         # 如果 strategy_name 已经是支撑位方法名称（ma20/key_close_5/key_open/key_close），直接使用
         # 如果 strategy_name 为 None，使用默认方法 ma20
-        valid_support_methods = ['ma20', 'key_close_5', 'key_open', 'key_close']
+        valid_support_methods = ['ma20', 'key_close_5', 'key_open', 'key_close', 't_day_low']
         if strategy_name is None:
             support_method = 'ma20'
         elif strategy_name in valid_support_methods:
@@ -1309,6 +1321,14 @@ class BacktestEngine:
                 ma20_value = round(df_to_date['close'].tail(20).mean(), 2)
                 logger.debug(f"支撑位计算: {stock_code} ma20={ma20_value}")
                 return ma20_value
+
+        elif support_method == 't_day_low':
+            # t_day_low: T日（选股日/selection_date 当日）最低价作为支撑位
+            # 取 df_to_date 最后一行（已按日期升序排列）的最低价
+            if len(df_to_date) >= 1:
+                t_low = float(df_to_date['low'].iloc[-1])
+                logger.debug(f"支撑位计算: {stock_code} t_day_low={t_low:.2f} (T日={date_str})")
+                return round(t_low, 2)
             
         elif support_method in ['key_close_5', 'key_open', 'key_close']:
             # 需要关键日的方法：从信号中提取key_date
@@ -1784,6 +1804,9 @@ class BacktestEngine:
                     'lowest_point_lookback_days',   # 趋势加速拐点
                     'surge_lookback_days',          # 趋势加速拐点
                     'uptrend_lookback_days',        # 趋势加速拐点
+                    'min_data_len',                 # 低位九转等：最少历史交易日（强约束，必须纳入预加载窗口）
+                    'low_drawdown_window',          # 低位九转：距阶段高点回撤回溯窗口
+                    'setup_window',                 # 低位九转：买入 Setup 连续根数（用于前置结构回溯）
                 ]
                 period_keys = ['ma_period', 'ma_short_period', 'ma_long_period', 'kdj_n', 'kdj_m1', 'kdj_m2',
                               'macd_short', 'macd_long', 'macd_signal', 'volume_ma_period', 'short_ma_period', 

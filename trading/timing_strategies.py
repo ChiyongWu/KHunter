@@ -142,6 +142,10 @@ class TimingStrategyFactory:
             logger.info("创建海龟策略实例")
             from trading.turtle_strategy import TurtleStrategy
             return TurtleStrategy(config)
+        elif strategy_name == "low_turtle":
+            logger.info("创建低位海龟策略实例（去除MA20过滤）")
+            from trading.low_turtle_strategy import LowTurtleStrategy
+            return LowTurtleStrategy(config)
         elif strategy_name == "rsi":
             logger.info("创建RSI策略实例")
             from trading.rsi_strategy import RSIStrategy

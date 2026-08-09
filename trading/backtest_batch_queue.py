@@ -285,7 +285,7 @@ class BacktestBatchQueue:
             'end_date': end_date
         })
 
-        # 从配置文件读取海龟策略参数
+        # 从配置文件读取海龟/低位海龟策略参数
         if timing_strategy == 'turtle':
             try:
                 config_manager = StrategyConfigManager()
@@ -306,6 +306,13 @@ class BacktestBatchQueue:
                            f"n_exit={turtle_params.get('n_exit')}, atr_period={turtle_params.get('atr_period')}")
             except Exception as e:
                 logger.warning(f"批量回测读取海龟策略配置失败，使用默认参数: {str(e)}")
+        elif timing_strategy == 'low_turtle':
+            # 低位海龟默认参数：1/6/12（无MA20过滤）
+            config.update({
+                'n_entry': 1, 'n_exit': 6, 'atr_period': 12,
+                'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
+            })
+            logger.info(f"批量回测低位海龟策略参数: n_entry=1, n_exit=6, atr_period=12（去除MA20过滤）")
 
         engine = BacktestEngine(db_path="data/stock_selection.db")
         result = engine.run_backtest(strategy_name, config)

@@ -801,7 +801,7 @@ def run_backtest():
         enable_temp_limit = data.get('enable_temp_limit', 1)
         temp_limit_mode = data.get('temp_limit_mode', 'both')
         
-        # 从配置文件读取海龟策略参数
+        # 从配置文件读取海龟/低位海龟策略参数
         turtle_params = {}
         if timing_strategy == 'turtle':
             try:
@@ -816,6 +816,13 @@ def run_backtest():
                     'n_entry': 20, 'n_exit': 10, 'atr_period': 20,
                     'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
                 }
+        elif timing_strategy == 'low_turtle':
+            # 低位海龟默认参数：1/6/12（无MA20过滤）
+            turtle_params = {
+                'n_entry': 1, 'n_exit': 6, 'atr_period': 12,
+                'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
+            }
+            logger.info(f"低位海龟策略参数: n_entry=1, n_exit=6, atr_period=12（去除MA20过滤）")
         
         # 验证参数
         if not strategy_name or not start_date or not end_date:
