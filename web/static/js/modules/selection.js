@@ -648,6 +648,15 @@ export function renderSelectionResults(results, time, filterStats, strategyDispl
                 // 按策略分组显示
                 for (const [strategyName, stocks] of Object.entries(stocksByStrategy)) {
                     if (stocks.length > 0) {
+                        // 超跌反弹策略：按跌幅(decline_pct)降序排列，跌幅高在前
+                        if (strategyName === '超跌反弹策略' || strategyName === '超跌反弹') {
+                            stocks.sort((a, b) => {
+                                const da = (a.signals && a.signals[0] && a.signals[0].decline_pct) || -1;
+                                const db = (b.signals && b.signals[0] && b.signals[0].decline_pct) || -1;
+                                return db - da;
+                            });
+                        }
+                        const isOversold = (strategyName === '超跌反弹策略' || strategyName === '超跌反弹');
                         totalCount += stocks.length;
                         html += '<div class="selection-strategy"><h4>' + strategyName + ' (' + stocks.length + '只)</h4>';
                         
@@ -663,8 +672,12 @@ export function renderSelectionResults(results, time, filterStats, strategyDispl
                             const strategiesStr = signal.strategy_display_names && Array.isArray(signal.strategy_display_names) ? signal.strategy_display_names.join(' + ') : '';
                             const reasons = s.reasons && Array.isArray(s.reasons) ? s.reasons.map(r => '<span class="tag">' + r + '</span>').join('') : '';
                             
+                            // 超跌反弹策略展示跌幅标签
+                            const declineTag = (isOversold && s.decline_pct != null) ?
+                                '<span class="tag">跌幅: ' + s.decline_pct + '%</span>' : '';
+
                             const keyDate = s.key_date ? '<span class="tag">' + s.key_date_type + ': ' + s.key_date + '</span>' : '';
-                            return '<div class="signal-card"><div class="signal-header"><span class="signal-title"><a href="javascript:void(0)" onclick="viewStockDetail(\'' + signal.code + '\')" class="stock-link">' + signal.code + ' ' + signal.name + '</a></span><div class="signal-tags"><span class="tag">' + strategiesStr + '</span>' + keyDate + reasons + '</div></div></div>';
+                            return '<div class="signal-card"><div class="signal-header"><span class="signal-title"><a href="javascript:void(0)" onclick="viewStockDetail(\'' + signal.code + '\')" class="stock-link">' + signal.code + ' ' + signal.name + '</a></span><div class="signal-tags"><span class="tag">' + strategiesStr + '</span>' + keyDate + declineTag + reasons + '</div></div></div>';
                         }).join('');
                         
                         html += '</div>';

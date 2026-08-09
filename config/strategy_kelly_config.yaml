@@ -73,6 +73,16 @@ strategies:
     profit_loss_ratio: 3.5
     description: 金三角策略
 
+  OversoldReboundStrategy:
+    win_rate: 0.25
+    profit_loss_ratio: 3.5
+    description: 超跌反弹策略（含英文名匹配）
+
+  OversoldRebound:
+    win_rate: 0.25
+    profit_loss_ratio: 3.5
+    description: 超跌反弹策略
+
   _default_:
     win_rate: 0.28
     profit_loss_ratio: 3.2

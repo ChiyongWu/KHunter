@@ -32,6 +32,7 @@ class GoldenTriangleStrategy(BaseStrategy):
             'c_cross_min_volume_ratio': 1.1,
             'lookback_days': 30,
             'strategy_weight': 50,
+            'ma60_rise_required': True,  # 是否要求60日均线向上（选股日>前一交易日）
         }
         if params:
             default_params.update(params)
@@ -76,7 +77,7 @@ class GoldenTriangleStrategy(BaseStrategy):
 
     def get_selection_criteria(self):
         """获取选股条件描述"""
-        return [
+        criteria = [
             f"1. A点形成：{self.params['short_period']}日均线上穿{self.params['mid_period']}日均线",
             f"2. B点形成：{self.params['short_period']}日均线上穿{self.params['long_period']}日均线",
             f"3. C点形成：{self.params['mid_period']}日均线上穿{self.params['long_period']}日均线",
@@ -85,6 +86,11 @@ class GoldenTriangleStrategy(BaseStrategy):
             f"6. A-C间隔 <= {self.params['ac_interval']}天",
             f"7. 均线多头排列：MA{self.params['short_period']} >= MA{self.params['mid_period']} >= MA{self.params['long_period']} >= MA{self.params['super_long_period']}",
         ]
+        if self.params.get('ma60_rise_required', True):
+            criteria.append(
+                f"8. 60日均线向上：选股日MA{self.params['super_long_period']} > 前一交易日MA{self.params['super_long_period']}"
+            )
+        return criteria
 
     def quick_filter(self, df):
         """快速过滤：检查数据是否足够并进行涨幅过滤"""
@@ -161,6 +167,16 @@ class GoldenTriangleStrategy(BaseStrategy):
 
         if not (sma_short >= sma_mid >= sma_long >= sma_super_long):
             return []
+
+        # 60日均线向上：选股日60日均线 > 前一交易日60日均线（趋势向上过滤）
+        if self.params.get('ma60_rise_required', True):
+            if latest_idx + 1 >= len(df):
+                return []
+            ma60_today = df.iloc[latest_idx]['sma_super_long']  # 选股日60日均线
+            ma60_prev = df.iloc[latest_idx + 1]['sma_super_long']  # 前一交易日60日均线
+            # 数据不足时60日均线为NaN，直接排除
+            if pd.isna(ma60_today) or pd.isna(ma60_prev) or ma60_today <= ma60_prev:
+                return []
 
         triangle_type = 'golden_spider' if ac_interval_days == 0 else 'golden_triangle'
 

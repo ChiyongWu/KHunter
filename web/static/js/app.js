@@ -50,7 +50,7 @@ async function loadModules() {
         const websocketModule = await import('./modules/websocket.js');
         const navigationModule = await import('./modules/navigation.js');
         const stocksModule = await import('./modules/stocks.js');
-        const selectionModule = await import('./modules/selection.js');
+        const selectionModule = await import('./modules/selection.js?v=2');
         const analysisModule = await import('./modules/analysis.js');
         const strategiesModule = await import('./modules/strategies.js');
         const historyModule = await import('./modules/history.js');

@@ -48,8 +48,8 @@ EXCHANGE_SUFFIX_MAP = {
 }
 
 # ETF 代码前缀（KHunter 只处理股票，ETF 由其他系统管理）
-# 沪市 ETF: 51xxxx, 50xxxx, 588xxx / 深市 ETF: 15xxxx, 16xxxx
-ETF_CODE_PREFIXES = ('15', '16', '50', '51', '588')
+# 沪市 ETF: 51xxxx, 50xxxx, 52xxxx, 56xxxx, 588xxx / 深市 ETF: 15xxxx, 16xxxx
+ETF_CODE_PREFIXES = ('15', '16', '50', '51', '52', '56', '588')
 
 
 def _read_csv(file_path, encoding='gbk'):

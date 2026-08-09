@@ -22,6 +22,8 @@ strategy_names:
   TrendStartStrategy: 趋势起点策略
   GoldenTriangleStrategy: 金三角策略
   GoldenCrossNotGreenStrategy: 金叉不绿策略
+  LowTD9Strategy: 低位九转策略
+  OversoldReboundStrategy: 超跌反弹策略
 
 # 反向映射（中文名称到英文类名）
 # 自动生成，不需要手动维护
@@ -43,6 +45,7 @@ reverse_mapping:
   2560战法选股策略: Strategy2560Selection
   趋势起点策略: TrendStartStrategy
   金三角策略: GoldenTriangleStrategy
+  超跌反弹策略: OversoldReboundStrategy
   # 蛇形命名别名（用于定时任务等场景）
   immortal_guidance: ImmortalGuidanceStrategy
   golden_triangle: GoldenTriangleStrategy

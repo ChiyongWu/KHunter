@@ -376,6 +376,12 @@ strategies:
         max: 120
         min: 40
         type: int
+      ma60_rise_required:
+        default: true
+        description: 是否要求60日均线向上（选股日MA60>前一交易日MA60），过滤趋势向下的股票
+        display_name: 要求60日线向上
+        group: 均线参数
+        type: bool
     param_groups:
     - description: 控制均线计算的参数
       name: 均线参数
@@ -395,6 +401,7 @@ strategies:
       short_period: 5
       strategy_weight: 50
       super_long_period: 60
+      ma60_rise_required: true
     support_method: ma20
   ImmortalGuidanceStrategy:
     color: '#f59e0b'
@@ -1798,7 +1805,7 @@ strategies:
       base_position_amount: 20000
       entry_atr: 0.02
       exit_atr: 2.0
-      n_entry: 12
+      n_entry: 1
       n_exit: 6
       preset: custom
     presets:
@@ -2194,6 +2201,44 @@ strategies:
         display_name: 启用低位九转
         group: 底部特征条件
         type: bool
+      enable_morning_star:
+        default: true
+        description: 是否启用启明星形态（宽松版，仅形态：阴-小实体-阳）
+        display_name: 启用启明星
+        group: 底部特征条件
+        type: bool
+      morning_star_body_threshold:
+        default: 0.03
+        description: 启明星第一根阴线实体最小百分比（仅形态，不要求突破均线/放量）
+        display_name: 启明星阴线实体(%)
+        group: 底部特征条件
+        max: 0.1
+        min: 0.01
+        type: float
+      morning_star_small_ratio:
+        default: 0.5
+        description: 启明星第二根小实体相对第一根实体的比例上限
+        display_name: 启明星小实体比例
+        group: 底部特征条件
+        max: 1.0
+        min: 0.1
+        type: float
+      rebound_cap:
+        default: 0.30
+        description: 选股日收盘价相对区间最低价反弹幅度上限（超过则已反弹过高）
+        display_name: 反弹幅度上限(%)
+        group: 超跌深度条件
+        max: 0.6
+        min: 0.1
+        type: float
+      strategy_weight:
+        default: 50
+        description: 技术面评分权重（用于多策略综合评分与排序）
+        display_name: 策略权重
+        group: 评分参数
+        max: 100
+        min: 0
+        type: int
     param_groups:
     - description: 控制超跌深度判断的参数
       name: 超跌深度条件
@@ -2201,6 +2246,8 @@ strategies:
       name: 底部特征条件
     - description: 控制MACD底背离判断的参数
       name: MACD底背离
+    - description: 控制多策略综合评分的参数
+      name: 评分参数
     params:
       lookback_days: 30
       decline_threshold: 0.50
@@ -2212,6 +2259,11 @@ strategies:
       enable_bottom_fractal: true
       fractal_require_yang: false
       enable_low_td9: true
+      enable_morning_star: true
+      morning_star_body_threshold: 0.03
+      morning_star_small_ratio: 0.5
+      rebound_cap: 0.30
+      strategy_weight: 50
     support_method: ma20
 strategy_runner:
   check_interval: 60

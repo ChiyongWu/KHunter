@@ -3638,32 +3638,24 @@ def get_portfolio():
         # 整个过程 PTrade 反馈数据只在 initialize_daily_data 中读取一次
         portfolio_path, found_date, _ = runner.find_latest_portfolio_file(working_date)
 
-        # 自动模式：必须加载「当日」portfolio 文件。
-        # 若回退到历史文件（found_date != working_date），说明当日 PTrade 同步未成功，
-        # 不能把旧数据当作当日持仓展示，应提示数据未就绪而非显示错误数据。
-        if run_mode == 'auto' and found_date != working_date:
-            logger.error(
-                f"【前端-持仓】自动模式下 {working_date} 的 portfolio 文件未生成（最新为 {found_date}），PTrade 同步可能失败")
-            return jsonify({
-                "success": False,
-                "error": "PTrade反馈数据未就绪，无法获取持仓信息",
-                "data": {
-                    "positions": {},
-                    "cash": 0,
-                    "total_asset": 0,
-                    "initial_capital": getattr(runner, 'initial_capital', 300000),
-                    "run_mode": "auto",
-                    "ptrade_enabled": True,
-                    "message": "请等待PTrade反馈文件生成后刷新页面"
-                }
-            })
+        # 自动模式数据来源判定：
+        # - found_date == working_date：当日 portfolio，data_source="current"
+        # - found_date != working_date：回退到最近交易日的有效 portfolio（如周末/节假日后
+        #   访问，working_date 取前一交易日但该日文件未生成），data_source="history"
+        # - portfolio_path is None：30 天内无任何 portfolio，确属 PTrade 同步失败，提示未就绪
+        data_source = "current" if found_date == working_date else "history"
+        if data_source == "history":
+            logger.warning(
+                f"【前端-持仓】未找到 {working_date} 的 portfolio 文件，回退到最近交易日 {found_date} 的历史数据（周末/非交易日按前一交易日处理）")
 
         if portfolio_path is None:
             portfolio_path = str(runner.running_dir / f"portfolio_{working_date}.json")
         
-        # 自动模式下，portfolio 文件必须由 initialize_daily_data 的 PTrade 同步写入
-        # 如果文件不存在，说明 PTrade 同步失败，直接返回错误
-        if run_mode == 'auto' and (not portfolio_path or not os.path.exists(portfolio_path)):
+        # 自动模式下，portfolio 文件通常由 initialize_daily_data 的 PTrade 同步写入当日文件；
+        # 但若当前为周末/节假日（working_date 为前一交易日）而该日文件缺失，find_latest_portfolio_file
+        # 已回退到更早的有效文件（portfolio_path 非空），应正常加载并标注 history。
+        # 仅当 30 天内完全无任何 portfolio（portfolio_path 仍为 None）时，才视为 PTrade 同步失败。
+        if portfolio_path is None or not os.path.exists(portfolio_path):
             logger.error(
                 f"【前端-持仓】自动模式下 {working_date} 的 portfolio 文件不存在，PTrade 同步可能失败")
             return jsonify({
@@ -3676,6 +3668,7 @@ def get_portfolio():
                     "initial_capital": getattr(runner, 'initial_capital', 300000),
                     "run_mode": "auto",
                     "ptrade_enabled": True,
+                    "data_source": "unavailable",
                     "message": "请等待PTrade反馈文件生成后刷新页面"
                 }
             })
@@ -3707,10 +3700,19 @@ def get_portfolio():
         # 转换为列表格式（同时更新价格和计算总资产）
         positions_list = []
         total_value = 0  # 用新价格计算的持仓总市值
-        
+
+        # ETF代码前缀过滤规则（与 ptrade_feedback.ETF_CODE_PREFIXES 保持一致）
+        # 沪市ETF: 51xxxx, 50xxxx, 52xxxx, 56xxxx, 588xxx / 深市ETF: 15xxxx, 16xxxx
+        _ETF_PREFIXES = ('51', '50', '52', '56', '588', '15', '16')
+
         if positions and isinstance(positions, dict):
             for stock_code, pos in positions.items():
                 if isinstance(pos, dict):
+                    # 过滤ETF：只取纯数字部分判断前缀
+                    code_numeric = stock_code.rstrip('.SH').rstrip('.SZ')
+                    if code_numeric.startswith(_ETF_PREFIXES):
+                        logger.debug(f"【前端-持仓】过滤ETF: {stock_code}")
+                        continue
                     # 获取成本价（优先buy_price，兼容cost_price）
                     cost_price = round(pos.get('buy_price', pos.get('cost_price', 0)), 2)
                     
@@ -3798,7 +3800,9 @@ def get_portfolio():
                 "total_profit_percent": total_profit_percent,
                 "initial_cash": 300000,
                 "date": working_date,
-                "run_mode": run_mode
+                "run_mode": run_mode,
+                "data_source": data_source,
+                "portfolio_date": found_date
             }
         })
     except Exception as e:

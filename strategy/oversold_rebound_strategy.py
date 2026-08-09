@@ -4,12 +4,17 @@
 策略逻辑：
   1. 超跌深度检查（必要条件，C1）：近 lookback_days 个交易日内，区间最高价到最低价的
      下跌幅度超过 decline_threshold（默认50%），即股票处于深度超跌状态。
-  2. 底部特征检查（满足之一，C2）：近 bottom_window 个交易日内出现以下三种底部特征之一：
-     a) MACD底背离：窗口内价格创新低，但MACD柱未同步创新低（动能背离）。
+  2. 底部特征检查（C2）：
+     a) MACD底背离：窗口内价格创新低，但MACD柱未同步创新低（动能背离）。【必须条件】
      b) 底分型形态：近三根K线最低价居中（缠论简化底分型）。
      c) 低位九转：最新交易日完成买入Countdown第9根（复用LowTD9Strategy状态机）。
+     d) 启明星形态（宽松版，仅形态）：近三根K线呈"阴-小实体-阳"反转雏形。
+     e) 其余底部特征（底分型/低位九转/启明星）满足之一。
 
-组合：C1 AND (C2a OR C2b OR C2c)
+  3. 反弹幅度约束（C3，必要条件）：选股日收盘价相对区间最低价涨幅 <= rebound_cap，
+     避免已反弹过高的标的，只捕捉底部刚启动的买点。
+
+组合：C1 AND C2a（MACD底背离，必须） AND (C2b OR C2c OR C2d) AND C3
 
 数据约定：df 倒序，index=0 为最新交易日（与框架 execute_selection 入口规范化一致）。
 """
@@ -20,7 +25,7 @@ import pandas as pd
 
 
 class OversoldReboundStrategy(BaseStrategy):
-    """超跌反弹策略：深度超跌 + 任一底部特征（MACD底背离/底分型/低位九转）"""
+    """超跌反弹策略：深度超跌 + MACD底背离(必须) + 任一底部特征 + 反弹幅度受限"""
 
     # 默认参数（与 config/strategy_params.yaml 的 params 段保持一致）
     DEFAULT_PARAMS = {
@@ -34,6 +39,10 @@ class OversoldReboundStrategy(BaseStrategy):
         'enable_bottom_fractal': True,   # 启用底分型特征
         'fractal_require_yang': False,   # 底分型右侧是否要求阳线
         'enable_low_td9': True,          # 启用低位九转特征
+        'enable_morning_star': True,     # 启用启明星形态（宽松版）特征
+        'morning_star_body_threshold': 0.03,  # 第一根阴线实体最小百分比
+        'morning_star_small_ratio': 0.5,      # 第二根小实体相对第一根实体的比例上限
+        'rebound_cap': 0.30,            # 选股日收盘相对区间最低价涨幅上限
     }
 
     def __init__(self, params=None):
@@ -71,27 +80,56 @@ class OversoldReboundStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
     # 规则1：超跌深度检查（C1）
     # ------------------------------------------------------------------ #
-    def _check_oversold(self, df: pd.DataFrame, reasons: list) -> bool:
+    def _check_oversold(self, df: pd.DataFrame, reasons: list) -> float:
         """
         检查近 lookback_days 日区间最高价到最低价的下跌幅度是否超过阈值
 
         :param df: 含 high/low 的 DataFrame（倒序）
         :param reasons: 命中理由列表（命中时追加说明）
-        :return: True 表示满足超跌条件
+        :return: 满足超跌条件时返回下跌幅度(0~1)，否则返回 -1.0
         """
         lookback = int(self.params['lookback_days'])  # 回溯交易日数
         threshold = float(self.params['decline_threshold'])  # 下跌幅度阈值
         n = len(df)
         if n < lookback:
-            return False  # 数据不足无法判断
+            return -1.0  # 数据不足无法判断
         window = df.head(lookback)  # 取最近 lookback 日（倒序）
         max_high = window['high'].max()  # 区间最高价
         min_low = window['low'].min()  # 区间最低价
         if max_high <= 0 or pd.isna(max_high) or pd.isna(min_low):
-            return False  # 价格异常
+            return -1.0  # 价格异常
         decline = (max_high - min_low) / max_high  # 下跌幅度
         if decline > threshold:
             reasons.append(f"近{lookback}日超跌幅度{decline*100:.1f}%（最高→最低）")
+            return decline  # 命中时返回下跌幅度
+        return -1.0
+
+    # ------------------------------------------------------------------ #
+    # 规则3：反弹幅度约束（C3，必要条件）
+    # ------------------------------------------------------------------ #
+    def _check_rebound_cap(self, df: pd.DataFrame, reasons: list) -> bool:
+        """
+        检查选股日收盘价相对区间最低价的反弹幅度是否不超过上限
+
+        仅捕捉底部刚启动、尚未大幅反弹的标的，避免追高。
+
+        :param df: 含 low/close 的 DataFrame（倒序，index=0最新）
+        :param reasons: 命中理由列表
+        :return: True 表示反弹幅度 <= rebound_cap
+        """
+        lookback = int(self.params['lookback_days'])  # 与超跌窗口一致
+        cap = float(self.params['rebound_cap'])        # 反弹幅度上限
+        n = len(df)
+        if n < lookback:
+            return False  # 数据不足
+        window = df.head(lookback)  # 最近 lookback 日
+        min_low = window['low'].min()  # 区间最低价
+        close0 = df['close'].iloc[0]   # 选股日收盘价
+        if min_low <= 0 or pd.isna(min_low) or pd.isna(close0):
+            return False  # 价格异常
+        rebound = (close0 - min_low) / min_low  # 相对最低价反弹幅度
+        if rebound <= cap:
+            reasons.append(f"选股日收盘较区间最低价反弹{rebound*100:.1f}%（上限{cap*100:.0f}%）")
             return True
         return False
 
@@ -129,12 +167,14 @@ class OversoldReboundStrategy(BaseStrategy):
     # ------------------------------------------------------------------ #
     def _check_bottom_fractal(self, df: pd.DataFrame, reasons: list) -> bool:
         """
-        检查近三根K线是否构成底分型：中间K线最低价低于左右两根
+        检查近三根K线是否构成底分型：中间K线最低价与最高价均低于左右两根
 
         倒序约定：idx0=最新，idx1=前一交易日，idx2=前二交易日
         底分型判定：low[idx1] < low[idx0] 且 low[idx1] < low[idx2]
+                  且 high[idx1] < high[idx0] 且 high[idx1] < high[idx2]
+        即中间K线的高低点均被左右两根包裹，构成标准底分型。
 
-        :param df: 含 open/close/low 的 DataFrame（倒序）
+        :param df: 含 open/close/low/high 的 DataFrame（倒序）
         :param reasons: 命中理由列表
         :return: True 表示出现底分型
         """
@@ -144,15 +184,20 @@ class OversoldReboundStrategy(BaseStrategy):
         l0 = df['low'].iloc[0]
         l1 = df['low'].iloc[1]
         l2 = df['low'].iloc[2]
+        h0 = df['high'].iloc[0]
+        h1 = df['high'].iloc[1]
+        h2 = df['high'].iloc[2]
         # 中间K线最低价低于左右两侧（底分型核心）
         if l1 < l0 and l1 < l2:
-            # 可选增强：右侧K线要求阳线确认
-            if self.params.get('fractal_require_yang', False):
-                is_yang = df['close'].iloc[0] > df['open'].iloc[0]  # 最新K线收阳
-                if not is_yang:
-                    return False
-            reasons.append("底部特征：底分型形态（近三日最低价居中）")
-            return True
+            # 中间K线最高点也低于左右两侧（标准底分型，高低点均被包裹）
+            if h1 < h0 and h1 < h2:
+                # 可选增强：右侧K线要求阳线确认
+                if self.params.get('fractal_require_yang', False):
+                    is_yang = df['close'].iloc[0] > df['open'].iloc[0]  # 最新K线收阳
+                    if not is_yang:
+                        return False
+                reasons.append("底部特征：底分型形态（近三日最低价与最高价均居中）")
+                return True
         return False
 
     # ------------------------------------------------------------------ #
@@ -182,11 +227,51 @@ class OversoldReboundStrategy(BaseStrategy):
         return False
 
     # ------------------------------------------------------------------ #
+    # 规则2d：启明星形态（宽松版，仅形态，区别于系统 MorningStarStrategy）
+    # ------------------------------------------------------------------ #
+    def _check_morning_star(self, df: pd.DataFrame, reasons: list) -> bool:
+        """
+        检查近三根K线是否构成"阴-小实体-阳"的启明星反转雏形（宽松形态版）
+
+        与系统 MorningStarStrategy 的区别：仅判定形态，不要求突破5日均线、
+        不要求成交量放大、不要求第三根涨幅达到阈值，条件更宽松。
+
+        倒序约定：idx0=最新(阳)，idx1=中间(小实体)，idx2=最旧(阴)
+        判定：
+          ① idx2 为大阴线（收盘<开盘，实体> morning_star_body_threshold）
+          ② idx1 实体很小（实体 <= idx2实体 * morning_star_small_ratio）
+          ③ idx0 为阳线（收盘>开盘）
+
+        :param df: 含 open/close/low 的 DataFrame（倒序）
+        :param reasons: 命中理由列表
+        :return: True 表示出现启明星雏形
+        """
+        if len(df) < 3:
+            return False  # 至少需要三根K线
+        # 取最近三根（倒序 idx0/1/2）
+        c0 = df.iloc[0]  # 最新（第三根/阳线）
+        c1 = df.iloc[1]  # 中间（第二根/小实体）
+        c2 = df.iloc[2]  # 最旧（第一根/阴线）
+        # ① 第一根为大阴线
+        body2 = abs(c2['close'] - c2['open']) / c2['open'] if c2['open'] != 0 else 0
+        if not (c2['close'] < c2['open'] and body2 > self.params['morning_star_body_threshold']):
+            return False
+        # ② 第二根实体很小
+        body1 = abs(c1['close'] - c1['open']) / c1['open'] if c1['open'] != 0 else 0
+        if body1 > body2 * self.params['morning_star_small_ratio']:
+            return False
+        # ③ 第三根为阳线
+        if not (c0['close'] > c0['open']):
+            return False
+        reasons.append("底部特征：启明星形态（阴-小实体-阳，宽松形态）")
+        return True
+
+    # ------------------------------------------------------------------ #
     # 选股主逻辑
     # ------------------------------------------------------------------ #
     def select_stocks(self, df: pd.DataFrame, stock_name: str = '') -> list:
         """
-        超跌反弹选股主逻辑：C1 AND (C2a OR C2b OR C2c)
+        超跌反弹选股主逻辑：C1 AND C2a(必须) AND (C2b OR C2c OR C2d) AND C3
 
         :param df: 个股日线数据（倒序，index=0最新）
         :param stock_name: 股票名称（用于信号说明）
@@ -205,20 +290,30 @@ class OversoldReboundStrategy(BaseStrategy):
 
         reasons = []  # 累计命中理由
         # 规则1：超跌深度（必要条件）
-        if not self._check_oversold(df, reasons):
+        decline = self._check_oversold(df, reasons)
+        if decline < 0:
             return []  # 不满足超跌，快速剪枝
 
-        # 规则2：底部特征（满足之一）
+        # 规则3：反弹幅度约束（必要条件）
+        if not self._check_rebound_cap(df, reasons):
+            return []  # 反弹幅度已超过上限，快速剪枝
+
+        # 规则2a：MACD底背离（必须条件，不满足则直接剪枝）
         hit_features = []  # 记录命中的特征标签
-        if self.params.get('enable_low_td9', True) and self._check_low_td9(df, reasons):
-            hit_features.append('低位九转')
+        if not self._check_macd_divergence(df, reasons):
+            return []  # 无MACD底背离，不满足必须条件，快速剪枝
+        hit_features.append('MACD底背离')
+
+        # 规则2b/2c/2d：底分型 / 低位九转 / 启明星（满足之一即可）
         if self.params.get('enable_bottom_fractal', True) and self._check_bottom_fractal(df, reasons):
             hit_features.append('底分型')
-        if self._check_macd_divergence(df, reasons):
-            hit_features.append('MACD底背离')
+        if self.params.get('enable_low_td9', True) and self._check_low_td9(df, reasons):
+            hit_features.append('低位九转')
+        if self.params.get('enable_morning_star', True) and self._check_morning_star(df, reasons):
+            hit_features.append('启明星')
 
-        if not hit_features:
-            return []  # 无底部特征，不入选
+        if len(hit_features) < 2:
+            return []  # 仅有底背离而无其他底部特征，不入选
 
         # 组装信号
         key_date = str(df['date'].iloc[0])[:10] if 'date' in df.columns else ''
@@ -230,6 +325,7 @@ class OversoldReboundStrategy(BaseStrategy):
             'reasons': reasons,
             'strategy_type': 'OversoldReboundStrategy',
             'features': hit_features,  # 命中的底部特征列表
+            'decline_pct': round(decline * 100, 2),  # 区间最高→最低下跌幅度(%)，用于排序展示
         }
         return [signal]
 
@@ -244,10 +340,14 @@ class OversoldReboundStrategy(BaseStrategy):
         """
         t = float(self.params['decline_threshold'])
         lb = int(self.params['lookback_days'])
+        cap = float(self.params['rebound_cap'])
         return [
             f"必要条件：近{lb}交易日区间最高价到最低价下跌幅度 > {t*100:.0f}%",
-            "底部特征（满足之一）：",
-            "  ① MACD底背离：价格创新低而MACD柱未同步新低",
+            f"必要条件：选股日收盘较区间最低价反弹幅度 <= {cap*100:.0f}%",
+            "必须特征：",
+            "  ① MACD底背离：价格创新低而MACD柱未同步新低（必须）",
+            "附加特征（满足之一）：",
             "  ② 底分型：近三根K线最低价居中",
             "  ③ 低位九转：最新交易日完成买入Countdown第9根",
+            "  ④ 启明星形态：近三根K线呈阴-小实体-阳（宽松形态）",
         ]

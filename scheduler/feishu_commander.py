@@ -130,12 +130,18 @@ class FeishuCommander:
             logger.info("首次轮询，跳过历史消息，记录起始ID: %s", self._last_message_id)
             return
         newest_id = None
+        processed_in_poll = set()  # 本轮已处理的消息ID，防列表内重复项导致同一条指令被处理多遍
         for msg in messages:
             msg_id = msg.get("message_id", "")
             sender = msg.get("sender", {})
             # 列表按创建时间倒序，命中已处理的最旧消息即停止（游标断点）
             if self._last_message_id and msg_id == self._last_message_id:
                 break
+            # 同一轮拉取中，飞书可能返回重复 message_id（分页/缓存边界），
+            # 仅凭借游标断点无法拦截列表内重复项，需本轮去重避免同指令被处理多遍
+            if msg_id in processed_in_poll:
+                continue
+            processed_in_poll.add(msg_id)
             # 记录已扫描到的最新消息ID：无论是否命中指令都推进游标，
             # 否则被忽略的消息会每轮重复拉取、重复打印日志（修复刷屏根因）
             if newest_id is None:

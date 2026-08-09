@@ -860,7 +860,49 @@ class DBManager:
             # 如果表不存在或查询失败，返回空列表
             logger.debug(f"列出所有股票失败: {str(e)}")
             return []
-    
+
+    def read_stock_batch(self, end_date: str, limit: int = 120) -> Dict[str, pd.DataFrame]:
+        """
+        批量读取全部股票截至 end_date 的最新 limit 根日线（单条SQL，避免逐只查询往返）
+
+        Args:
+            end_date: 截止日期（含），如 '2026-08-04'
+            limit: 每只股票最多返回的根数
+
+        Returns:
+            dict: {code: 倒序 DataFrame(最新在前, index0=最新)，列含 open/high/low/close/volume/date}
+        """
+        # 单条SQL取全部股票截至目标日的数据，按 code、date 降序排列
+        sql = ("SELECT code, date, open, high, low, close, volume "
+               "FROM stock_kline WHERE date <= ? ORDER BY code, date DESC")
+        big = self.query(sql, (end_date,))
+        if not big:
+            return {}
+        result: Dict[str, pd.DataFrame] = {}
+        cur_code = None
+        cur_rows = []
+        for row in big:
+            code = row['code']
+            if code != cur_code:
+                # 切换到新股票：把上一只的前 limit 根存入结果
+                if cur_code is not None:
+                    result[cur_code] = self._to_stock_df(cur_rows[:limit])
+                cur_code = code
+                cur_rows = []
+            cur_rows.append(row)
+        # 收尾最后一只
+        if cur_code is not None:
+            result[cur_code] = self._to_stock_df(cur_rows[:limit])
+        return result
+
+    @staticmethod
+    def _to_stock_df(rows) -> pd.DataFrame:
+        """将行列表转为倒序 DataFrame（index0=最新）"""
+        df = pd.DataFrame([dict(r) for r in rows])
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date', ascending=False).reset_index(drop=True)
+        return df
+
     def stock_exists(self, stock_code: str) -> bool:
         """
         检查股票数据是否存在（替代 CSVManager.stock_exists）
