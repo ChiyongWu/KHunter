@@ -313,20 +313,20 @@ strategies:
         min: 0
         type: int
       c_cross_min_gain:
-        default: 0.03
+        default: 0.01
         description: C点当天的最小涨幅(%)
         display_name: C点最小涨幅
         group: C点条件
         max: 0.1
-        min: 0.01
+        min: 0.0
         type: float
       c_cross_min_volume_ratio:
-        default: 1.3
-        description: C点当天的最小量能比
+        default: 1.1
+        description: C点当天的最小量能比(成交量/MA5成交量)
         display_name: C点最小量能比
         group: C点条件
         max: 3.0
-        min: 1.0
+        min: 0.5
         type: float
       long_period:
         default: 20
@@ -344,6 +344,12 @@ strategies:
         max: 60
         min: 10
         type: int
+      ma60_rise_required:
+        default: true
+        description: 是否要求60日均线向上（选股日MA60>前一交易日MA60），过滤趋势向下的股票
+        display_name: 要求60日线向上
+        group: 均线参数
+        type: bool
       mid_period:
         default: 10
         description: 中期均线周期(MA10)
@@ -376,12 +382,6 @@ strategies:
         max: 120
         min: 40
         type: int
-      ma60_rise_required:
-        default: true
-        description: 是否要求60日均线向上（选股日MA60>前一交易日MA60），过滤趋势向下的股票
-        display_name: 要求60日线向上
-        group: 均线参数
-        type: bool
     param_groups:
     - description: 控制均线计算的参数
       name: 均线参数
@@ -397,11 +397,11 @@ strategies:
       c_cross_min_volume_ratio: 1.1
       long_period: 20
       lookback_days: 30
+      ma60_rise_required: true
       mid_period: 10
       short_period: 5
       strategy_weight: 50
       super_long_period: 60
-      ma60_rise_required: true
     support_method: ma20
   ImmortalGuidanceStrategy:
     color: '#f59e0b'
@@ -518,6 +518,111 @@ strategies:
       volume_ratio_max: 'null'
       volume_ratio_min: 1.5
     support_method: key_open
+  LeaderStrategy:
+    color: '#ef4444'
+    description: 龙头策略，筛选当日涨停、早封板(封板时间<11:00)、高换手(10%-20%)、小流通盘(<200亿)的强势龙头股
+    display_name: 龙头策略
+    icon: 👑
+    param_details:
+      float_mv_max:
+        default: 20000000000
+        description: 流通市值上限(元)，200亿=20000000000；基于float_mv
+        display_name: 流通市值上限(亿)
+        group: 市值条件
+        max: 1000000000000
+        min: 1000000000
+        type: int
+      limit_type:
+        default: U
+        description: 涨停类型，U=涨停（池表仅存U，已排除ST/退市/炸板未封）
+        display_name: 涨停类型
+        group: 涨停条件
+        type: string
+      max_open_times:
+        default: null
+        description: 炸板(开板)次数上限；null表示不限制（严格按字面条件），0表示必须未炸板的真硬板
+        display_name: 炸板次数上限
+        group: 封板条件
+        max: 20
+        min: 0
+        type: int
+      min_limit_times:
+        default: 1
+        description: 连板下限；1表示不过滤首板，2表示至少2连板
+        display_name: 连板下限
+        group: 市值条件
+        max: 10
+        min: 1
+        type: int
+      max_limit_times:
+        default: 3
+        description: 连板上限；超过则排除（避免高位连板接盘风险）；null表示不限制
+        display_name: 连板上限
+        group: 市值条件
+        max: 10
+        min: 1
+        type: int
+      seal_time_field:
+        default: last_time
+        description: 封板时间判定字段，默认last_time=最后封板（不限制炸板）；可改first_time=首次封板
+        display_name: 封板时间字段
+        group: 封板条件
+        type: string
+      seal_time_limit:
+        default: 110000
+        description: 封板时间上限(HHMMSS)，如110000表示11:00；超过则排除
+        display_name: 封板时间上限
+        group: 封板条件
+        max: 150000
+        min: 90000
+        type: int
+      strategy_weight:
+        default: 70
+        description: 技术面评分权重
+        display_name: 策略权重
+        group: 评分参数
+        max: 100
+        min: 0
+        type: int
+      turnover_max:
+        default: 25.0
+        description: 换手率上限(%)，基于turnover_ratio(无限售流通股口径，=通达信显示值)
+        display_name: 换手率上限(%)
+        group: 换手条件
+        max: 50
+        min: 0
+        type: float
+      turnover_min:
+        default: 15.0
+        description: 换手率下限(%)，基于turnover_ratio(无限售流通股口径，=通达信显示值)
+        display_name: 换手率下限(%)
+        group: 换手条件
+        max: 50
+        min: 0
+        type: float
+    param_groups:
+    - description: 控制当日涨停判定的参数
+      name: 涨停条件
+    - description: 控制封板时间(早封板)判断的参数
+      name: 封板条件
+    - description: 控制换手率区间的参数
+      name: 换手条件
+    - description: 控制流通市值的参数
+      name: 市值条件
+    - description: 控制策略综合评分的参数
+      name: 评分参数
+    params:
+      float_mv_max: 20000000000
+      limit_type: U
+      max_limit_times: 4
+      max_open_times: null
+      min_limit_times: 1
+      seal_time_field: last_time
+      seal_time_limit: 110000
+      strategy_weight: 80
+      turnover_max: 25.0
+      turnover_min: 10.0
+    support_method: key_open
   LimitUpPullbackStrategy:
     color: '#ef4444'
     description: 识别涨停后回调再次上涨的形态，通过涨停、回调、KDJ金叉、MACD金叉等条件的组合判断
@@ -588,6 +693,22 @@ strategies:
         max: 0.1
         min: 0.0
         type: float
+      selection_day_rise_threshold:
+        default: 0.02
+        description: 选股日涨幅阈值
+        display_name: 选股日涨幅(%)
+        group: 选股日参数
+        max: 0.1
+        min: 0.01
+        type: float
+      selection_day_volume_ratio:
+        default: 1.5
+        description: 选股日量能比前一天放大比例
+        display_name: 选股日量能比
+        group: 选股日参数
+        max: 3.0
+        min: 1.0
+        type: float
       support_ratio:
         default: 0.95
         description: 支撑比例（不破涨停收盘价的此比例）
@@ -612,22 +733,6 @@ strategies:
         max: 0.8
         min: 0.3
         type: float
-      selection_day_rise_threshold:
-        default: 0.02
-        description: 选股日涨幅阈值
-        display_name: 选股日涨幅(%)
-        group: 选股日参数
-        max: 0.1
-        min: 0.01
-        type: float
-      selection_day_volume_ratio:
-        default: 1.5
-        description: 选股日量能比前一天放大比例
-        display_name: 选股日量能比
-        group: 选股日参数
-        max: 3.0
-        min: 1.0
-        type: float
     param_groups:
     - description: 控制涨停识别的参数
       name: 涨停参数
@@ -650,11 +755,11 @@ strategies:
       pullback_days_min: 1
       pullback_range_max: 0.15
       pullback_range_min: 0.0
+      selection_day_rise_threshold: 0.02
+      selection_day_volume_ratio: 1.5
       support_ratio: 0.95
       volume_ratio_threshold: 2.2
       volume_shrinkage_ratio: 0.5
-      selection_day_rise_threshold: 0.02
-      selection_day_volume_ratio: 1.5
     support_method: key_close_5
   LimitUpSidewaysStrategy:
     color: '#8b5cf6'
@@ -828,6 +933,242 @@ strategies:
       volume_ratio_threshold: 1.8
       volume_shrinkage_ratio: 0.6
     support_method: key_close_5
+  LowTD9Strategy:
+    color: '#0ea5e9'
+    description: 基于 TD Sequential（9转序列）的底部反转选股策略，识别买入 Setup 前置完成后、低位环境且完美信号达标的今日低位9转个股
+    display_name: 低位九转策略
+    icon: 9️⃣
+    param_details:
+      countdown_offset:
+        default: 2
+        description: Countdown 比较偏移 close[t] vs close[t-2]（DeMark 原版）
+        display_name: Countdown偏移
+        group: TD Countdown
+        max: 5
+        min: 1
+        type: int
+      countdown_target:
+        default: 9
+        description: 买入 Countdown 完成目标根数
+        display_name: 9转目标
+        group: TD Countdown
+        max: 13
+        min: 7
+        type: int
+      enable_cancellation:
+        default: true
+        description: 卖出 Setup 完成则作废当前买入 Countdown
+        display_name: 取消规则
+        group: 取消规则
+        type: bool
+      enable_low_filter:
+        default: false
+        description: 是否启用低位环境过滤（已按需求关闭三项低位环境判定）
+        display_name: 低位环境过滤
+        group: 低位过滤
+        type: bool
+      enable_ma60:
+        default: true
+        description: 是否要求收盘价小于60日均线
+        display_name: 60日均线压制
+        group: 低位过滤
+        type: bool
+      enable_perfection:
+        default: true
+        description: 完美信号硬门槛，第8或第9根低点需低于第6、7根低点
+        display_name: 完美信号
+        group: 完美信号
+        type: bool
+      low_drawdown_max:
+        default: 0.85
+        description: 距阶段高点最大比例，≤则视为低位
+        display_name: 回撤上限
+        group: 低位过滤
+        max: 1.0
+        min: 0.6
+        type: float
+      low_drawdown_window:
+        default: 60
+        description: 回撤计算回溯交易日
+        display_name: 回撤窗口
+        group: 低位过滤
+        max: 120
+        min: 20
+        type: int
+      max_upwave:
+        default: 0.3
+        description: 近20日最大涨幅上限，排除主升浪中段的高位9转
+        display_name: 近20日涨幅上限
+        group: 低位过滤
+        max: 0.6
+        min: 0.1
+        type: float
+      min_data_len:
+        default: 13
+        description: 最少历史交易日，TD Setup+Countdown 结构在13根内完成判定
+        display_name: 最少数据长度
+        group: 数据
+        max: 250
+        min: 60
+        type: int
+      min_near_run:
+        default: 7
+        description: 漏斗门槛，当日就近连续满足 close[t]<=close[t-4] 的根数（达到才跑完整状态机）
+        display_name: 漏斗近端根数
+        group: 漏斗前置
+        max: 12
+        min: 1
+        type: int
+      setup_offset:
+        default: 4
+        description: Setup 比较偏移 close[t] vs close[t-4]
+        display_name: Setup偏移
+        group: TD Setup前置
+        max: 5
+        min: 2
+        type: int
+      setup_window:
+        default: 9
+        description: 买入/卖出 Setup 所需连续根数
+        display_name: Setup窗口
+        group: TD Setup前置
+        max: 13
+        min: 5
+        type: int
+    param_groups:
+    - description: 控制 TD Setup 前置结构的参数
+      name: TD Setup前置
+    - description: 控制 TD Countdown（9转）计数的参数
+      name: TD Countdown
+    - description: 控制低位环境过滤的参数
+      name: 低位过滤
+    - description: 控制下跌中继取消规则的参数
+      name: 取消规则
+    - description: 控制完美信号硬门槛的参数
+      name: 完美信号
+    - description: 控制漏斗前置快速剪枝的参数
+      name: 漏斗前置
+    params:
+      countdown_offset: 2
+      countdown_target: 9
+      enable_cancellation: true
+      enable_low_filter: false
+      enable_ma60: true
+      enable_perfection: true
+      low_drawdown_max: 0.85
+      low_drawdown_window: 60
+      max_upwave: 0.3
+      min_data_len: 120
+      min_near_run: 7
+      setup_offset: 4
+      setup_window: 9
+    support_method: ma20
+  LowTurtleStrategy:
+    color: '#0891b2'
+    description: 低位海龟策略，基于唐奇安通道的趋势跟踪系统（低位版），去除MA20强趋势过滤，专用于配合低位选股策略（如低位九转）使用
+    display_name: 低位海龟策略
+    icon: 🐢
+    param_details:
+      add_atr:
+        default: 0.5
+        description: 加仓ATR间隔，价格每上涨此ATR倍数加仓一次
+        display_name: 加仓ATR间隔
+        group: 加仓参数
+        max: 2.0
+        min: 0.25
+        type: float
+      atr_period:
+        default: 12
+        description: ATR计算周期
+        display_name: ATR周期
+        group: ATR参数
+        max: 30
+        min: 5
+        type: int
+      base_position_amount:
+        default: 20000
+        description: 底仓金额（元）
+        display_name: 底仓金额(元)
+        group: 仓位参数
+        max: 100000
+        min: 10000
+        type: int
+      entry_atr:
+        default: 0.02
+        description: 入场ATR比例，用于计算仓位
+        display_name: 入场ATR比例
+        group: 仓位参数
+        max: 0.05
+        min: 0.01
+        type: float
+      exit_atr:
+        default: 2.0
+        description: 出场ATR止损倍数，跌破入场价-此倍数*ATR止损
+        display_name: ATR止损倍数
+        group: 止损参数
+        max: 4.0
+        min: 1.0
+        type: float
+      n1:
+        default: 1
+        description: 入场通道周期，突破此周期的最高价入场（低位版默认1）
+        display_name: 入场通道周期
+        group: 通道参数
+        max: 20
+        min: 1
+        type: int
+      n2:
+        default: 6
+        description: 出场通道周期，跌破此周期的最低价出场（低位版默认6）
+        display_name: 出场通道周期
+        group: 通道参数
+        max: 55
+        min: 3
+        type: int
+      preset:
+        default: custom
+        description: 预设配置模式（低位版固定为custom）
+        display_name: 预设模式
+        group: 预设参数
+        options:
+        - custom
+        type: string
+    param_groups:
+    - description: 低位海龟仅自定义参数
+      name: 预设参数
+    - description: 控制唐奇安通道计算的参数
+      name: 通道参数
+    - description: 控制ATR指标计算的参数
+      name: ATR参数
+    - description: 控制止损止盈的参数
+      name: 止损参数
+    - description: 控制加仓条件的参数
+      name: 加仓参数
+    - description: 控制仓位的参数
+      name: 仓位参数
+    params:
+      add_atr: 0.5
+      atr_period: 12
+      base_position_amount: 20000
+      entry_atr: 0.02
+      exit_atr: 2.0
+      n_entry: 1
+      n_exit: 6
+      preset: custom
+    presets:
+      custom:
+        description: 低位海龟自定义配置，1日入场/6日离场，去除MA20过滤
+        display_name: 低位海龟(1/6)
+        icon: 🐢
+        params:
+          add_atr: 0.5
+          atr_period: 12
+          base_position_amount: 20000
+          entry_atr: 0.02
+          exit_atr: 2.0
+          n_entry: 1
+          n_exit: 6
+    support_method: ma20
   MA20MA60Strategy:
     color: '#10b981'
     description: 5日均线金叉20日均线，5日均量线≥60日均量线，20日均线方向向上，三者同日发生
@@ -1209,6 +1550,184 @@ strategies:
       third_volume_ma_ratio: 1.5
       volume_ma_period: 5
     support_method: key_open
+  OversoldReboundStrategy:
+    color: '#f59e0b'
+    description: 识别近100交易日深度下跌(区间最高→最低跌幅>50%)后，近3交易日出现MACD底背离/底分型(右K阳线确认)/低位九转任一底部特征的超跌反弹机会
+    display_name: 超跌反弹策略
+    icon: 📉
+    param_details:
+      bottom_window:
+        default: 3
+        description: 底部特征搜索窗口（最近N个交易日）
+        display_name: 底部特征窗口
+        group: 底部特征条件
+        max: 10
+        min: 1
+        type: int
+      decline_threshold:
+        default: 0.5
+        description: 区间最高价到最低价的下跌幅度阈值（>阈值视为超跌）
+        display_name: 下跌幅度(%)
+        group: 超跌深度条件
+        max: 0.7
+        min: 0.3
+        type: float
+      enable_bottom_fractal:
+        default: true
+        description: 是否启用底分型特征（近3日最低价居中）
+        display_name: 启用底分型
+        group: 底部特征条件
+        type: bool
+      enable_low_td9:
+        default: true
+        description: 是否启用低位九转特征（今日完成买入Countdown第9根）
+        display_name: 启用低位九转
+        group: 底部特征条件
+        type: bool
+      enable_morning_star:
+        default: true
+        description: 是否启用启明星形态（宽松版，仅形态：阴-小实体-阳）
+        display_name: 启用启明星
+        group: 底部特征条件
+        type: bool
+      fractal_require_yang:
+        default: true
+        description: 底分型右侧K线是否要求阳线确认
+        display_name: 底分型阳线确认
+        group: 底部特征条件
+        type: bool
+      lookback_days:
+        default: 100
+        description: 超跌检查回溯交易日数，取最近N日的最高价/最低价
+        display_name: 超跌回溯天数
+        group: 超跌深度条件
+        max: 250
+        min: 10
+        type: int
+      macd_divergence_days:
+        default: 20
+        description: MACD底背离判断窗口（回溯N日寻找价格新低而MACD柱未同步新低）
+        display_name: 底背离窗口
+        group: MACD底背离
+        max: 40
+        min: 10
+        type: int
+      macd_fast:
+        default: 12
+        description: MACD快线EMA周期
+        display_name: MACD快线
+        group: MACD底背离
+        max: 20
+        min: 5
+        type: int
+      macd_signal:
+        default: 9
+        description: MACD信号线EMA周期
+        display_name: MACD信号
+        group: MACD底背离
+        max: 20
+        min: 5
+        type: int
+      macd_slow:
+        default: 26
+        description: MACD慢线EMA周期
+        display_name: MACD慢线
+        group: MACD底背离
+        max: 40
+        min: 10
+        type: int
+      morning_star_body_threshold:
+        default: 0.03
+        description: 启明星第一根阴线实体最小百分比（仅形态，不要求突破均线/放量）
+        display_name: 启明星阴线实体(%)
+        group: 底部特征条件
+        max: 0.1
+        min: 0.01
+        type: float
+      morning_star_small_ratio:
+        default: 0.5
+        description: 启明星第二根小实体相对第一根实体的比例上限
+        display_name: 启明星小实体比例
+        group: 底部特征条件
+        max: 1.0
+        min: 0.1
+        type: float
+      rebound_cap:
+        default: 0.3
+        description: 选股日收盘价相对区间最低价反弹幅度上限（超过则已反弹过高）
+        display_name: 反弹幅度上限(%)
+        group: 超跌深度条件
+        max: 0.6
+        min: 0.1
+        type: float
+      require_selection_day_yang:
+        default: true
+        description: 选股日必须阳线且相对前一日收盘涨幅>0（否则不入选）
+        display_name: 选股日阳线确认
+        group: 超跌深度条件
+        type: bool
+      selection_day_min_gain:
+        default: 0.01
+        description: 选股日相对前一日收盘的最小涨幅阈值（超过才入选，过滤弱反弹）
+        display_name: 选股日最小涨幅(%)
+        group: 超跌深度条件
+        max: 0.1
+        min: 0.0
+        type: float
+      strategy_weight:
+        default: 50
+        description: 技术面评分权重（用于多策略综合评分与排序）
+        display_name: 策略权重
+        group: 评分参数
+        max: 100
+        min: 0
+        type: int
+      volume_avg_days:
+        default: 5
+        description: 量能比较的基准均量窗口（取选股日之前N日成交量均值）
+        display_name: 量能基准天数
+        group: 超跌深度条件
+        max: 20
+        min: 3
+        type: int
+      volume_surge_ratio:
+        default: 1.3
+        description: 选股日成交量相对前N日均量的最小放大倍数（达到才入选）
+        display_name: 量能放大倍数
+        group: 超跌深度条件
+        max: 5.0
+        min: 1.0
+        type: float
+    param_groups:
+    - description: 控制超跌深度判断的参数
+      name: 超跌深度条件
+    - description: 控制底部特征组合的参数
+      name: 底部特征条件
+    - description: 控制MACD底背离判断的参数
+      name: MACD底背离
+    - description: 控制多策略综合评分的参数
+      name: 评分参数
+    params:
+      bottom_window: 3
+      decline_threshold: 0.5
+      enable_bottom_fractal: 'true'
+      enable_low_td9: 'true'
+      enable_morning_star: 'true'
+      fractal_require_yang: 'false'
+      lookback_days: 100
+      macd_divergence_days: 20
+      macd_fast: 12
+      macd_signal: 9
+      macd_slow: 26
+      morning_star_body_threshold: 0.03
+      morning_star_small_ratio: 0.5
+      rebound_cap: 0.3
+      require_selection_day_yang: 'true'
+      selection_day_min_gain: 0.01
+      strategy_weight: 50
+      volume_avg_days: 5
+      volume_surge_ratio: 1.3
+    support_method: ma20
   ResistanceBreakoutStrategy:
     color: '#3b82f6'
     description: 识别股价突破关键阻力位的信号，捕捉上涨突破机会
@@ -1761,7 +2280,7 @@ strategies:
         min: 1.0
         type: float
       n1:
-        default: 1
+        default: 12
         description: 入场通道周期，突破此周期的最高价入场
         display_name: 入场通道周期
         group: 通道参数
@@ -1805,7 +2324,7 @@ strategies:
       base_position_amount: 20000
       entry_atr: 0.02
       exit_atr: 2.0
-      n_entry: 1
+      n_entry: 12
       n_exit: 6
       preset: custom
     presets:
@@ -1845,112 +2364,6 @@ strategies:
           exit_atr: 2.0
           n_entry: 6
           n_exit: 3
-    support_method: ma20
-  LowTurtleStrategy:
-    color: '#0891b2'
-    description: 低位海龟策略，基于唐奇安通道的趋势跟踪系统（低位版），去除MA20强趋势过滤，专用于配合低位选股策略（如低位九转）使用
-    display_name: 低位海龟策略
-    icon: 🐢
-    param_details:
-      add_atr:
-        default: 0.5
-        description: 加仓ATR间隔，价格每上涨此ATR倍数加仓一次
-        display_name: 加仓ATR间隔
-        group: 加仓参数
-        max: 2.0
-        min: 0.25
-        type: float
-      atr_period:
-        default: 12
-        description: ATR计算周期
-        display_name: ATR周期
-        group: ATR参数
-        max: 30
-        min: 5
-        type: int
-      base_position_amount:
-        default: 20000
-        description: 底仓金额（元）
-        display_name: 底仓金额(元)
-        group: 仓位参数
-        max: 100000
-        min: 10000
-        type: int
-      entry_atr:
-        default: 0.02
-        description: 入场ATR比例，用于计算仓位
-        display_name: 入场ATR比例
-        group: 仓位参数
-        max: 0.05
-        min: 0.01
-        type: float
-      exit_atr:
-        default: 2.0
-        description: 出场ATR止损倍数，跌破入场价-此倍数*ATR止损
-        display_name: ATR止损倍数
-        group: 止损参数
-        max: 4.0
-        min: 1.0
-        type: float
-      n1:
-        default: 1
-        description: 入场通道周期，突破此周期的最高价入场（低位版默认1）
-        display_name: 入场通道周期
-        group: 通道参数
-        max: 20
-        min: 1
-        type: int
-      n2:
-        default: 6
-        description: 出场通道周期，跌破此周期的最低价出场（低位版默认6）
-        display_name: 出场通道周期
-        group: 通道参数
-        max: 55
-        min: 3
-        type: int
-      preset:
-        default: custom
-        description: 预设配置模式（低位版固定为custom）
-        display_name: 预设模式
-        group: 预设参数
-        options:
-        - custom
-        type: string
-    param_groups:
-    - description: 低位海龟仅自定义参数
-      name: 预设参数
-    - description: 控制唐奇安通道计算的参数
-      name: 通道参数
-    - description: 控制ATR指标计算的参数
-      name: ATR参数
-    - description: 控制止损止盈的参数
-      name: 止损参数
-    - description: 控制加仓条件的参数
-      name: 加仓参数
-    - description: 控制仓位的参数
-      name: 仓位参数
-    params:
-      add_atr: 0.5
-      atr_period: 12
-      base_position_amount: 20000
-      entry_atr: 0.02
-      exit_atr: 2.0
-      n_entry: 1
-      n_exit: 6
-      preset: custom
-    presets:
-      custom:
-        description: 低位海龟自定义配置，1日入场/6日离场，去除MA20过滤
-        display_name: 低位海龟(1/6)
-        icon: 🐢
-        params:
-          add_atr: 0.5
-          atr_period: 12
-          base_position_amount: 20000
-          entry_atr: 0.02
-          exit_atr: 2.0
-          n_entry: 1
-          n_exit: 6
     support_method: ma20
   WBottomStrategy:
     color: '#14b8a6'
@@ -2096,280 +2509,6 @@ strategies:
       volume_expand_ratio: 1.5
       volume_ma_period: 5
       volume_shrink_ratio: 0.8
-    support_method: ma20
-  LowTD9Strategy:
-    color: '#0ea5e9'
-    description: 基于 TD Sequential（9转序列）的底部反转选股策略，识别买入 Setup 前置完成后、低位环境且完美信号达标的今日低位9转个股
-    display_name: 低位九转策略
-    icon: 9️⃣
-    param_details:
-      setup_window:
-        default: 9
-        description: 买入/卖出 Setup 所需连续根数
-        display_name: Setup窗口
-        group: TD Setup前置
-        max: 13
-        min: 5
-        type: int
-      setup_offset:
-        default: 4
-        description: Setup 比较偏移 close[t] vs close[t-4]
-        display_name: Setup偏移
-        group: TD Setup前置
-        max: 5
-        min: 2
-        type: int
-      countdown_target:
-        default: 9
-        description: 买入 Countdown 完成目标根数
-        display_name: 9转目标
-        group: TD Countdown
-        max: 13
-        min: 7
-        type: int
-      countdown_offset:
-        default: 2
-        description: Countdown 比较偏移 close[t] vs close[t-2]（DeMark 原版）
-        display_name: Countdown偏移
-        group: TD Countdown
-        max: 5
-        min: 1
-        type: int
-      enable_low_filter:
-        default: false
-        description: 是否启用低位环境过滤（已按需求关闭三项低位环境判定）
-        display_name: 低位环境过滤
-        group: 低位过滤
-        type: bool
-      low_drawdown_window:
-        default: 60
-        description: 回撤计算回溯交易日
-        display_name: 回撤窗口
-        group: 低位过滤
-        max: 120
-        min: 20
-        type: int
-      low_drawdown_max:
-        default: 0.85
-        description: 距阶段高点最大比例，≤则视为低位
-        display_name: 回撤上限
-        group: 低位过滤
-        max: 1.0
-        min: 0.6
-        type: float
-      enable_ma60:
-        default: true
-        description: 是否要求收盘价小于60日均线
-        display_name: 60日均线压制
-        group: 低位过滤
-        type: bool
-      max_upwave:
-        default: 0.30
-        description: 近20日最大涨幅上限，排除主升浪中段的高位9转
-        display_name: 近20日涨幅上限
-        group: 低位过滤
-        max: 0.6
-        min: 0.1
-        type: float
-      enable_cancellation:
-        default: true
-        description: 卖出 Setup 完成则作废当前买入 Countdown
-        display_name: 取消规则
-        group: 取消规则
-        type: bool
-      enable_perfection:
-        default: true
-        description: 完美信号硬门槛，第8或第9根低点需低于第6、7根低点
-        display_name: 完美信号
-        group: 完美信号
-        type: bool
-      min_data_len:
-        default: 13
-        description: 最少历史交易日，TD Setup+Countdown 结构在13根内完成判定
-        display_name: 最少数据长度
-        group: 数据
-        max: 250
-        min: 60
-        type: int
-      min_near_run:
-        default: 7
-        description: 漏斗门槛，当日就近连续满足 close[t]<=close[t-4] 的根数（达到才跑完整状态机）
-        display_name: 漏斗近端根数
-        group: 漏斗前置
-        max: 12
-        min: 1
-        type: int
-    param_groups:
-    - description: 控制 TD Setup 前置结构的参数
-      name: TD Setup前置
-    - description: 控制 TD Countdown（9转）计数的参数
-      name: TD Countdown
-    - description: 控制低位环境过滤的参数
-      name: 低位过滤
-    - description: 控制下跌中继取消规则的参数
-      name: 取消规则
-    - description: 控制完美信号硬门槛的参数
-      name: 完美信号
-    - description: 控制漏斗前置快速剪枝的参数
-      name: 漏斗前置
-    params:
-      setup_window: 9
-      setup_offset: 4
-      countdown_target: 9
-      countdown_offset: 2
-      enable_low_filter: false
-      low_drawdown_window: 60
-      low_drawdown_max: 0.85
-      enable_ma60: true
-      max_upwave: 0.30
-      enable_cancellation: true
-      enable_perfection: true
-      min_data_len: 120
-      min_near_run: 7
-    support_method: ma20
-  OversoldReboundStrategy:
-    color: '#f59e0b'
-    description: 识别近30交易日深度下跌(区间最高→最低跌幅>50%)后，近3交易日出现MACD底背离/底分型/低位九转任一底部特征的超跌反弹机会
-    display_name: 超跌反弹策略
-    icon: 📉
-    param_details:
-      lookback_days:
-        default: 30
-        description: 超跌检查回溯交易日数，取最近N日的最高价/最低价
-        display_name: 超跌回溯天数
-        group: 超跌深度条件
-        max: 60
-        min: 10
-        type: int
-      decline_threshold:
-        default: 0.50
-        description: 区间最高价到最低价的下跌幅度阈值（>阈值视为超跌）
-        display_name: 下跌幅度(%)
-        group: 超跌深度条件
-        max: 0.7
-        min: 0.3
-        type: float
-      bottom_window:
-        default: 3
-        description: 底部特征搜索窗口（最近N个交易日）
-        display_name: 底部特征窗口
-        group: 底部特征条件
-        max: 10
-        min: 1
-        type: int
-      macd_divergence_days:
-        default: 20
-        description: MACD底背离判断窗口（回溯N日寻找价格新低而MACD柱未同步新低）
-        display_name: 底背离窗口
-        group: MACD底背离
-        max: 40
-        min: 10
-        type: int
-      macd_fast:
-        default: 12
-        description: MACD快线EMA周期
-        display_name: MACD快线
-        group: MACD底背离
-        max: 20
-        min: 5
-        type: int
-      macd_slow:
-        default: 26
-        description: MACD慢线EMA周期
-        display_name: MACD慢线
-        group: MACD底背离
-        max: 40
-        min: 10
-        type: int
-      macd_signal:
-        default: 9
-        description: MACD信号线EMA周期
-        display_name: MACD信号
-        group: MACD底背离
-        max: 20
-        min: 5
-        type: int
-      enable_bottom_fractal:
-        default: true
-        description: 是否启用底分型特征（近3日最低价居中）
-        display_name: 启用底分型
-        group: 底部特征条件
-        type: bool
-      fractal_require_yang:
-        default: false
-        description: 底分型右侧K线是否要求阳线确认
-        display_name: 底分型阳线确认
-        group: 底部特征条件
-        type: bool
-      enable_low_td9:
-        default: true
-        description: 是否启用低位九转特征（今日完成买入Countdown第9根）
-        display_name: 启用低位九转
-        group: 底部特征条件
-        type: bool
-      enable_morning_star:
-        default: true
-        description: 是否启用启明星形态（宽松版，仅形态：阴-小实体-阳）
-        display_name: 启用启明星
-        group: 底部特征条件
-        type: bool
-      morning_star_body_threshold:
-        default: 0.03
-        description: 启明星第一根阴线实体最小百分比（仅形态，不要求突破均线/放量）
-        display_name: 启明星阴线实体(%)
-        group: 底部特征条件
-        max: 0.1
-        min: 0.01
-        type: float
-      morning_star_small_ratio:
-        default: 0.5
-        description: 启明星第二根小实体相对第一根实体的比例上限
-        display_name: 启明星小实体比例
-        group: 底部特征条件
-        max: 1.0
-        min: 0.1
-        type: float
-      rebound_cap:
-        default: 0.30
-        description: 选股日收盘价相对区间最低价反弹幅度上限（超过则已反弹过高）
-        display_name: 反弹幅度上限(%)
-        group: 超跌深度条件
-        max: 0.6
-        min: 0.1
-        type: float
-      strategy_weight:
-        default: 50
-        description: 技术面评分权重（用于多策略综合评分与排序）
-        display_name: 策略权重
-        group: 评分参数
-        max: 100
-        min: 0
-        type: int
-    param_groups:
-    - description: 控制超跌深度判断的参数
-      name: 超跌深度条件
-    - description: 控制底部特征组合的参数
-      name: 底部特征条件
-    - description: 控制MACD底背离判断的参数
-      name: MACD底背离
-    - description: 控制多策略综合评分的参数
-      name: 评分参数
-    params:
-      lookback_days: 30
-      decline_threshold: 0.50
-      bottom_window: 3
-      macd_divergence_days: 20
-      macd_fast: 12
-      macd_slow: 26
-      macd_signal: 9
-      enable_bottom_fractal: true
-      fractal_require_yang: false
-      enable_low_td9: true
-      enable_morning_star: true
-      morning_star_body_threshold: 0.03
-      morning_star_small_ratio: 0.5
-      rebound_cap: 0.30
-      strategy_weight: 50
     support_method: ma20
 strategy_runner:
   check_interval: 60
