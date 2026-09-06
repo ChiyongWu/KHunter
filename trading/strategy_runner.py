@@ -1303,8 +1303,17 @@ class StrategyRunner:
             'check_interval': 60
         }
         
-        # 尝试从yaml文件加载
-        config_path = Path("config/strategy_params.yaml")
+        # 项目根目录：基于当前文件绝对路径推导，不依赖进程 cwd
+        # 重要：web_server 以服务/计划任务启动时 cwd 可能不是项目根目录，
+        # 使用相对路径会导致 config 加载失败、run_mode 回退 manual，
+        # 进而跳过 PTrade 同步（历史故障根因），因此必须使用绝对路径
+        project_root = Path(__file__).resolve().parent.parent
+
+        # 尝试从yaml文件加载（绝对路径优先）
+        config_path = project_root / "config" / "strategy_params.yaml"
+        if not config_path.exists():
+            # 回退兼容：以项目根为 cwd 的旧部署方式
+            config_path = Path("config/strategy_params.yaml")
         if config_path.exists():
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
@@ -1316,8 +1325,11 @@ class StrategyRunner:
             except Exception as e:
                 logger.error(f"加载策略运行配置失败: {str(e)}")
         
-        # 加载运行模式配置（手动/自动）和 PTrade 配置
-        main_config_path = Path("config/config.yaml")
+        # 加载运行模式配置（手动/自动）和 PTrade 配置（绝对路径优先）
+        main_config_path = project_root / "config" / "config.yaml"
+        if not main_config_path.exists():
+            # 回退兼容：以项目根为 cwd 的旧部署方式
+            main_config_path = Path("config/config.yaml")
         if main_config_path.exists():
             try:
                 with open(main_config_path, 'r', encoding='utf-8') as f:
@@ -1325,7 +1337,11 @@ class StrategyRunner:
                     # 运行模式
                     run_mode_config = main_config.get('run_mode', {})
                     self.run_mode = run_mode_config.get('mode', 'manual')
-                    logger.info(f"运行模式: {self.run_mode}")
+                    # 打印配置来源与 PTrade 开关，便于排查"模式与预期不符"类问题
+                    logger.info(
+                        f"运行模式: {self.run_mode}（配置来源: {main_config_path}，"
+                        f"ptrade.enabled="
+                        f"{main_config.get('ptrade', {}).get('enabled', True)}）")
                     # 保存完整主配置供后续 PTrade 反馈处理等模块使用
                     self.main_config = main_config
             except Exception as e:
@@ -1333,9 +1349,14 @@ class StrategyRunner:
                 self.run_mode = 'manual'
                 self.main_config = {}
         else:
+            # config 缺失会导致 run_mode 回退 manual，进而跳过 PTrade 同步，
+            # 属严重问题，必须用 WARNING 级告警便于排查
             self.run_mode = 'manual'
             self.main_config = {}
-            logger.info("config/config.yaml 不存在，默认使用 manual 模式")
+            logger.warning(
+                f"config/config.yaml 不存在（已尝试绝对路径 "
+                f"{project_root / 'config' / 'config.yaml'}），"
+                f"默认使用 manual 模式，将跳过 PTrade 同步！")
         
         # 从数据库回测配置获取止盈止损参数（优先级最高）
         backtest_config = self._get_backtest_config()
@@ -1612,60 +1633,53 @@ class StrategyRunner:
     _TRADING_START_MINUTES = 9 * 60 + 30   # 9:30
     _TRADING_END_MINUTES = 15 * 60          # 15:00
     
-    def _should_process_ptrade_feedback(self) -> bool:
+    def _should_process_ptrade_feedback(self, force: bool = False) -> bool:
         """判断是否应该处理 PTrade 反馈文件
-        
-        规则：
-        - 仅自动模式（run_mode=auto）且 ptrade.enabled=true 时才处理
-        - 交易日盘中（9:30-15:00）不处理，避免干扰实时交易
-        - 交易日盘后（15:00后）或非交易日：执行反馈处理
-        
+
+        时间策略（依据 get_working_date 确定的工作日）：
+        - 盘前 / 盘中 / 非交易日：workding_date 为前一交易日，同步前一交易日反馈
+        - 盘后：working_date 为当日，同步当日反馈
+        本方法仅做运行模式与开关判断，具体读取哪一交易日由 get_working_date 决定。
+        force=True 时绕过运行模式限制，用于前端查询兜底。
+
+        Args:
+            force: 是否强制处理（绕过运行模式判断，用于 API 查询兜底）
+
         Returns:
             是否应该处理 PTrade 反馈
         """
-        # 仅自动模式处理
-        if getattr(self, 'run_mode', 'manual') != 'auto':
+        # 仅自动模式处理（force 时跳过此限制，便于查询兜底）
+        if not force and getattr(self, 'run_mode', 'manual') != 'auto':
             logger.info(f"【PTrade反馈】当前运行模式为 {getattr(self, 'run_mode', 'manual')}，跳过 PTrade 反馈处理")
             return False
-        
-        # 检查 ptrade.enabled 配置
+
+        # 检查 ptrade.enabled 配置（始终尊重此开关）
         main_config = getattr(self, 'main_config', {})
         ptrade_cfg = main_config.get('ptrade', {}) if main_config else {}
         if not ptrade_cfg.get('enabled', True):
             logger.info("【PTrade反馈】ptrade.enabled=false，跳过反馈处理")
             return False
-        
-        now = datetime.datetime.now()
-        current_minutes = now.hour * 60 + now.minute
-        today_str = now.strftime('%Y-%m-%d')
-        
-        # 判断是否为交易日
-        if is_trading_day(today_str):
-            # 交易日：盘中（9:30-15:00）跳过，盘后处理
-            if self._TRADING_START_MINUTES <= current_minutes < self._TRADING_END_MINUTES:
-                logger.info("【PTrade反馈】当前为交易日盘中，跳过反馈处理")
-                return False
-            logger.info("【PTrade反馈】当前为交易日盘后，执行反馈处理")
-            return True
-        
-        # 非交易日：处理
-        logger.info("【PTrade反馈】当前非交易日，执行反馈处理")
+
+        # 运行模式与开关均满足，允许处理（具体读取前一交易日还是当日由 get_working_date 决定）
+        logger.info("【PTrade反馈】运行模式与开关校验通过，允许处理反馈（工作日由 get_working_date 确定）")
         return True
 
-    def sync_portfolio_from_ptrade(self, portfolio_date: str) -> bool:
+    def sync_portfolio_from_ptrade(self, portfolio_date: str, force: bool = False) -> bool:
         """同步 PTrade 反馈到 portfolio 文件（供 API 查询时自动更新）
 
-        在 auto 模式下，当 PTrade 反馈文件比当前 portfolio 文件更新时，
-        自动处理 PTrade 反馈以更新 portfolio 数据。
+        时间策略由 get_working_date 决定读取哪个交易日（盘前/盘中/非交易日读前一交易日，
+        盘后读当日）。当目标交易日反馈文件不存在时，记录告警并返回 False，终止加载，
+        避免前端展示过期或错误数据。force=True 时绕过运行模式限制，用于前端查询兜底。
 
         Args:
             portfolio_date: 工作日期 YYYY-MM-DD
+            force: 是否强制同步（绕过运行模式与时段判断）
 
         Returns:
             是否执行了 PTrade 同步
         """
-        # 只自动模式 + ptrade enabled 时才同步
-        if not self._should_process_ptrade_feedback():
+        # 只自动模式 + ptrade enabled 时才同步（force 时允许兜底刷新）
+        if not self._should_process_ptrade_feedback(force=force):
             logger.info(f"【PTrade同步】_should_process_ptrade_feedback 返回 False，"
                         f"run_mode={getattr(self, 'run_mode', 'N/A')}，跳过同步")
             return False
@@ -1679,8 +1693,6 @@ class StrategyRunner:
         if getattr(self, '_ptrade_synced_feedback_date', '') == feedback_date:
             logger.info(f"【PTrade同步】今日已同步过 feedback_date={feedback_date}，跳过重复调用")
             return True
-        # 构建 portfolio 文件路径（使用传入的日期，表示当日系统运行结果）
-        portfolio_file = self.running_dir / f"portfolio_{portfolio_date}.json"
 
         try:
             # 创建临时 handler 检查文件
@@ -1691,12 +1703,14 @@ class StrategyRunner:
                 config=getattr(self, 'main_config', None))
             # 检查 PTrade 反馈文件是否存在
             if not temp_handler.check_feedback_exists(feedback_date):
-                # 打印实际检查的路径，方便排查
+                # 打印实际检查的路径，方便排查；明确告警用户并终止加载
                 fund_path = os.path.join(temp_handler.feedback_dir, f"Fund_{feedback_date}.csv")
                 hold_path = os.path.join(temp_handler.feedback_dir, f"Hold_{feedback_date}.csv")
-                logger.warning(f"【PTrade同步】反馈文件不存在: feedback_date={feedback_date}，"
-                               f"feedback_dir={temp_handler.feedback_dir}，"
-                               f"Fund存在={os.path.isfile(fund_path)}，Hold存在={os.path.isfile(hold_path)}")
+                logger.error(
+                    f"【PTrade同步-终止加载】未找到交易日 {feedback_date} 的 PTrade 反馈文件！"
+                    f"feedback_dir={temp_handler.feedback_dir}，"
+                    f"Fund存在={os.path.isfile(fund_path)}，Hold存在={os.path.isfile(hold_path)}。"
+                    f"请确认 PTrade 已导出当日（或前一交易日）反馈文件后重试。")
                 return False
             # 自动模式下 PTrade 数据是唯一真实数据源，始终处理（不依赖 mtime 比较）
             # mtime 比较可能因 initialize_daily_data 保存操作更新文件时间而误判跳过
@@ -1822,6 +1836,8 @@ class StrategyRunner:
         
         if ptrade_synced:
             # PTrade 同步成功，portfolio 文件已由 sync_portfolio_from_ptrade 写入
+            # 标记数据来源为 PTrade，供日志追溯与写盘防护判断使用
+            self._portfolio_source = 'ptrade'
             logger.info(f"【数据初始化】{date} 数据从 PTrade 反馈同步完成")
             # 创建空的信号文件（如果不存在）
             if not signals_file.exists():
@@ -1841,11 +1857,17 @@ class StrategyRunner:
                 f"禁止加载本地缓存。请检查 PTrade 反馈文件是否已生成。"
                 f"预期路径: data/running/ptrade_feedback/Fund_{date.replace('-', '')}.csv 和 "
                 f"Hold_{date.replace('-', '')}.csv")
+            # 撤销入口处标记的"已初始化"：同步失败必须允许后续重试，
+            # 否则守卫会让后续调用直接返回 True，使上层把 init_success 误判为成功，
+            # 从而绕过自动模式的终止保护（历史故障被放大的关键原因）
+            self._initialized_dates.discard(date)
             return False
         
         # ========== 非自动模式：本地文件或历史继承 ==========
         if portfolio_file.exists():
             logger.info(f"【数据初始化】{date} 的持仓文件已存在，从本地加载")
+            # 标记数据来源为本地文件（非 PTrade），便于日志追溯
+            self._portfolio_source = 'local'
             prev_data = self._load_portfolio(str(portfolio_file))
             self.portfolio = self._normalize_portfolio_keys(prev_data.get('positions', {}))
             self.current_total_capital = prev_data.get('cash', 300000)
@@ -1854,6 +1876,8 @@ class StrategyRunner:
         
         # ========== 非自动模式：文件不存在，继承历史数据 ==========
         # 查找有数据的最近交易日 -> 继承历史数据
+        # 标记数据来源为本地历史继承（非 PTrade），便于日志追溯
+        self._portfolio_source = 'local(inherited)'
         prev_portfolio_path, found_date, days_between = self.find_latest_portfolio_file(date, max_days=30)
         
         if prev_portfolio_path and found_date:
@@ -2291,7 +2315,21 @@ class StrategyRunner:
             
             if not hasattr(self, 'initial_capital'):
                 self.initial_capital = self.current_total_capital
-            
+
+            # ========== 自动模式写盘防护 ==========
+            # 自动模式下 PTrade 是唯一真实数据源。若数据来自本地（本地文件或历史
+            # 继承）且持仓为空，说明 PTrade 同步并未生效，此时写盘会用空壳覆盖正确
+            # 数据（历史故障：产生"持仓0只"的空壳 portfolio）。此处拒绝写盘并告警。
+            # 注意：数据来自 PTrade 时空仓是合法的（如实盘清仓），必须允许写盘。
+            _source = getattr(self, '_portfolio_source', None)
+            if (getattr(self, 'run_mode', 'manual') == 'auto'
+                    and not portfolio
+                    and _source in ('local', 'local(inherited)')):
+                logger.error(
+                    f"【保存持仓】自动模式拒绝写入空持仓（数据来源: {_source}），"
+                    f"避免覆盖 PTrade 同步结果: {portfolio_file}")
+                return
+
             data = {
                 'last_updated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'cash': self.current_total_capital,
@@ -2300,7 +2338,11 @@ class StrategyRunner:
             }
             with open(portfolio_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"持仓信息已保存到: {portfolio_file}")
+            # 打印持仓条数与数据来源，便于追溯数据是否来自 PTrade 权威源
+            logger.info(
+                f"持仓信息已保存到: {portfolio_file}（持仓="
+                f"{len(portfolio or {})} 条，来源="
+                f"{getattr(self, '_portfolio_source', 'unknown')}）")
         except Exception as e:
             logger.error(f"保存持仓文件失败: {str(e)}")
 
@@ -3715,16 +3757,13 @@ class StrategyRunner:
             if 'stop_loss_threshold' not in locals():
                 stop_loss_threshold = stop_loss_percent / 100
             
-            # 记录当前资金和持仓情况
+            # 记录当前资金和持仓情况；总资产直接采用 PTrade 反馈权威值（含 ETF），不在此重算
             positions_count = len(self.portfolio)
             available_cash = getattr(self, 'current_total_capital', 0)
-            total_assets = available_cash
-            
-            # 计算持仓市值
-            for stock_code, position in self.portfolio.items():
-                total_assets += position.get('market_value', 0)
-            
-            logger.info(f"【卖出准备】{trade_date} 当前资金: ¥{available_cash:.2f}, 持仓: {positions_count}只")
+            total_assets = getattr(self, 'current_total_asset', None) or 0
+
+            logger.info(f"【卖出准备】{trade_date} 当前资金: ¥{available_cash:.2f}, 持仓: {positions_count}只, "
+                       f"总资产(PTrade权威值): ¥{total_assets:.2f}")
             
             # 获取持仓过期配置（提高资金利用率）
             enable_position_expire = self.config.get('enable_position_expire', True)
@@ -3748,8 +3787,8 @@ class StrategyRunner:
                     logger.warning(f"获取股票数据失败 {stock_code}，跳过卖出检查")
                     continue
                 
-                # 调用择时策略判断
-                timing_result = self.timing_strategy.get_timing_result(df, position, use_prev_day_signal=False)
+                # 调用择时策略判断，传入 stock_code 以隔离技术指标缓存
+                timing_result = self.timing_strategy.get_timing_result(df, position, use_prev_day_signal=False, stock_code=stock_code)
 
                 # 检查止损止盈
                 # 注意：缓存数据是倒序排列的（最新日期在前面）
@@ -4058,8 +4097,8 @@ class StrategyRunner:
                 # 检查是否已在持仓中
                 existing_pos = self.portfolio.get(stock_code)
                 
-                # 调用择时策略判断
-                timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False)
+                # 调用择时策略判断，传入 stock_code 以隔离技术指标缓存
+                timing_result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_cash, use_prev_day_signal=False, stock_code=stock_code)
                 
                 # 记录择时信号详情
                 current_price = df_to_date.iloc[0]['close']  # 倒序数据，iloc[0]是最新数据
@@ -4094,6 +4133,16 @@ class StrategyRunner:
                                     logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} 相对20日最低点涨幅 {gain_from_low*100:.1f}% > 50%，跳过")
                                     continue
                         # ========== 涨幅检查结束 ==========
+                        
+                        # ========== 涨停基因检查：近30交易日(不含当日)至少1次涨停(>9.5%)（仅首次建仓）==========
+                        # 复用回测引擎的 BuyPreFilter，保证两套流程规则一致
+                        from trading.buy_filter import BuyPreFilter
+                        limit_up_result = BuyPreFilter._check_limit_up_history(df_to_date, stock_code)
+                        if not limit_up_result['passed']:
+                            logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} "
+                                        f"无涨停基因（{limit_up_result.get('reason', '')}），跳过首仓买入")
+                            continue
+                        # ========== 涨停基因检查结束 ==========
                         
                         # ========== 重复信号检查：信号去重（仅首次建仓，与冷却期无关）==========
                         # 说明：此检查用于抑制"同一标的连续多天冒出首仓买入信号却未成交"的噪声，
@@ -4133,15 +4182,17 @@ class StrategyRunner:
                         
                         strategy_name = candidate.get('strategy_name', 'N/A')
                         
-                        # 计算总资产 = 可用现金 + 所有持仓的当前市值
-                        # 参考回测引擎的计算方式
-                        total_assets = current_cash  # 可用现金
-                        for code, pos in self.portfolio.items():
-                            # 使用持仓中已有的当前价格，若不存在则使用买入价
-                            pos_price = pos.get('current_price', pos.get('buy_price', 0))
-                            total_assets += pos['quantity'] * pos_price
-                        
-                        logger.info(f"【总资产计算】{trade_date} 可用现金: ¥{current_cash:.2f}, 持仓市值: ¥{total_assets - current_cash:.2f}, 总资产: ¥{total_assets:.2f}")
+                        # 总资产直接采用 PTrade 反馈文件的权威值（self.current_total_asset，已含 ETF 市值）。
+                        # 该值在 sync_portfolio_from_ptrade 中已从 PTrade Fund 文件读取，不在此重算，
+                        # 避免用「可用现金 + KHunter 持仓市值」反算时漏算 ETF 导致总资产偏低。
+                        total_assets = getattr(self, 'current_total_asset', None)
+                        if not total_assets or total_assets <= 0:
+                            logger.error(f"【总资产计算】{trade_date} 未获取到 PTrade 反馈的权威总资产，"
+                                         f"无法计算仓位金额，跳过买入信号 {candidate.get('code')}")
+                            continue
+
+                        logger.info(f"【总资产计算】{trade_date} 可用现金: ¥{current_cash:.2f}, "
+                                   f"总资产(PTrade权威值): ¥{total_assets:.2f}")
                         
                         position_amount = KellyCalculator.calculate_position_amount(
                             total_capital=total_assets,
@@ -4305,23 +4356,19 @@ class StrategyRunner:
             float: 当前仓位比例 (0.0 ~ 1.0)
         """
         try:
-            total_assets = self.current_total_capital  # 可用现金
-            
-            # 计算持仓市值
-            for code, pos in self.portfolio.items():
-                pos_price = pos.get('current_price', pos.get('buy_price', 0))
-                total_assets += pos['quantity'] * pos_price
-            
-            # 计算持仓市值
+            # 持仓市值（KHunter 持仓，不含 ETF），仅用于分子
             position_value = 0
             for code, pos in self.portfolio.items():
                 pos_price = pos.get('current_price', pos.get('buy_price', 0))
                 position_value += pos['quantity'] * pos_price
-            
-            if total_assets > 0:
-                return position_value / total_assets
-            else:
+
+            # 分母直接采用 PTrade 反馈的权威总资产（含 ETF 市值），不在此重算
+            total_assets = getattr(self, 'current_total_asset', None)
+            if not total_assets or total_assets <= 0:
+                logger.error("【仓位比例】未获取到 PTrade 反馈的权威总资产，无法计算仓位比例")
                 return 0.0
+
+            return position_value / total_assets
                 
         except Exception as e:
             logger.warning(f"计算当前仓位比例失败: {e}")
@@ -4437,12 +4484,28 @@ class StrategyRunner:
             # 用户点击执行 = 明确要运行策略，不因旧 daily 文件存在而跳过
             # 策略运行锁 (_strategy_run_lock) 已防止并发重复执行
             
-            # 加载持仓信息（无条件执行：原代码误缩进进 auto 失败分支导致 portfolio_file 未定义）
+            # 工作日期对应的持仓文件（后续保存信号与持仓时复用，必须始终定义）
             portfolio_file = self.running_dir / f"portfolio_{working_date}.json"
-            portfolio_data = self._load_portfolio(str(portfolio_file))
-            self.portfolio = self._normalize_portfolio_keys(portfolio_data.get('positions', {}))
-            # 合并账本追踪字段（add_count/first_buy_date 等），保证择时加仓编号正确
-            self._merge_tracking_into_portfolio()
+
+            # 加载持仓信息：按数据来源分流，避免用磁盘文件覆盖 PTrade 同步结果
+            # 历史故障：此处原为无条件从文件二次加载，当 portfolio 文件被污染
+            #（空持仓/旧现金）时会覆盖 sync 已写入内存的正确持仓，导致策略
+            # 基于错误数据计算。故 PTrade 同步成功时直接使用内存权威结果。
+            if getattr(self, '_ptrade_synced_feedback_date', ''):
+                # PTrade 同步成功：self.portfolio 已是权威数据，不再二次加载
+                logger.info(
+                    f"【数据加载】{working_date} 使用 PTrade 同步结果，"
+                    f"持仓={len(getattr(self, 'portfolio', {}) or {})} 条"
+                    f"（跳过本地文件二次加载）")
+                # 合并账本追踪字段（add_count/first_buy_date 等），保证择时加仓编号正确
+                self._merge_tracking_into_portfolio()
+            else:
+                # 非 PTrade 来源（手动模式/同步未执行）：从本地文件加载
+                portfolio_data = self._load_portfolio(str(portfolio_file))
+                self.portfolio = self._normalize_portfolio_keys(
+                    portfolio_data.get('positions', {}))
+                # 合并账本追踪字段（add_count/first_buy_date 等），保证择时加仓编号正确
+                self._merge_tracking_into_portfolio()
 
             # 加载信号历史
             signals_file = self.running_dir / f"signals_{working_date}.json"

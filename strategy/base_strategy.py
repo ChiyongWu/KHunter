@@ -116,7 +116,6 @@ class BaseStrategy(ABC):
         :return: 选股信号列表，每个元素为字典包含信号详情
         """
         pass
-    
     def get_selection_criteria(self):
         """
         获取选股条件描述
@@ -175,6 +174,22 @@ class BaseStrategy(ABC):
                     if hasattr(self, '_get_previous_date_with_kline_data'):
                         selection_date = self._get_previous_date_with_kline_data(selection_date)
 
+        # 透传 selection_date 给选股核心：仅当子类的 select_stocks 声明了该参数，
+        # 避免破坏未使用 selection_date 的其他策略。龙头策略据此按 selection_date 查涨停池，
+        # 不再依赖"DataFrame 降序首行即选股日"的隐式假设（回测/策略运行器路径同样受益）。
+        try:
+            import inspect
+            sig_params = inspect.signature(self.select_stocks).parameters
+            # 构建 select_stocks 的可选参数（仅当子类声明了对应参数时才传入）
+            select_kwargs = {}
+            if 'selection_date' in sig_params:
+                select_kwargs['selection_date'] = selection_date
+            if 'stock_code' in sig_params:
+                select_kwargs['stock_code'] = stock_code
+            if select_kwargs:
+                return self.select_stocks(df, stock_name, **select_kwargs)
+        except (ValueError, TypeError):
+            pass
         return self.select_stocks(df, stock_name)
     
     def analyze_stock(self, stock_code, stock_name, df, selection_date=None):

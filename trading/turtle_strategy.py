@@ -216,7 +216,7 @@ class TurtleStrategy(TimingStrategy):
         return False, ""
     
     def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, 
-                          cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
+                          cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> TimingResult:
         """获取海归策略择时结果
         
         Args:
@@ -226,6 +226,7 @@ class TurtleStrategy(TimingStrategy):
             use_prev_day_signal: 是否使用前一天信号
                 - True: 回测模式，使用T-1日信号判断（df.iloc[-2]作为信号K线）
                 - False: 狩猎场模式，使用T日信号判断（df.iloc[-1]作为信号K线）
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             择时结果

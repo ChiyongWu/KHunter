@@ -96,7 +96,7 @@ class LowTurtleStrategy(TurtleStrategy):
         return True
 
     def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None,
-                          cash: Optional[float] = None, use_prev_day_signal: bool = True) -> object:
+                          cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> object:
         """获取低位海龟策略择时结果（重写父类以支持低位加仓，去除MA20限制）
 
         Args:
@@ -104,6 +104,7 @@ class LowTurtleStrategy(TurtleStrategy):
             position: 持仓信息
             cash: 可用资金
             use_prev_day_signal: 是否使用前一天信号
+            stock_code: 股票代码（用于指标缓存隔离）
 
         Returns:
             择时结果

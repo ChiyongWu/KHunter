@@ -251,12 +251,13 @@ class LimitUpSidewaysStrategy(BaseStrategy):
             'sideways_df': sideways_df
         }
 
-    def _check_breakout(self, df, sideways_info):
+    def _check_breakout(self, df, sideways_info, stock_code=""):
         """
         检查是否出现突破信号（KDJ金叉 或 MACD金叉）
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
         :param sideways_info: 横盘整理信息
+        :param stock_code: 股票代码（用于指标缓存隔离）
         :return: 突破信号信息字典，包含信号类型和成交量放大情况
         """
         # 检查是否有足够的数据
@@ -275,11 +276,11 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         if volume_increase_ratio < self.params['volume_increase_ratio']:
             return None
 
-        # 检查KDJ金叉信号
-        kdj_signal = self._check_kdj_gold_cross(df)
+        # 检查KDJ金叉信号，传入股票代码以隔离缓存
+        kdj_signal = self._check_kdj_gold_cross(df, stock_code=stock_code)
         
-        # 检查MACD金叉信号
-        macd_signal = self._check_macd_gold_cross(df)
+        # 检查MACD金叉信号，传入股票代码以隔离缓存
+        macd_signal = self._check_macd_gold_cross(df, stock_code=stock_code)
 
         # 至少需要一个信号
         if not kdj_signal and not macd_signal:
@@ -292,20 +293,22 @@ class LimitUpSidewaysStrategy(BaseStrategy):
             'macd_signal': macd_signal
         }
 
-    def _check_kdj_gold_cross(self, df):
+    def _check_kdj_gold_cross(self, df, stock_code=""):
         """
         检查KDJ金叉信号（K线穿过D线向上）
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :param stock_code: 股票代码（用于指标缓存隔离）
         :return: True表示有KDJ金叉，False表示没有
         """
         try:
-            # 计算KDJ指标
+            # 计算KDJ指标，传入股票代码以隔离缓存
             k, d, j = self.tech_indicators.calculate_kdj(
                 df.iloc[::-1].reset_index(drop=True),
                 n=self.params['kdj_n'],
                 m1=self.params['kdj_m1'],
-                m2=self.params['kdj_m2']
+                m2=self.params['kdj_m2'],
+                stock_code=stock_code
             )
             
             # 恢复倒序
@@ -329,20 +332,22 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         except Exception:
             return False
 
-    def _check_macd_gold_cross(self, df):
+    def _check_macd_gold_cross(self, df, stock_code=""):
         """
         检查MACD金叉信号（DIF穿过DEA向上）
 
         :param df: 股票数据DataFrame（倒序，最新在index=0）
+        :param stock_code: 股票代码（用于指标缓存隔离）
         :return: True表示有MACD金叉，False表示没有
         """
         try:
-            # 计算MACD指标
+            # 计算MACD指标，传入股票代码以隔离缓存
             dif, dea, macd = self.tech_indicators.calculate_macd(
                 df.iloc[::-1].reset_index(drop=True),
                 short_period=self.params['macd_short'],
                 long_period=self.params['macd_long'],
-                signal_period=self.params['macd_signal']
+                signal_period=self.params['macd_signal'],
+                stock_code=stock_code
             )
             
             # 恢复倒序
@@ -395,13 +400,14 @@ class LimitUpSidewaysStrategy(BaseStrategy):
         
         return criteria
 
-    def select_stocks(self, data, stock_name="", skip_data_check=False):
+    def select_stocks(self, data, stock_name="", skip_data_check=False, stock_code=""):
         """
         选择符合条件的股票
 
         :param data: 股票数据，可以是DataFrame或字典
         :param stock_name: 股票代码（可选）
         :param skip_data_check: 是否跳过数据检查
+        :param stock_code: 股票代码（用于指标缓存隔离）
         :return: 符合条件的股票信息列表
         """
         # 检查数据类型

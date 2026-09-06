@@ -31,11 +31,12 @@ class RSIStrategy(TimingStrategy):
         self.use_fixed_amount = self.config.get('use_fixed_amount', True)  # 是否使用固定金额（False则使用仓位比例）
         self.buy_limit = self.config.get('buy_limit', 1.01)  # 买入限价比例
     
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    def calculate_indicators(self, df: pd.DataFrame, stock_code: str = "") -> pd.DataFrame:
         """计算RSI指标
         
         Args:
             df: 股票数据
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             添加了RSI的DataFrame
@@ -46,13 +47,13 @@ class RSIStrategy(TimingStrategy):
         if len(result) > 1 and result['date'].iloc[0] > result['date'].iloc[1]:
             result = result.iloc[::-1].reset_index(drop=True)
         
-        # 使用技术指标计算模块计算RSI
-        rsi = self.technical_indicators.calculate_rsi(result, self.rsi_period)
+        # 使用技术指标计算模块计算RSI，传入股票代码以隔离缓存
+        rsi = self.technical_indicators.calculate_rsi(result, self.rsi_period, stock_code=stock_code)
         result['rsi'] = rsi
         
         return result
     
-    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
+    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> TimingResult:
         """获取RSI策略择时结果
         
         Args:
@@ -62,14 +63,15 @@ class RSIStrategy(TimingStrategy):
             use_prev_day_signal: 是否使用前一天信号（回测模式），默认True
                 - True: 使用T-1日RSI判断信号（回测模式）
                 - False: 使用T日RSI判断信号（狩猎场模式）
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             择时结果
         """
         result = TimingResult()
         
-        # 计算RSI
-        df = self.calculate_indicators(df)
+        # 计算RSI，传入股票代码以隔离缓存
+        df = self.calculate_indicators(df, stock_code=stock_code)
         
         # 获取最新数据
         latest = df.iloc[-1]

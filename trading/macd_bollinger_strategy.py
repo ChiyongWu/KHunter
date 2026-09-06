@@ -250,7 +250,7 @@ class ShunShiBaoStrategy(TimingStrategy):
         return macd_sell_3 and boll_sell_3
     
     def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None,
-                          cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
+                          cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> TimingResult:
         """获取择时结果
 
         Args:
@@ -265,6 +265,7 @@ class ShunShiBaoStrategy(TimingStrategy):
                     - 如果有信号，在T日以开盘价买入
                 狩猎场模式逻辑：
                     - T日盘中或收盘判断是否有买入信号
+            stock_code: 股票代码（用于指标缓存隔离）
                     - 如果有信号，在T日以当前价买入
 
         Returns:

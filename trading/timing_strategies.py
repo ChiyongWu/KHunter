@@ -48,31 +48,33 @@ class TimingStrategy(ABC):
         """
         return df
     
-    def is_buy_point(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None) -> bool:
+    def is_buy_point(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, stock_code: str = "") -> bool:
         """判断是否为买点
         
         Args:
             df: 股票数据
             position: 持仓信息
             cash: 可用资金
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             是否为买点
         """
-        result = self.get_timing_result(df, position, cash)
+        result = self.get_timing_result(df, position, cash, stock_code=stock_code)
         return result.is_buy
     
-    def is_sell_point(self, df: pd.DataFrame, position: Dict) -> bool:
+    def is_sell_point(self, df: pd.DataFrame, position: Dict, stock_code: str = "") -> bool:
         """判断是否为卖点
         
         Args:
             df: 股票数据
             position: 持仓信息
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             是否为卖点
         """
-        result = self.get_timing_result(df, position)
+        result = self.get_timing_result(df, position, stock_code=stock_code)
         return result.is_sell
     
     def calculate_support(self, df: pd.DataFrame, key_date: Optional[str] = None) -> float:
@@ -88,7 +90,7 @@ class TimingStrategy(ABC):
         return 0.0
     
     @abstractmethod
-    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
+    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> TimingResult:
         """获取择时结果
         
         Args:
@@ -98,6 +100,7 @@ class TimingStrategy(ABC):
             use_prev_day_signal: 是否使用前一天信号（回测模式），默认True
                 - True: 使用倒数第二根K线判断前一天是否突破
                 - False: 使用最新K线判断当天是否突破（狩猎场模式）
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             择时结果

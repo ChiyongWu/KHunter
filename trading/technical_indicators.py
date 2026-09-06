@@ -16,7 +16,7 @@ class TechnicalIndicators:
         self.cache: Dict[str, Dict[str, pd.Series]] = {}
     
     def _get_cache_key(self, stock_code: str, indicator_name: str, params: Tuple) -> str:
-        """生成缓存键
+        """生成缓存键（包含股票代码，确保不同股票的指标缓存相互隔离）
         
         Args:
             stock_code: 股票代码
@@ -27,7 +27,8 @@ class TechnicalIndicators:
             缓存键
         """
         params_str = "_".join(map(str, params))
-        return f"{indicator_name}_{params_str}"
+        # stock_code 拼入 key，避免不同股票同参数指标互相覆盖
+        return f"{stock_code}_{indicator_name}_{params_str}"
     
     def calculate_ma(self, df: pd.DataFrame, period: int, stock_code: str = "") -> pd.Series:
         """计算移动平均线
@@ -191,9 +192,13 @@ class TechnicalIndicators:
             # 计算J值
             df_copy['j'] = 3 * df_copy['k'] - 2 * df_copy['d']
             
-            self.cache[stock_code][key_k] = df_copy['k']
-            self.cache[stock_code][key_d] = df_copy['d']
-            self.cache[stock_code][key_j] = df_copy['j']
+            # 赋值给返回变量并写入缓存
+            k = df_copy['k']
+            d = df_copy['d']
+            j = df_copy['j']
+            self.cache[stock_code][key_k] = k
+            self.cache[stock_code][key_d] = d
+            self.cache[stock_code][key_j] = j
         else:
             k = self.cache[stock_code][key_k]
             d = self.cache[stock_code][key_d]

@@ -45,7 +45,7 @@ class SupportStrategy(TimingStrategy):
         
         return result
     
-    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True) -> TimingResult:
+    def get_timing_result(self, df: pd.DataFrame, position: Optional[Dict] = None, cash: Optional[float] = None, use_prev_day_signal: bool = True, stock_code: str = "") -> TimingResult:
         """获取支撑位策略择时结果
 
         Args:
@@ -55,6 +55,7 @@ class SupportStrategy(TimingStrategy):
             use_prev_day_signal: 是否使用前一天信号
                 - True: 回测模式，使用T-1日信号K线判断（信号K线=DF.iloc[-2]，执行日=DF.iloc[-1]）
                 - False: 狩猎场模式，使用T日信号K线判断（信号K线=DF.iloc[-1]）
+            stock_code: 股票代码（用于指标缓存隔离）
 
         Returns:
             择时结果

@@ -433,7 +433,8 @@ class KHunterDataProcessor:
             
             # 5. 调用策略获取择时结果
             # 狩猎场模式：使用当天信号判断（use_prev_day_signal=False）
-            timing_result = strategy.get_timing_result(df_kline, None, None, use_prev_day_signal=False)
+            # 传入 stock_code 以隔离技术指标缓存，避免不同股票间指标复用
+            timing_result = strategy.get_timing_result(df_kline, None, None, use_prev_day_signal=False, stock_code=stock_code)
             
             # 6. 判断是否发出买入信号
             if not timing_result.is_buy:

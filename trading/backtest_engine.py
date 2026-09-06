@@ -518,9 +518,10 @@ class BacktestEngine:
                             break
                     
                     # 调用策略获取完整信号（策略会根据是否有持仓判断新买入或加仓）
+                    # 传入 stock_code 以隔离技术指标缓存，避免不同股票间指标复用
                     result = None
                     if self.timing_strategy:
-                        result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_capital)
+                        result = self.timing_strategy.get_timing_result(df_to_date, existing_pos, current_capital, stock_code=stock_code)
                         timing_name = self.timing_strategy.__class__.__name__
                         logger.info(f"{timing_name}信号: is_buy={result.is_buy}, is_sell={result.is_sell}, "
                                    f"buy_qty={result.buy_quantity}, sell_qty={result.sell_quantity}, "
@@ -546,9 +547,13 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
-                    # 获取买入价格（以开盘价为准）
+                    # 获取买入价格（T日开盘价：策略基于T-1收盘数据出信号，T日开盘价成交）
                     buy_price = self._get_stock_price(stock_code, current_date, 'open')
-                    logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格: {buy_price}")
+                    if buy_price is None or buy_price <= 0:
+                        # T日无开盘数据时回退到前一交易日（T-1）开盘价，避免无法成交
+                        prev_buy_day = self._get_previous_trading_day(current_date)
+                        buy_price = self._get_stock_price(stock_code, prev_buy_day, 'open')
+                    logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格(T日开盘): {buy_price}")
                     
                     # 获取交易类型（首次建仓或加仓）
                     trade_type = result.trade_type if result else 'new'
@@ -2307,9 +2312,18 @@ class BacktestEngine:
             trading_days = self._get_trading_dates(buy_date_str, current_date_str)
             hold_days = len(trading_days) - 1
             
-            # 获取当日开盘价和最高价
-            open_price = self._get_stock_price(stock_code, current_date, 'open')
+            # 止盈止损信号判定用前一日收盘价；实际成交用T+1开盘价（信号当日触发，次交易日开盘卖出）
+            prev_trading_day = self._get_previous_trading_day(current_date)
+            signal_close = self._get_stock_price(stock_code, prev_trading_day, 'close') if prev_trading_day else None
+            if signal_close is None or signal_close <= 0:
+                # 无前一日数据时回退到当日收盘价
+                signal_close = self._get_stock_price(stock_code, current_date, 'close')
             high_price = self._get_stock_price(stock_code, current_date, 'high')
+            # 实际成交价：处理日(current_date)当天开盘价（前一日收盘判定触发，当日开盘卖出）
+            sell_price = self._get_stock_price(stock_code, current_date, 'open')
+            if sell_price is None or sell_price <= 0:
+                # 当日无开盘数据时回退到当日收盘价，避免无法成交
+                sell_price = self._get_stock_price(stock_code, current_date, 'close')
             
             # 停牌/退市检查：当日无行情数据时不可卖出，保留持仓
             if not self._has_trading_data_on_date(stock_code, current_date):
@@ -2327,12 +2341,12 @@ class BacktestEngine:
             
             # 卖出时计算成本（预估，待创建卖出记录时更新）
             # 注意：印花税只在卖出时收取
-            sell_commission_estimate = open_price * position['quantity'] * 0.00015
-            sell_transfer_fee_estimate = open_price * position['quantity'] * 0.00001 if stock_code.startswith('6') else 0
-            sell_stamp_tax_estimate = open_price * position['quantity'] * 0.001  # 印花税预估
-            
+            sell_commission_estimate = sell_price * position['quantity'] * 0.00015
+            sell_transfer_fee_estimate = sell_price * position['quantity'] * 0.00001 if stock_code.startswith('6') else 0
+            sell_stamp_tax_estimate = sell_price * position['quantity'] * 0.001  # 印花税预估
+
             # 毛估收益率 = (卖出金额 - 预估卖出成本 - 实际买入成本) / 实际买入成本
-            gross_sell_amount = open_price * position['quantity']
+            gross_sell_amount = sell_price * position['quantity']
             estimated_net_proceed = gross_sell_amount - sell_commission_estimate - sell_transfer_fee_estimate - sell_stamp_tax_estimate
             return_rate = (estimated_net_proceed - actual_cost) / actual_cost * 100
             
@@ -2393,10 +2407,10 @@ class BacktestEngine:
                         
                         logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
                     
-                    # 检查是否触发止损（包括移动止损）
-                    if open_price <= stop_price:
+                    # 检查是否触发止损（包括移动止损），用前一日收盘价判定
+                    if signal_close <= stop_price:
                         sell_type = 'trailing_stop' if current_stop > stop_loss else 'stop_loss'
-                        logger.info(f"  {stock_code} {stock_name} - 触发{'移动' if current_stop > stop_loss else ''}止损: 当前价 {open_price:.2f} <= 止损价 {stop_price:.2f}")
+                        logger.info(f"  {stock_code} {stock_name} - 触发{'移动' if current_stop > stop_loss else ''}止损: 信号价(前收) {signal_close:.2f} <= 止损价 {stop_price:.2f}")
                 
                 # 2. 持仓过期检查（持有超过指定天数且收益率低于阈值）
                 if not sell_type and enable_position_expire:
@@ -2415,7 +2429,8 @@ class BacktestEngine:
                             # 仅当数据为升序时才反转
                             if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
                                 df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
-                            result = self.timing_strategy.get_timing_result(df_to_date, position, 0)
+                            # 传入 stock_code 以隔离技术指标缓存，避免不同股票间指标复用
+                            result = self.timing_strategy.get_timing_result(df_to_date, position, 0, stock_code=stock_code)
                             
                             if result.is_sell:
                                 if result.trade_type == 'reduce':
@@ -2441,23 +2456,23 @@ class BacktestEngine:
             
             # 执行卖出操作
             if sell_type:
-                # 执行清仓
-                sell_amount = open_price * sell_quantity
+                # 执行清仓（成交价用T+1开盘价）
+                sell_amount = sell_price * sell_quantity
                 profit_loss = sell_amount - position['buy_amount'] * (sell_quantity / position['quantity'])
                 
-                sell_record = self._create_sell_record(position, current_date, open_price, 
+                sell_record = self._create_sell_record(position, current_date, sell_price,
                                                        sell_quantity, sell_amount, return_rate, hold_days, sell_type)
                 sell_records.append(sell_record)
-                logger.info(f"  【卖出】{stock_code}: 类型={sell_type}, 价格={open_price}, "
+                logger.info(f"  【卖出】{stock_code}: 类型={sell_type}, 价格={sell_price}, "
                            f"数量={sell_quantity}, 金额={sell_amount:.2f}, 收益率={return_rate:.2f}%")
                 
             elif reduce_quantity > 0:
-                # 执行减仓
-                reduce_amount = open_price * reduce_quantity
+                # 执行减仓（成交价用T+1开盘价）
+                reduce_amount = sell_price * reduce_quantity
                 remaining_quantity = position['quantity'] - reduce_quantity
                 remaining_ratio = remaining_quantity / position['quantity']
                 
-                reduce_record = self._create_sell_record(position, current_date, open_price,
+                reduce_record = self._create_sell_record(position, current_date, sell_price,
                                                           reduce_quantity, reduce_amount, return_rate, hold_days, 'strategy_reduce')
                 sell_records.append(reduce_record)
                 
