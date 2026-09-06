@@ -180,8 +180,9 @@ class TurtleStrategy(TimingStrategy):
                         return False
         
         # 4. 均线过滤：价格在均线上方才做多
-        # 统一使用最新K线的ma20，保持逻辑一致
-        ma_filter = pd.notna(latest['ma20']) and bool(latest['close'] > latest['ma20'])
+        # 回测模式（T-1日信号）：用T-1日的ma20和close判断，避免前视偏差
+        # 狩猎场模式（T日信号）：signal_bar=latest，自然用T日数据
+        ma_filter = pd.notna(signal_bar['ma20']) and bool(signal_bar['close'] > signal_bar['ma20'])
         if not ma_filter:
             return False
         
@@ -202,15 +203,16 @@ class TurtleStrategy(TimingStrategy):
             (是否卖出, 卖出原因)
         """
         # 出场条件1：跌破N日低点（下线）
-        # 回测模式：最新K线跌破T-1信号的down
-        # 狩猎场模式：最新K线跌破T日down（收盘后确认）
-        if pd.notna(latest['down']) and bool(latest['low'] < latest['down']):
-            return True, f"跌破{self.n_exit}日低点 {latest['down']:.2f}"
+        # 回测模式：用T-1日信号K线的low和down判断，避免前视偏差
+        # 狩猎场模式：signal_bar=latest，自然用T日数据
+        if pd.notna(signal_bar['down']) and bool(signal_bar['low'] < signal_bar['down']):
+            return True, f"跌破{self.n_exit}日低点 {signal_bar['down']:.2f}"
         
         # 出场条件2：ATR止损（跌破入场价 - exit_atr * ATR）
-        if pd.notna(latest['atr']):
-            stop_loss = entry_price - self.exit_atr * latest['atr']
-            if bool(latest['low'] <= stop_loss):
+        # 回测模式：用T-1日信号K线的atr和low判断
+        if pd.notna(signal_bar['atr']):
+            stop_loss = entry_price - self.exit_atr * signal_bar['atr']
+            if bool(signal_bar['low'] <= stop_loss):
                 return True, f"ATR止损 {stop_loss:.2f}"
         
         return False, ""
@@ -293,25 +295,29 @@ class TurtleStrategy(TimingStrategy):
             # 后续加仓：以上次加仓价为基准
             # 修改：加仓也需要阳线条件，与买入一致
             # 新增：只有持仓盈利超过2%时才允许加仓
+            # 前视偏差修复：所有信号判断用signal_bar（回测=T-1日，狩猎场=T日）
             if add_count < max_additions:
-                # 检查持仓盈利状态：盈利必须超过2%
-                profit_ratio = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                # 检查持仓盈利状态：盈利必须超过2%，用信号日收盘价
+                signal_close = signal_bar['close']
+                profit_ratio = (signal_close - entry_price) / entry_price if entry_price > 0 else 0
                 if profit_ratio > 0.02:  # 盈利超过2%
                     # last_add_price 可能为空(None/0)：首次加仓以入场价为基准，
                     # 故缺失时回退 entry_price（避免 None + float 抛 TypeError）
                     last_add_price = position.get('last_add_price') or entry_price
-                    add_threshold = last_add_price + self.add_atr * latest['atr']
+                    add_threshold = last_add_price + self.add_atr * signal_bar['atr']
 
-                    if latest['high'] >= add_threshold:
+                    if signal_bar['high'] >= add_threshold:
                         # 检查阳线条件：加仓也需要阳线且涨幅>0，与买入规则一致
-                        prev_close = prev_day_close(df, len(df) - 1) if len(df) >= 2 else latest['close']
-                        is_bullish = latest['close'] > latest['open']
-                        is_rising = latest['close'] > prev_close
-                        is_above_ma20 = pd.notna(latest['ma20']) and latest['close'] > latest['ma20']
+                        # 前一日收盘价：信号日的前一天
+                        signal_bar_idx = len(df) - 1 - signal_date_offset
+                        prev_close = df['close'].iloc[signal_bar_idx - 1] if signal_bar_idx > 0 else signal_close
+                        is_bullish = signal_bar['close'] > signal_bar['open']
+                        is_rising = signal_bar['close'] > prev_close
+                        is_above_ma20 = pd.notna(signal_bar['ma20']) and signal_bar['close'] > signal_bar['ma20']
 
                         # 检查上影线
-                        upper_shadow = latest['high'] - max(latest['open'], latest['close'])
-                        upper_shadow_ratio = upper_shadow / max(latest['open'], latest['close']) if max(latest['open'], latest['close']) > 0 else 0
+                        upper_shadow = signal_bar['high'] - max(signal_bar['open'], signal_bar['close'])
+                        upper_shadow_ratio = upper_shadow / max(signal_bar['open'], signal_bar['close']) if max(signal_bar['open'], signal_bar['close']) > 0 else 0
                         upper_shadow_ok = upper_shadow_ratio <= 0.04
 
                         # 阳线 + 涨幅>0 + 上影线<4% + 均线过滤
@@ -321,7 +327,7 @@ class TurtleStrategy(TimingStrategy):
                             result.message = f"加仓#{add_count + 1}，突破{add_threshold:.2f}"
                             result.trade_type = 'add'
                             result.add_count = add_count + 1
-                            result.indicators['last_add_price'] = latest['close']
+                            result.indicators['last_add_price'] = signal_bar['close']
                             # 以持仓数量为基准，加仓比例递减：1/2, 1/3, 1/4, 1/5, 1/6
                             add_ratio = 1.0 / (add_count + 2)
                             add_quantity = int(current_quantity * add_ratio) // 100 * 100
