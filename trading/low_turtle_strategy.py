@@ -162,21 +162,26 @@ class LowTurtleStrategy(TurtleStrategy):
             add_count = position.get('add_count', 0)
             max_additions = 4
 
+            # 前视偏差修复：所有信号判断用signal_bar（回测=T-1日，狩猎场=T日）
             if add_count < max_additions:
-                profit_ratio = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                # 用信号日收盘价计算盈利比例
+                signal_close = signal_bar['close']
+                profit_ratio = (signal_close - entry_price) / entry_price if entry_price > 0 else 0
                 if profit_ratio > 0.02:  # 盈利超过2%
                     last_add_price = position.get('last_add_price') or entry_price
-                    add_threshold = last_add_price + self.add_atr * latest['atr']
+                    add_threshold = last_add_price + self.add_atr * signal_bar['atr']
 
-                    if latest['high'] >= add_threshold:
+                    if signal_bar['high'] >= add_threshold:
                         # 低位版加仓：去掉MA20限制，仅保留阳线+涨幅+上影线
-                        prev_close = df['close'].iloc[-2] if len(df) >= 2 else latest['close']
-                        is_bullish = latest['close'] > latest['open']
-                        is_rising = latest['close'] > prev_close
+                        # 前一日收盘价：信号日的前一天
+                        signal_bar_idx = len(df) - 1 - signal_date_offset
+                        prev_close = df['close'].iloc[signal_bar_idx - 1] if signal_bar_idx > 0 else signal_close
+                        is_bullish = signal_bar['close'] > signal_bar['open']
+                        is_rising = signal_bar['close'] > prev_close
 
                         # 检查上影线
-                        upper_shadow = latest['high'] - max(latest['open'], latest['close'])
-                        upper_shadow_ratio = upper_shadow / max(latest['open'], latest['close']) if max(latest['open'], latest['close']) > 0 else 0
+                        upper_shadow = signal_bar['high'] - max(signal_bar['open'], signal_bar['close'])
+                        upper_shadow_ratio = upper_shadow / max(signal_bar['open'], signal_bar['close']) if max(signal_bar['open'], signal_bar['close']) > 0 else 0
                         upper_shadow_ok = upper_shadow_ratio <= 0.04
 
                         # 阳线 + 涨幅>0 + 上影线<4%（无MA20限制）
@@ -186,7 +191,7 @@ class LowTurtleStrategy(TurtleStrategy):
                             result.message = f"加仓#{add_count + 1}，突破{add_threshold:.2f}"
                             result.trade_type = 'add'
                             result.add_count = add_count + 1
-                            result.indicators['last_add_price'] = latest['close']
+                            result.indicators['last_add_price'] = signal_bar['close']
                             add_ratio = 1.0 / (add_count + 2)
                             add_quantity = int(current_quantity * add_ratio) // 100 * 100
                             result.buy_quantity = max(add_quantity, 100)
