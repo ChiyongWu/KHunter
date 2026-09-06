@@ -29,6 +29,32 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     -- update_time: 更新时间，类型TEXT，默认当前时间，格式YYYY-MM-DD HH:MM:SS
 );
 
+-- ============================================
+-- 2. 股票名称变更历史表（用于按日期还原历史ST状态）
+-- ============================================
+CREATE TABLE IF NOT EXISTS namechange (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 自增主键
+    ts_code TEXT NOT NULL,
+    -- ts_code: 股票代码，类型TEXT，必填，例如000001.SZ
+    code TEXT,
+    -- code: 股票代码（无后缀），类型TEXT，可选，例如000001
+    name TEXT NOT NULL,
+    -- name: 股票名称，类型TEXT，必填，例如*ST平安
+    start_date TEXT,
+    -- start_date: 名称生效开始日期，类型TEXT，可选，格式YYYYMMDD
+    end_date TEXT,
+    -- end_date: 名称生效结束日期，类型TEXT，可选，格式YYYYMMDD（空表示当前名称）
+    change_reason TEXT,
+    -- change_reason: 变更原因，类型TEXT，可选
+    UNIQUE(ts_code, start_date)
+    -- 联合唯一约束：同一股票同一开始日期只允许一条记录
+);
+
+-- 名称变更历史索引：按股票代码和日期查询
+CREATE INDEX IF NOT EXISTS idx_namechange_code ON namechange(code);
+CREATE INDEX IF NOT EXISTS idx_namechange_ts_code ON namechange(ts_code);
+
 
 
 -- ============================================
@@ -899,4 +925,5 @@ CREATE TABLE IF NOT EXISTS risk_status (
 -- 为 risk_status 表创建索引
 CREATE INDEX IF NOT EXISTS idx_risk_status_date ON risk_status(date);
 -- idx_risk_status_date: 日期索引，用于快速查询特定日期的风控状态
+
 
