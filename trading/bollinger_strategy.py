@@ -142,17 +142,18 @@ class BollingerStrategy(TimingStrategy):
         
         return result
     
-    def calculate_support(self, df: pd.DataFrame, key_date: Optional[str] = None) -> float:
+    def calculate_support(self, df: pd.DataFrame, key_date: Optional[str] = None, stock_code: str = "") -> float:
         """计算布林带策略的支撑位
         
         Args:
             df: 股票数据
             key_date: 关键日期
+            stock_code: 股票代码（用于指标缓存隔离）
             
         Returns:
             支撑位价格
         """
-        df = self.calculate_indicators(df)
+        df = self.calculate_indicators(df, stock_code=stock_code)
         latest = df.iloc[-1]
         
         if pd.notna(latest['boll_lower']):
