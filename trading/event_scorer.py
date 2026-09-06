@@ -196,13 +196,6 @@ class EventScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
-        # 初始化数据库管理器（用于查询本地 namechange 表，避免降级到当前名称）
-        try:
-            from utils.db_manager import DBManager
-            self._db_manager = DBManager()
-        except Exception as e:
-            logger.warning(f"事件评分器初始化 DBManager 失败: {e}")
-            self._db_manager = None
         # 记录初始化日志
         logger.info("事件驱动评分器初始化完成")
 
@@ -401,19 +394,7 @@ class EventScorer:
                             self._cache.set(cache_key, is_st)
                             return is_st
 
-            # namechange 接口无数据，先查本地 namechange 表（已入库的历史名称变更）
-            if self._db_manager:
-                local_name = self._db_manager.get_stock_name_by_date(stock_code, score_date)
-                if local_name:
-                    is_st = "ST" in local_name.upper()
-                    logger.debug(
-                        f"股票 {stock_code} @ {score_date} ST状态(本地namechange): {is_st}, "
-                        f"名称: {local_name}"
-                    )
-                    self._cache.set(cache_key, is_st)
-                    return is_st
-
-            # 本地表也无数据，降级使用 stock_basic（仅返回当前名称，可能与评分日期不一致）
+            # namechange 无数据，降级使用 stock_basic（仅返回当前名称）
             logger.debug(f"namechange 无数据，降级使用 stock_basic: {stock_code}")
             df2 = self._call_tushare_with_retry(
                 pro.stock_basic,

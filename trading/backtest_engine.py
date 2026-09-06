@@ -1936,14 +1936,10 @@ class BacktestEngine:
                     if df_to_date.empty:
                         continue
                     
-                    # 过滤2：ST/退市股票 → 跳过（不选入标的池）
-                    # 注意：数据行数检查由策略自身的 quick_filter 处理，不在此处硬编码
-                    # 按选股日期查询当时的股票名称，避免用当前名称判断历史ST状态（前视偏差）
-                    name = self.db_manager.get_stock_name_by_date(code, date_str)
-                    if not name:
-                        name = self.stock_name_cache.get(code, "未知")
-                    if name.startswith('ST') or name.startswith('*ST'):
-                        continue
+                    # 过滤2：退市股票 → 跳过（不选入标的池）
+                    # 注意：不过滤 ST 股票（ST 状态随时间变化，历史回测无法准确还原，故不做 ST 过滤）
+                    # 数据行数检查由策略自身的 quick_filter 处理，不在此处硬编码
+                    name = self.stock_name_cache.get(code, "未知")
                     skip_for_delisted = False
                     for kw in ['退', '未知', '退市', '已退']:
                         if kw in name:
