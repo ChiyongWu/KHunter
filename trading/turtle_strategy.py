@@ -7,17 +7,6 @@ from trading.timing_strategies import TimingStrategy, TimingResult
 from typing import Dict, Optional
 
 
-def same_row(df: pd.DataFrame, row: pd.Series) -> pd.Series:
-    """判断DataFrame中与给定Series相同的行"""
-    return (df['date'] == row['date']) & (df['close'] == row['close'])
-
-def prev_day_close(df: pd.DataFrame, current_idx: int) -> float:
-    """获取前一天收盘价"""
-    if current_idx > 0:
-        return df['close'].iloc[current_idx - 1]
-    return 0.0
-
-
 # 经典海龟配置（趋势跟踪，长周期）
 CLASSIC_PRESET = {
     'n_entry': 20,        # 入场通道：20日高点
@@ -147,37 +136,17 @@ class TurtleStrategy(TimingStrategy):
             return False
         
         # 3. 阳线过滤：信号发出当日必须是阳线且收盘涨幅 > 0%
-        # 回测模式（T-1日信号）：检查T-1日是否是阳线且收盘涨幅>0%
-        # 狩猎场模式（T日信号，收盘后）：检查T日是否是阳线且收盘涨幅>0%
-        # 找到signal_bar在df中的实际位置
-        try:
-            signal_bar_idx = df[same_row(df, signal_bar)].index[0]
-            # 前一天索引
-            prev_day_idx = signal_bar_idx - 1
-            if prev_day_idx >= 0:
-                prev_close = df['close'].iloc[prev_day_idx]
-                is_bullish = bool(signal_bar['close'] > signal_bar['open'])  # 阳线
-                is_rising = bool(signal_bar['close'] > prev_close)  # 收盘涨幅>0
-                if not (is_bullish and is_rising):
-                    return False
-        except Exception:
-            # 如果无法定位signal_bar，使用固定索引（兼容旧逻辑）
-            if use_prev_day_signal:
-                prev_close_idx = len(df) - 3
-                if prev_close_idx >= 0:
-                    prev_close = df['close'].iloc[prev_close_idx]
-                    is_bullish = bool(signal_bar['close'] > signal_bar['open'])
-                    is_rising = bool(signal_bar['close'] > prev_close)
-                    if not (is_bullish and is_rising):
-                        return False
-            else:
-                prev_close_idx = len(df) - 2
-                if prev_close_idx >= 0:
-                    prev_close = df['close'].iloc[prev_close_idx]
-                    is_bullish = bool(signal_bar['close'] > signal_bar['open'])
-                    is_rising = bool(signal_bar['close'] > prev_close)
-                    if not (is_bullish and is_rising):
-                        return False
+        # signal_bar 的位置由 use_prev_day_signal 确定：
+        #   回测模式（True）：signal_bar = df.iloc[-2]，前一天 = df.iloc[-3]
+        #   狩猎场模式（False）：signal_bar = df.iloc[-1]，前一天 = df.iloc[-2]
+        signal_bar_idx = len(df) - 2 if use_prev_day_signal else len(df) - 1
+        prev_close_idx = signal_bar_idx - 1
+        if prev_close_idx >= 0:
+            prev_close = df['close'].iloc[prev_close_idx]
+            is_bullish = bool(signal_bar['close'] > signal_bar['open'])  # 阳线
+            is_rising = bool(signal_bar['close'] > prev_close)  # 收盘涨幅>0
+            if not (is_bullish and is_rising):
+                return False
         
         # 4. 均线过滤：价格在均线上方才做多
         # 回测模式（T-1日信号）：用T-1日的ma20和close判断，避免前视偏差
