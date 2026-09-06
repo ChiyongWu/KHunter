@@ -2312,14 +2312,11 @@ class BacktestEngine:
             trading_days = self._get_trading_dates(buy_date_str, current_date_str)
             hold_days = len(trading_days) - 1
             
-            # 止盈止损信号判定用前一日收盘价；实际成交用T+1开盘价（信号当日触发，次交易日开盘卖出）
+            # 止盈止损信号判定用前一日收盘价；实际成交用T日开盘价（前一日收盘判定触发，当日开盘卖出）
             prev_trading_day = self._get_previous_trading_day(current_date)
+            # 止损信号严格使用T-1日收盘价，无数据时不做止损判断（避免前视偏差）
             signal_close = self._get_stock_price(stock_code, prev_trading_day, 'close') if prev_trading_day else None
-            if signal_close is None or signal_close <= 0:
-                # 无前一日数据时回退到当日收盘价
-                signal_close = self._get_stock_price(stock_code, current_date, 'close')
-            high_price = self._get_stock_price(stock_code, current_date, 'high')
-            # 实际成交价：处理日(current_date)当天开盘价（前一日收盘判定触发，当日开盘卖出）
+            # 实际成交价：处理日(current_date)当天开盘价
             sell_price = self._get_stock_price(stock_code, current_date, 'open')
             if sell_price is None or sell_price <= 0:
                 # 当日无开盘数据时回退到当日收盘价，避免无法成交
@@ -2408,7 +2405,8 @@ class BacktestEngine:
                         logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
                     
                     # 检查是否触发止损（包括移动止损），用前一日收盘价判定
-                    if signal_close <= stop_price:
+                    # signal_close 为 None 时跳过止损判断（无前一日数据，避免前视偏差）
+                    if signal_close is not None and signal_close > 0 and signal_close <= stop_price:
                         sell_type = 'trailing_stop' if current_stop > stop_loss else 'stop_loss'
                         logger.info(f"  {stock_code} {stock_name} - 触发{'移动' if current_stop > stop_loss else ''}止损: 信号价(前收) {signal_close:.2f} <= 止损价 {stop_price:.2f}")
                 
