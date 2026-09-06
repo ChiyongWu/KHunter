@@ -1936,17 +1936,7 @@ class BacktestEngine:
                     if df_to_date.empty:
                         continue
                     
-                    # 过滤2：退市股票 → 跳过（不选入标的池）
-                    # 注意：不过滤 ST 股票（ST 状态随时间变化，历史回测无法准确还原，故不做 ST 过滤）
-                    # 数据行数检查由策略自身的 quick_filter 处理，不在此处硬编码
-                    name = self.stock_name_cache.get(code, "未知")
-                    skip_for_delisted = False
-                    for kw in ['退', '未知', '退市', '已退']:
-                        if kw in name:
-                            skip_for_delisted = True
-                            break
-                    if skip_for_delisted:
-                        continue
+                    # 注意：不过滤 ST/退市股票（历史回测无法准确还原当时状态，交给策略自身的 quick_filter 处理）
                     
                     # 反转数据为倒序（最新的在前），供策略使用
                     # 仅当数据为升序时才反转

@@ -341,84 +341,6 @@ class EventScorer:
     # 事件数据获取方法
     # ============================================================
 
-    def _check_st_status(self, stock_code: str, score_date: str = None) -> bool:
-        """
-        检查股票在评分日期是否处于 ST 或 *ST 状态
-
-        优先通过 Tushare namechange 接口查询历史名称变更记录，
-        判断评分日期当时的股票名称是否包含 ST 标识。
-        确保回测和实盘使用数据逻辑一致（不会用到当前状态判断历史）。
-
-        参数:
-            stock_code: 股票代码（6位数字）
-            score_date: 评分日期（YYYYMMDD 格式），为 None 时使用当前日期
-        返回:
-            bool: True 表示是 ST 股票
-        """
-        # 评分日期未传时使用当前日期（兼容旧调用）
-        if score_date is None:
-            score_date = datetime.now().strftime("%Y%m%d")
-
-        # 构建缓存键（包含评分日期）
-        cache_key = f"st_status_{stock_code}_{score_date}"
-        # 检查缓存
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # 转换为 Tushare 格式代码
-        ts_code = self._convert_ts_code(stock_code)
-
-        try:
-            pro = self._get_pro()
-            # 优先使用 namechange 接口查询历史名称（支持回测）
-            df = self._call_tushare_with_retry(
-                pro.namechange,
-                ts_code=ts_code,
-                fields="ts_code,name,start_date,end_date,change_reason",
-            )
-            if df is not None and not df.empty:
-                # 遍历名称变更记录，找到评分日期时生效的名称
-                for _, row in df.iterrows():
-                    start = str(row.get("start_date", "")).replace("-", "")
-                    end = str(row.get("end_date", "")).replace("-", "")
-                    # 检查评分日期是否在此名称的有效期内
-                    if start and start <= score_date:
-                        if not end or end >= score_date:
-                            name = str(row.get("name", ""))
-                            is_st = "ST" in name.upper()
-                            logger.debug(
-                                f"股票 {stock_code} @ {score_date} ST状态: {is_st}, "
-                                f"名称: {name}（来自namechange）"
-                            )
-                            self._cache.set(cache_key, is_st)
-                            return is_st
-
-            # namechange 无数据，降级使用 stock_basic（仅返回当前名称）
-            logger.debug(f"namechange 无数据，降级使用 stock_basic: {stock_code}")
-            df2 = self._call_tushare_with_retry(
-                pro.stock_basic,
-                ts_code=ts_code,
-                fields="ts_code,name",
-            )
-            if df2 is not None and not df2.empty:
-                name = str(df2.iloc[0].get("name", ""))
-                is_st = "ST" in name.upper()
-                logger.debug(
-                    f"股票 {stock_code} @ {score_date} ST状态(降级): {is_st}, "
-                    f"名称: {name}（来自stock_basic，可能与评分日期不一致）"
-                )
-                self._cache.set(cache_key, is_st)
-                return is_st
-
-            # 查询无结果，默认非 ST
-            logger.warning(f"ST状态查询无结果: {stock_code}")
-            self._cache.set(cache_key, False)
-            return False
-        except Exception as e:
-            logger.error(f"ST状态查询失败: {stock_code}, {e}")
-            return False
-
     def _check_forecast(self, stock_code: str, score_date: str) -> List[dict]:
         """
         查询业绩预告事件
@@ -929,12 +851,8 @@ class EventScorer:
             Tuple[bool, str]: (是否触发一票否决, 否决原因)
         """
         formatted_date = self._format_date(score_date)
-        # 条件1：检查评分日期的 ST 状态（使用历史名称，确保回测一致）
-        if self._check_st_status(stock_code, formatted_date):
-            reason = "股票被 ST 或 *ST"
-            logger.warning(f"股票 {stock_code} 一票否决: {reason}")
-            return True, reason
-        # 条件2：检查业绩暴雷
+        # 注意：不做 ST 状态检查（历史回测无法准确还原，由策略自身处理）
+        # 条件1：检查业绩暴雷
         is_crash, crash_reason = self._check_forecast_crash(stock_code, formatted_date)
         if is_crash:
             logger.warning(f"股票 {stock_code} 一票否决: {crash_reason}")
