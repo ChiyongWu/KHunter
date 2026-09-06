@@ -77,16 +77,17 @@ class BollingerStrategy(TimingStrategy):
         
         # 获取最新数据
         latest = df.iloc[-1]
-        current_price = latest['close']
-        trade_price = latest['open']  # 交易价格为当天开盘价
+        trade_price = latest['open']  # 交易价格为T日开盘价
         
         # 根据模式选择信号判断基准
         if use_prev_day_signal and len(df) >= 2:
-            # 回测模式：使用T-1日指标判断信号
+            # 回测模式：使用T-1日指标和收盘价判断信号（T日开盘价成交）
             signal_bar = df.iloc[-2]
+            current_price = signal_bar['close']  # 用T-1收盘价判断，避免前视偏差
         else:
-            # 狩猎场模式：使用T日指标判断信号
+            # 狩猎场模式：使用T日指标和收盘价判断信号
             signal_bar = latest
+            current_price = latest['close']
         
         # 计算支撑位和压力位
         if pd.notna(signal_bar['boll_lower']):

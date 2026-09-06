@@ -67,11 +67,13 @@ class SupportStrategy(TimingStrategy):
                 return result
             signal_bar = df.iloc[-2]
             latest_bar = df.iloc[-1]
+            # 回测模式：支撑位只用截止T-1日的数据计算，避免使用T日收盘价（前视偏差）
+            support_level = self.calculate_support(df.iloc[:-1])
         else:
             signal_bar = df.iloc[-1]
             latest_bar = df.iloc[-1]
-
-        support_level = self.calculate_support(df)
+            # 狩猎场模式：使用全部数据（含T日）计算支撑位
+            support_level = self.calculate_support(df)
         result.support_level = support_level
 
         current_price = signal_bar['close']
