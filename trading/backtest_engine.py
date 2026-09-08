@@ -1928,6 +1928,13 @@ class BacktestEngine:
             # 从缓存遍历全部股票，选股时做过滤
             for code, df in self.stock_filtered_cache.items():
                 try:
+                    # 股票名称：供策略的 _validate_stock_name 校验（ST/退市/未知等）
+                    # 必须在此赋值：下方 execute_selection 依赖该变量。历史上一度在
+                    # "移除 ST 过滤"时被连带删除，导致 NameError 并被 except 静默吞掉，
+                    # 表现为全市场选股恒为 0 只，此处补回并注明用途防止再次误删。
+                    # 默认值用空串而非"未知"：策略层将"未知"判为无效名称会误杀股票。
+                    name = self.stock_name_cache.get(code, '')
+
                     # 日期切片：只取到目标日期为止的数据
                     date_str = date.strftime('%Y-%m-%d')
                     df_to_date = df[df['date'] <= date_str].copy()

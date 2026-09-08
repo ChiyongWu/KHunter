@@ -463,10 +463,17 @@ class PTradeFeedbackHandler:
         # 从股票持仓自算 market_value（不含 ETF），与 positions 保持一致
         stock_market_value = round(sum(p["market_value"] for p in new_positions.values()), 2)
         etf_mv = round(self._etf_market_value, 2)
-        # 可用余额通过「总资产 - 持仓金额」反算，而非直接取 Fund 可用资金列：
-        # Fund 可用资金列不含未成交委托冻结资金，直接用会偏小；
-        # 用总资产（含冻结、ETF）减去持仓市值（股票 + ETF）反推得到含冻结的可用余额
+        # 可用现金按「总资产 - 股票持仓市值 - ETF 市值」反算
+        # 原因：清算前可能存在未成交委托，Fund 文件的「可用资金」列已扣除冻结
+        # 资金，会低于真实可用余额，导致策略可买入金额计算出现偏差。
+        # 数据异常（总资产小于持仓市值导致反算为负）时回退到 Fund 可用资金列并告警。
         cash = round(total_asset - stock_market_value - etf_mv, 2)
+        if cash < 0:
+            logger.warning(
+                f"PTrade 反馈: 反算可用资金为负({cash})，总资产={total_asset}，"
+                f"股票市值={stock_market_value}，ETF市值={etf_mv}，"
+                f"回退使用 Fund 可用资金列")
+            cash = round(fund.get("available_cash", 0), 2)
         portfolio = {
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "cash": cash,
@@ -477,7 +484,7 @@ class PTradeFeedbackHandler:
             "positions": new_positions,
         }
         log_msg = (f"PTrade 反馈: 构建 portfolio 完成 - "
-                   f"现金(总资产-持仓反算)={cash}, 总资产={total_asset}, "
+                   f"可用资金={cash}, 总资产={total_asset}, "
                    f"股票市值={stock_market_value}, 持仓数={len(new_positions)}")
         if etf_mv > 0:
             log_msg += f", ETF市值={etf_mv}"

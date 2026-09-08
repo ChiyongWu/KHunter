@@ -3690,6 +3690,33 @@ class StrategyRunner:
 
         return stop_price, current_stop, highest_price, highest_price_return
 
+    @staticmethod
+    def _exclude_buy_day(holding_df, buy_date):
+        """排除首次建仓日当天的K线，返回用于移动止损的持仓期数据
+
+        背景：买入当天的最高价可能形成于实际成交之前（当时尚未持仓），
+        若计入"买入以来最高价"会虚高最高价，进而把移动止损位错误抬高，
+        极端情况下刚建仓就误触发止损。
+
+        口径：仅排除首次建仓日；移动止损基准仍自首次建仓日起算（不含当天那根K线）。
+
+        Args:
+            holding_df: 持仓期K线DataFrame（需含 'date' 列）
+            buy_date: 首次建仓日（YYYY-MM-DD）
+
+        Returns:
+            排除建仓日后的DataFrame；若过滤后无剩余数据（如当日建仓当日检查）
+            返回 None，由调用方按固定止损(-6%)兜底，坚决不使用买入当天高点
+        """
+        # 无数据或缺少建仓日时原样返回，不改变既有兜底行为
+        if holding_df is None or holding_df.empty or not buy_date:
+            return holding_df
+        _buy_date_str = str(buy_date)
+        # 剔除建仓日当天，移动止损区间自买入次日起算
+        filtered = holding_df[holding_df['date'].astype(str) != _buy_date_str]
+        # 过滤后无数据 → 返回 None，避免回退使用买入当天的高点
+        return filtered if not filtered.empty else None
+
     def _resolve_first_buy_date(self, stock_code: str, position: Dict) -> str:
         """从持久化账本解析首次建仓日（移动止损"买入以来"区间的权威起点）
 
@@ -3827,6 +3854,13 @@ class StrategyRunner:
                     if df is not None and not df.empty:
                         holding_df = df.copy()
                         data_source = 'recent_df'
+                # 排除首次建仓日当天K线：其最高价可能形成于成交之前（当时尚未持仓），
+                # 计入会虚高"买入以来最高价"而错误抬高移动止损位。
+                # 过滤后无剩余数据（如当日建仓当日检查）→ None → 固定止损(-6%)兜底
+                holding_df = self._exclude_buy_day(holding_df, buy_date)
+                if holding_df is None and data_source in ('db', 'recent_df'):
+                    data_source = 'excluded_buy_day'
+
                 # 调用通用移动止损计算(含最高价/最高收益率/止损价)，便于单元测试
                 stop_price, current_stop, highest_price, highest_price_return = \
                     self._calc_trailing_stop(buy_price, current_price, holding_df,
@@ -4374,6 +4408,52 @@ class StrategyRunner:
             logger.warning(f"计算当前仓位比例失败: {e}")
             return 0.0
     
+    # 需要合并顶层 config 专用参数的海龟类策略
+    TURTLE_STRATEGY_NAMES = ('turtle', 'low_turtle')
+
+    @staticmethod
+    def _build_turtle_params(config: Dict, timing_params: Dict, timing_strategy: str) -> Dict:
+        """构建择时策略参数，统一海龟类策略的配置合并逻辑。
+
+        背景：回测引擎对 turtle/low_turtle 均合并顶层 config 的海龟参数，
+        而运行器原先仅判断 'turtle'，导致 low_turtle 在实盘回退默认预设，
+        回测与实盘参数不一致（回测结果无法指导实盘）。此处统一两处逻辑。
+
+        优先级（由高到低）：顶层 config 海龟参数 > timing_params[策略名] > 策略默认预设。
+
+        Args:
+            config: 运行配置（顶层，可能直接包含 n_entry 等海龟参数）
+            timing_params: config 中的 timing_params 字典
+            timing_strategy: 择时策略名，如 'turtle' / 'low_turtle' / 'support'
+
+        Returns:
+            合并后的策略参数字典
+        """
+        # 以 timing_params 中该策略的配置为基础（可能为空）
+        params = dict((timing_params or {}).get(timing_strategy, {}) or {})
+        # 非海龟类策略直接返回，不做顶层参数合并
+        if timing_strategy not in StrategyRunner.TURTLE_STRATEGY_NAMES:
+            return params
+        # 顶层 config 中的海龟专用参数（仅合并非 None，避免覆盖已有配置）
+        specific = {
+            'n_entry': (config or {}).get('n_entry'),
+            'n_exit': (config or {}).get('n_exit'),
+            'atr_period': (config or {}).get('atr_period'),
+            'entry_atr': (config or {}).get('entry_atr'),
+            'add_atr': (config or {}).get('add_atr'),
+            'exit_atr': (config or {}).get('exit_atr'),
+            'preset': (config or {}).get('turtle_preset'),
+            'base_position_amount': (config or {}).get('base_position_amount'),
+        }
+        params.update({k: v for k, v in specific.items() if v is not None})
+        # 打印生效参数，便于排查回测/实盘参数不一致问题
+        logger.info(
+            f"【海龟参数】{timing_strategy} 合并顶层配置后生效: "
+            f"n_entry={params.get('n_entry')}, n_exit={params.get('n_exit')}, "
+            f"atr_period={params.get('atr_period')}, "
+            f"base_position_amount={params.get('base_position_amount')}")
+        return params
+
     def run_strategies_batch(self, tasks: List[Dict], config: Dict) -> Dict:
         """批量运行策略（所有策略执行完成后统一保存文件）
         
@@ -4564,22 +4644,9 @@ class StrategyRunner:
                 first_task = tasks[0]
                 timing_strategy = first_task.get('timing_strategy', 'support')
                 timing_params = config.get('timing_params', {})
-                strategy_params = timing_params.get(timing_strategy, {})
-                
-                # 特殊处理：如果是海龟策略
-                if timing_strategy == 'turtle':
-                    turtle_specific_params = {
-                        'n_entry': config.get('n_entry'),
-                        'n_exit': config.get('n_exit'),
-                        'atr_period': config.get('atr_period'),
-                        'entry_atr': config.get('entry_atr'),
-                        'add_atr': config.get('add_atr'),
-                        'exit_atr': config.get('exit_atr'),
-                        'preset': config.get('turtle_preset'),
-                        'base_position_amount': config.get('base_position_amount')
-                    }
-                    turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
-                    strategy_params.update(turtle_specific_params)
+                # 统一构建策略参数：海龟/低位海龟均合并顶层配置，保证与回测一致
+                strategy_params = self._build_turtle_params(
+                    config, timing_params, timing_strategy)
                 
                 self.timing_strategy = TimingStrategyFactory.create_strategy(
                     timing_strategy, strategy_params
@@ -4606,22 +4673,9 @@ class StrategyRunner:
                     # 仅当择时策略与当前不同时才重新创建（避免与卖出阶段重复创建）
                     if timing_strategy != getattr(self, 'timing_strategy_name', None):
                         timing_params = config.get('timing_params', {})
-                        strategy_params = timing_params.get(timing_strategy, {})
-                        
-                        # 特殊处理：如果是海龟策略
-                        if timing_strategy == 'turtle':
-                            turtle_specific_params = {
-                                'n_entry': config.get('n_entry'),
-                                'n_exit': config.get('n_exit'),
-                                'atr_period': config.get('atr_period'),
-                                'entry_atr': config.get('entry_atr'),
-                                'add_atr': config.get('add_atr'),
-                                'exit_atr': config.get('exit_atr'),
-                                'preset': config.get('turtle_preset'),
-                                'base_position_amount': config.get('base_position_amount')
-                            }
-                            turtle_specific_params = {k: v for k, v in turtle_specific_params.items() if v is not None}
-                            strategy_params.update(turtle_specific_params)
+                        # 统一构建策略参数：海龟/低位海龟均合并顶层配置，保证与回测一致
+                        strategy_params = self._build_turtle_params(
+                            config, timing_params, timing_strategy)
                         
                         self.timing_strategy = TimingStrategyFactory.create_strategy(
                             timing_strategy, strategy_params

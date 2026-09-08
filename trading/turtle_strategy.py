@@ -47,6 +47,15 @@ class TurtleStrategy(TimingStrategy):
         'short': SHORT_TURTLE_PRESET,    # 短线海龟：10/5
         'ultra_short': ULTRA_SHORT_PRESET,  # 超短海龟：6/3
     }
+
+    # 是否启用 MA20 趋势过滤（买入与加仓判断均受此开关控制）
+    # 低位海龟（LowTurtleStrategy）覆盖为 False：低位股常低于 MA20，
+    # 启用会把信号全部否决，故子类关闭该过滤，仅保留突破/上影线/阳线条件。
+    # 通过开关而非重写方法，保证子类自动继承父类的前视偏差修复与规则变更。
+    USE_MA_FILTER = True
+
+    # 买入信号文案标识（子类可覆盖，如低位海龟为"低位"），仅影响展示不影响判断
+    SIGNAL_LABEL = ''
     
     def __init__(self, config):
         """初始化海归策略
@@ -130,8 +139,12 @@ class TurtleStrategy(TimingStrategy):
         # 2. 上影线过滤：上影线不超过4%
         # 上影线 = high - max(open, close)，相对于实体上端计算
         # 这样对阳线和阴线都适用
-        upper_shadow = signal_bar['high'] - max(signal_bar['open'], signal_bar['close'])
-        upper_shadow_ratio = upper_shadow / max(signal_bar['open'], signal_bar['close'])
+        # 上影线过滤：分母为实体上端 max(open, close)；
+        # 异常数据下该值可能为 0，此时按 0 处理避免 ZeroDivisionError
+        # （与加仓分支的保护口径保持一致）
+        _body_high = max(signal_bar['open'], signal_bar['close'])
+        upper_shadow = signal_bar['high'] - _body_high
+        upper_shadow_ratio = upper_shadow / _body_high if _body_high > 0 else 0
         if upper_shadow_ratio > 0.04:
             return False
         
@@ -148,12 +161,14 @@ class TurtleStrategy(TimingStrategy):
             if not (is_bullish and is_rising):
                 return False
         
-        # 4. 均线过滤：价格在均线上方才做多
+        # 4. 均线过滤：价格在均线上方才做多（受 USE_MA_FILTER 开关控制）
         # 回测模式（T-1日信号）：用T-1日的ma20和close判断，避免前视偏差
         # 狩猎场模式（T日信号）：signal_bar=latest，自然用T日数据
-        ma_filter = pd.notna(signal_bar['ma20']) and bool(signal_bar['close'] > signal_bar['ma20'])
-        if not ma_filter:
-            return False
+        # 低位海龟关闭此过滤（低位股常低于MA20，启用会否决所有信号）
+        if self.USE_MA_FILTER:
+            ma_filter = pd.notna(signal_bar['ma20']) and bool(signal_bar['close'] > signal_bar['ma20'])
+            if not ma_filter:
+                return False
         
         return True
     
@@ -241,10 +256,18 @@ class TurtleStrategy(TimingStrategy):
         if not position and not result.is_sell:
             if len(df) >= 2:
                 if self._check_buy_signal(df, signal_bar, latest, use_prev_day_signal):
-                    buy_price = latest['open']
+                    # 买入价测算口径：
+                    # - 回测模式（T-1信号）：信号次日开盘成交，用 T 日开盘价（真实执行价）
+                    # - 实盘模式（T日信号）：收盘后才确认信号、T+1 执行，
+                    #   用 T 日开盘价属于"回到过去"的时点，以 T 日收盘价测算更贴合实际成交
+                    buy_price = latest['open'] if use_prev_day_signal else latest['close']
                     result.is_buy = True
                     result.signal_strength = 1.0
-                    result.message = f"T-{signal_date_offset}日突破上线 {signal_bar['up']:.2f}，买入信号" if signal_date_offset else f"今日突破上线 {signal_bar['up']:.2f}，买入信号"
+                    # 文案含 SIGNAL_LABEL，子类（如低位海龟）可标识来源
+                    result.message = (
+                        f"T-{signal_date_offset}日突破上线 {signal_bar['up']:.2f}，"
+                        f"{self.SIGNAL_LABEL}买入信号") if signal_date_offset else (
+                        f"今日突破上线 {signal_bar['up']:.2f}，{self.SIGNAL_LABEL}买入信号")
                     result.support_level = signal_bar['up'] * 0.95
                     result.trade_type = 'buy'
                     buy_amount = self.base_position_amount
@@ -282,7 +305,10 @@ class TurtleStrategy(TimingStrategy):
                         prev_close = df['close'].iloc[signal_bar_idx - 1] if signal_bar_idx > 0 else signal_close
                         is_bullish = signal_bar['close'] > signal_bar['open']
                         is_rising = signal_bar['close'] > prev_close
-                        is_above_ma20 = pd.notna(signal_bar['ma20']) and signal_bar['close'] > signal_bar['ma20']
+                        # 均线过滤：低位海龟通过 USE_MA_FILTER=False 关闭，此时恒为 True
+                        is_above_ma20 = (
+                            (pd.notna(signal_bar['ma20']) and signal_bar['close'] > signal_bar['ma20'])
+                            if self.USE_MA_FILTER else True)
 
                         # 检查上影线
                         upper_shadow = signal_bar['high'] - max(signal_bar['open'], signal_bar['close'])
