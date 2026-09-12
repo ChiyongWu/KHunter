@@ -4123,12 +4123,16 @@ class StrategyRunner:
                 profit_rate = sell_signal['profit_rate'] if 'profit_rate' in sell_signal else 0
                 
                 # 获取配置
+                #   2026-09-12 新规则：任意亏损即冷却 1 个月（21 个交易日）；
+                #   连续亏损 2 次冷却 1 年（250 个交易日）。
+                #   默认**取消亏损门槛**（cool_down_threshold 不配置 = 无门槛）；
+                #   如需恢复阈值，显式配置 cool_down_threshold（如 -8）即可。
                 enable_loss_cool_down = self.config.get('enable_loss_cool_down', True)
                 enable_consecutive_loss_limit = self.config.get('enable_consecutive_loss_limit', True)
-                cool_down_threshold = self.config.get('cool_down_threshold', -8)
-                cool_down_days = self.config.get('cool_down_days', 20)
+                cool_down_threshold = self.config.get('cool_down_threshold')   # None = 无门槛
+                cool_down_days = self.config.get('cool_down_days', 21)         # 1 个月
                 max_consecutive_losses = self.config.get('max_consecutive_losses', 2)
-                consecutive_loss_cool_down = self.config.get('consecutive_loss_cool_down', 30)
+                consecutive_loss_cool_down = self.config.get('consecutive_loss_cool_down', 250)  # 1 年
                 
                 # 更新连续亏损计数
                 if enable_consecutive_loss_limit:
@@ -4147,15 +4151,19 @@ class StrategyRunner:
                             self._update_stock_cool_down_status(stock_code, True, cool_down_end)
                             logger.warning(f"  股票 {stock_code} 连续亏损 {current_count} 次，加入冷却池至 {cool_down_end}")
                 
-                # 检查是否触发亏损冷却期（单笔亏损超阈值）
-                # 两个条件独立判断：单笔亏损超8% 或 连续两次亏损
-                if enable_loss_cool_down and profit_rate * 100 <= cool_down_threshold:
+                # 检查是否触发亏损冷却期（单笔亏损：默认**任意亏损**即触发）
+                # 两个条件独立判断：单笔亏损（默认无门槛） 或 连续两次亏损。
+                # 已处于冷却期时不再覆盖，避免用较短的 21 天覆盖连续亏损的 250 天。
+                loss_over_threshold = (cool_down_threshold is None
+                                       or profit_rate * 100 <= cool_down_threshold)
+                if enable_loss_cool_down and profit_rate < 0 and loss_over_threshold:
                     # 检查是否已经在冷却期，避免重复记录
                     if not self._check_cool_down(stock_code, trade_date):
                         cool_down_end = self._get_future_trading_day(trade_date, cool_down_days)
                         # 更新股票池中的冷却状态
                         self._update_stock_cool_down_status(stock_code, True, cool_down_end)
-                        logger.warning(f"  股票 {stock_code} 单笔亏损 {profit_rate*100:.2f}% 超过阈值 {cool_down_threshold}%，加入冷却池至 {cool_down_end}")
+                        logger.warning(f"  股票 {stock_code} 单笔亏损 {profit_rate*100:.2f}%，"
+                                       f"加入冷却池 {cool_down_days} 个交易日至 {cool_down_end}")
             # ========== 冷却池和连续亏损计数更新结束 ==========
             
             logger.info(f"【卖出汇总】{trade_date} 执行卖出操作，生成 {len(sell_signals)} 个卖出信号，共检查 {len(self.portfolio) + len(stocks_to_remove)} 只持仓")

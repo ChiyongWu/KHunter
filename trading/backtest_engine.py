@@ -2660,9 +2660,13 @@ class BacktestEngine:
         trailing_drawdown_pct = config.get('trailing_drawdown_pct', 8)
         
         # 获取亏损冷却期配置
+        #   2026-09-12 新规则：任意亏损即冷却 1 个月（21 个交易日）；
+        #   连续亏损 2 次冷却 1 年（250 个交易日）。
+        #   默认**取消亏损门槛**（cool_down_threshold 不配置 = 无门槛）；
+        #   如需恢复阈值，显式配置 cool_down_threshold（如 -8）即可。
         enable_loss_cool_down = config.get('enable_loss_cool_down', True)
-        cool_down_threshold = config.get('cool_down_threshold', -8)
-        cool_down_days = config.get('cool_down_days', 20)
+        cool_down_threshold = config.get('cool_down_threshold')   # None = 无门槛
+        cool_down_days = config.get('cool_down_days', 21)         # 1 个月
         
         # 获取持仓过期配置（提高资金利用率）
         enable_position_expire = config.get('enable_position_expire', True)
@@ -2672,7 +2676,7 @@ class BacktestEngine:
         # 获取连续亏损限制配置
         enable_consecutive_loss_limit = config.get('enable_consecutive_loss_limit', True)
         max_consecutive_losses = config.get('max_consecutive_losses', 2)
-        consecutive_loss_cool_down = config.get('consecutive_loss_cool_down', 30)
+        consecutive_loss_cool_down = config.get('consecutive_loss_cool_down', 250)   # 1 年
         
         for position in positions:
             stock_code = position['stock_code']
@@ -2893,13 +2897,19 @@ class BacktestEngine:
                             self.loss_cool_down_pool[stock_code] = cool_down_end
                             logger.warning(f"  股票 {stock_code} 连续亏损 {current_count} 次，加入冷却池至 {cool_down_end}")
             
-            # 检查是否触发亏损冷却期（单笔亏损超阈值）
+            # 检查是否触发亏损冷却期（单笔亏损：默认**任意亏损**即触发）
             # 与实盘一致：使用【独立 if】。原为 elif，因上方 enable_consecutive_loss_limit
-            # 默认为 True，该分支永远不会执行，导致回测"单笔亏损 ≤ -8% 冷却 20 天"完全失效。
-            if enable_loss_cool_down and return_rate <= cool_down_threshold:
-                cool_down_end = self._get_future_trading_day(current_date, cool_down_days)
-                self.loss_cool_down_pool[stock_code] = cool_down_end
-                logger.warning(f"  股票 {stock_code} 单笔亏损 {return_rate:.2f}% 超过阈值 {cool_down_threshold}%，加入冷却池至 {cool_down_end}")
+            # 默认为 True，该分支永远不会执行，导致回测单笔亏损冷却完全失效。
+            # 2026-09-12 新规则：默认取消 -8% 门槛；且**不覆盖更长的冷却**——
+            # 否则会用 21 天覆盖上面刚设置的 250 天连续亏损冷却（与实盘 _check_cool_down 守卫一致）。
+            loss_over_threshold = (cool_down_threshold is None
+                                   or return_rate <= cool_down_threshold)
+            if enable_loss_cool_down and return_rate < 0 and loss_over_threshold:
+                if not self._check_cool_down(stock_code, current_date):
+                    cool_down_end = self._get_future_trading_day(current_date, cool_down_days)
+                    self.loss_cool_down_pool[stock_code] = cool_down_end
+                    logger.warning(f"  股票 {stock_code} 单笔亏损 {return_rate:.2f}%，"
+                                   f"加入冷却池 {cool_down_days} 个交易日至 {cool_down_end}")
         
         return remaining_positions, sell_records
     
