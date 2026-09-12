@@ -1,0 +1,84 @@
+﻿# ============================================
+# A股量化选股系统 - 主配置文件
+# ============================================
+# 说明：此文件由 config.yaml.template 生成
+# 【2026-09-13】飞书推送/指令配置已移除，本文件不再含任何敏感信息，已纳入版本管理
+
+data_dir: data
+
+# 钉钉机器人配置（已废弃，保留兼容）
+dingtalk:
+  webhook_url: ""
+  secret: ""
+
+# 定时任务配置（旧版，向后兼容）
+schedule:
+  time: "17:00"  # 每日执行时间
+
+# 定时流水线配置（新版编排）
+pipeline_schedule:
+  enabled: true                          # 是否启用定时流水线
+  time: "17:00"                          # 每日执行时间 (北京时间，收盘后)
+  detect_trading_day: false              # false=不检测交易日，任何日期均执行完整流水线（数据更新与策略运行均按最近交易日处理，信号 exec_date 自动顺延至下一交易日）
+
+  # 数据更新步骤 (Step 1)
+  # 仅本地化必需数据，资金流/事件数据按需实时获取
+  data_update:
+    enabled: true
+    update_kline: true                   # K线增量更新
+    rebuild_exdividend: true             # 除权历史重建
+    init_new_stocks: true                # 新股检测与初始化
+    sync_basic_data: true                # 基础数据同步（股票列表等）
+    max_retries: 2                       # 更新失败重试次数
+    timeout_minutes: 30                  # 超时时间（分钟）
+
+  # 策略运行步骤 (Step 2)
+  strategy_run:
+    enabled: true
+    select_strategy: "immortal_guidance" # 选股策略
+    timing_strategy: "support"           # 择时策略
+    score_threshold: 60                  # 评分阈值
+    max_daily_buys: 3                    # 每日最大买入数
+
+# 数据更新配置
+update:
+  lookback_days: 10
+  skip_failed: true
+
+# 股票过滤配置
+filters:
+  # 最小市值（亿元）
+  min_market_cap: 10
+  # 最大市值（亿元）
+  max_market_cap: 10000
+  # 最小流通股本（亿股）
+  min_float_shares: 1
+  # 最大流通股本（亿股）
+  max_float_shares: 100
+  # 排除新股（上市天数）
+  exclude_new_stock_days: 60
+  # 排除ST股票
+  exclude_st: true
+  # 排除退市风险股票
+  exclude_delisting_risk: true
+
+# 策略运行器模式配置
+# mode: manual - 手工模式，信号生成后人工操作
+# mode: auto   - 自动模式，PTrade 自动读取信号执行并返回结果
+run_mode:
+  mode: "auto"
+
+# 交易配置
+trading:
+  # 初始资金（元）
+  initial_capital: 300000.0
+
+# PTrade 反馈相关配置
+ptrade:
+  enabled: true
+  # 信号输出目录（KHunter 写入，PTrade 读取信号文件的绝对路径）
+  signal_dir: "D:/ptrade/output"
+  # PTrade 返回结果目录（PTrade 写入反馈文件的绝对路径）
+  feedback_dir: "D:/ptrade/input"
+  # 返回文件读取模式: file
+  feedback_mode: "file"

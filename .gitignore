@@ -44,9 +44,7 @@ reports/
 *.log
 
 # Configuration files (local)
-# 【2026-09-12 推送脱敏】config/config.yaml 含飞书 App Secret 等敏感值，已从版本管理移除
-# （历史由 git-filter-repo 清理）；部署请参照 config/config.yaml.template 创建本地 config/config.yaml
-config/config.yaml
+# 【2026-09-13】config/config.yaml 已移除飞书配置段（不再含敏感值），已纳入版本管理
 config/tushare_config.json
 config/87659999.json
 config/87659999_decrypted.json
