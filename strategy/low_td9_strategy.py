@@ -49,7 +49,7 @@ class LowTD9Strategy(BaseStrategy):
             'countdown_target': 9,             # Countdown 完成目标根数
             'countdown_offset': 2,             # 比较偏移 close[t] vs close[t-2]（DeMark 原版 Countdown）
             # 低位环境过滤（默认开启）
-            'enable_low_filter': True,         # 是否启用低位环境过滤
+            'enable_low_filter': False,        # 是否启用低位环境过滤（已按需求关闭三项低位环境判定）
             'low_drawdown_window': 60,         # 回撤计算回溯交易日
             'low_drawdown_max': 0.85,          # 距阶段高点最大比例（≤则低位）
             'enable_ma60': True,               # 是否要求收盘价 < 60日均线
@@ -59,7 +59,7 @@ class LowTD9Strategy(BaseStrategy):
             # 完美信号（硬门槛）
             'enable_perfection': True,         # 是否要求完美信号（第8/9根低点<第6/7根低点）
             # 数据长度
-            'min_data_len': 120,               # 最少历史交易日（保证 Setup+Countdown 充分回溯）
+            'min_data_len': 13,                # 最少历史交易日（TD Setup+Countdown 结构在13根内完成判定）
         }
 
         # 合并用户参数 - params 中的值覆盖默认值
@@ -396,7 +396,7 @@ class LowTD9Strategy(BaseStrategy):
         """
         try:
             # 数据长度校验
-            min_len = int(self.params.get('min_data_len', 120))
+            min_len = int(self.params.get('min_data_len', 13))
             if df is None or len(df) < min_len:
                 return []
 

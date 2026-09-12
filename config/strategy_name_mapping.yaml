@@ -24,6 +24,8 @@ strategy_names:
   GoldenCrossNotGreenStrategy: 金叉不绿策略
   LowTD9Strategy: 低位九转策略
   OversoldReboundStrategy: 超跌反弹策略
+  LeaderStrategy: 龙头策略
+  MainUptrendDipBuyStrategy: 主升低吸策略
 
 # 反向映射（中文名称到英文类名）
 # 自动生成，不需要手动维护
@@ -46,9 +48,20 @@ reverse_mapping:
   趋势起点策略: TrendStartStrategy
   金三角策略: GoldenTriangleStrategy
   超跌反弹策略: OversoldReboundStrategy
+  # 超跌反弹策略简称别名（前端/回测引擎可能使用简称）
+  超跌反弹: OversoldReboundStrategy
+  低位九转策略: LowTD9Strategy
+  # 低位九转策略简称别名（前端/回测引擎可能使用简称）
+  低位九转: LowTD9Strategy
   # 蛇形命名别名（用于定时任务等场景）
   immortal_guidance: ImmortalGuidanceStrategy
   golden_triangle: GoldenTriangleStrategy
   # 金叉不绿策略
   金叉不绿策略: GoldenCrossNotGreenStrategy
   golden_cross_not_green: GoldenCrossNotGreenStrategy
+  # 龙头策略
+  龙头策略: LeaderStrategy
+  龙头: LeaderStrategy
+  # 主升低吸策略
+  主升低吸策略: MainUptrendDipBuyStrategy
+  主升低吸: MainUptrendDipBuyStrategy

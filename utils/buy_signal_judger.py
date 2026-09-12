@@ -196,11 +196,11 @@ class ScoreBuySignalJudger(BaseBuySignalJudger):
             
             # 判断评分是否达到阈值
             if score >= score_threshold:
-                reason = f"综合评分达到阈值 ({score:.2f} >= {score_threshold})
+                reason = f"综合评分达到阈值 ({score:.2f} >= {score_threshold})"
                 logger.debug(f"评分买点判断: 符合，{reason}")
                 return True, reason
             else:
-                reason = f"综合评分未达到阈值 ({score:.2f} < {score_threshold})
+                reason = f"综合评分未达到阈值 ({score:.2f} < {score_threshold})"
                 logger.debug(f"评分买点判断: 不符合，{reason}")
                 return False, reason
                 
@@ -298,6 +298,13 @@ class StrategyBuySignalManager:
             'price_range': {'lower_percent': -1.0, 'upper_percent': 3.0}
         },
         'ResistanceBreakoutStrategy': {
+            'required_conditions': ['price_range', 'volume'],
+            'optional_conditions': ['trend'],
+            'optional_min_count': 1,
+            'price_range': {'lower_percent': -0.5, 'upper_percent': 5.0}
+        },
+        # 主升低吸策略：同为"放量长阳突破"类，T+1 买入常伴随跳空，故沿用同一买点区间
+        'MainUptrendDipBuyStrategy': {
             'required_conditions': ['price_range', 'volume'],
             'optional_conditions': ['trend'],
             'optional_min_count': 1,

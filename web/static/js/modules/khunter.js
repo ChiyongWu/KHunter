@@ -282,7 +282,17 @@ function showPlanModal(planData) {
             const stopLoss = plan.stop_loss_price != null ? plan.stop_loss_price.toFixed(2) : '-';
             const takeProfit = plan.take_profit_price != null ? plan.take_profit_price.toFixed(2) : '-';
             const timingStrategy = plan.timing_strategy || '-';
-            
+            // 择时策略中文名称映射
+            const timingMap = {
+                'turtle': '海龟策略',
+                'low_turtle': '低位海龟策略',
+                'rsi': 'RSI策略',
+                'bollinger': '布林带策略',
+                'support': '支撑位策略',
+                'uptrend_pullback': '趋势回调缩量策略'
+            };
+            const timingDisplay = timingMap[timingStrategy] || timingStrategy;
+
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${plan.rank || (index + 1)}</td>
@@ -293,7 +303,7 @@ function showPlanModal(planData) {
                 <td>${positionRatio}%</td>
                 <td>${stopLoss}</td>
                 <td>${takeProfit}</td>
-                <td>${timingStrategy}</td>
+                <td>${timingDisplay}</td>
             `;
             tbody.appendChild(row);
         });
@@ -481,9 +491,11 @@ function bindTableData(results) {
     // 3. 择时策略中文名称映射
     const timingStrategyNames = {
         'turtle': '海龟策略',
+        'low_turtle': '低位海龟策略',
         'rsi': 'RSI策略',
         'bollinger': '布林带策略',
-        'support': '支撑位策略'
+        'support': '支撑位策略',
+        'uptrend_pullback': '趋势回调缩量策略'
     };
     
     // 4. 遍历结果，创建表格行

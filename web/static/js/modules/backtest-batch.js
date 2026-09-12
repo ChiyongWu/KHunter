@@ -207,10 +207,12 @@ class BacktestUIManager {
     // 择时策略映射
     const timingStrategyMap = {
       'turtle': '海龟策略',
+      'low_turtle': '低位海龟策略',
       'rsi': 'RSI策略',
       'bollinger': '布林带策略',
       'support': '支撑位策略',
-      'macd_bollinger': '顺势宝'
+      'macd_bollinger': '顺势宝',
+      'uptrend_pullback': '趋势回调缩量策略'
     };
 
     // 添加任务行
@@ -279,12 +281,14 @@ class BacktestUIManager {
     // 择时策略中文名称映射
     const timingStrategyNames = {
       'turtle': '海龟策略',
+      'low_turtle': '低位海龟策略',
       'rsi': 'RSI策略',
       'bollinger': '布林带策略',
       'support': '支撑位策略',
-      'macd_bollinger': '顺势宝'
+      'macd_bollinger': '顺势宝',
+      'uptrend_pullback': '趋势回调缩量策略'
     };
-    
+
     // 获取择时策略名称（优先从结果中获取，其次从任务中获取）
     let timingStrategy = null;
     if (result.timing_strategy) {
@@ -404,12 +408,14 @@ class BacktestUIManager {
     // 择时策略中文名称映射
     const timingStrategyNames = {
       'turtle': '海龟策略',
+      'low_turtle': '低位海龟策略',
       'rsi': 'RSI策略',
       'bollinger': '布林带策略',
       'support': '支撑位策略',
-      'macd_bollinger': '顺势宝'
+      'macd_bollinger': '顺势宝',
+      'uptrend_pullback': '趋势回调缩量策略'
     };
-    
+
     // 获取择时策略名称（优先从结果中获取，其次从任务中获取）
     let timingStrategy = null;
     if (result.timing_strategy) {

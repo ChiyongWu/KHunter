@@ -3,8 +3,10 @@
 
 在执行买入前，检查以下规则，满足任何一个规则不买入：
 1. 前20个交易日内最低点到今日开盘价，涨幅超过50%
-2. 当日开盘涨幅 > 3%
+2. 当日开盘涨跌幅超出 ±4%（涨幅 > 4% 或跌幅 > 4%）
 3. BIAS5 > 7
+4. 近30个交易日内（不含当日）涨停（当日涨幅 > 9.5%）次数少于1次
+   （可通过 BuyPreFilter.CONFIG['enable_limit_up_check'] = False 关闭，用于提升成交率）
 
 使用示例:
     from trading.buy_filter import BuyPreFilter
@@ -33,16 +35,23 @@ class BuyPreFilter:
         'max_rise_from_low': 0.50,  # 50%
         
         # 规则2: 开盘涨幅限制（上限）
-        'max_open_rise': 0.03,  # 3%
+        'max_open_rise': 0.04,  # 4%
         
         # 规则2: 开盘跌幅限制（下限）
-        'min_open_rise': -0.03,  # -3%
+        'min_open_rise': -0.04,  # -4%
         
         # 规则3: BIAS5上限
         'max_bias5': 7.0,
         
         # 辅助参数
         'lookback_days': 20,  # 回溯天数
+        
+        # 规则4: 涨停基因检查（近N交易日至少出现一定次数涨停，不含当日）
+        # 关闭后不再要求"近期有涨停"，可提升成交率（代价：失去强势股过滤）
+        'enable_limit_up_check': True,  # False=关闭涨停基因检测（默认开启，保持原行为）
+        'limit_up_lookback': 30,       # 回溯交易日数
+        'limit_up_threshold': 0.095,   # 涨停判定阈值（当日涨幅 > 9.5%）
+        'limit_up_min_count': 1,       # 至少出现次数
     }
     
     @classmethod
@@ -88,6 +97,14 @@ class BuyPreFilter:
         if not rule2['passed']:
             result['passed'] = False
             result['reason'] = f"规则2-{rule2['reason']}"
+            return result
+        
+        # 规则4: 检查近N交易日涨停基因（不含当日）
+        rule4 = cls._check_limit_up_history(df, stock_code)
+        result['details']['limit_up_history'] = rule4
+        if not rule4['passed']:
+            result['passed'] = False
+            result['reason'] = f"规则4-{rule4['reason']}"
             return result
         
         return result
@@ -171,7 +188,7 @@ class BuyPreFilter:
         计算方法:
         1. 获取今日开盘价和昨日收盘价
         2. 计算 (今日开盘 - 昨日收盘) / 昨日收盘
-        3. 如果涨幅超过3%或跌幅超过-3%，不买入
+        3. 如果涨幅超过4%或跌幅超过-4%，不买入
         """
         max_open_rise = cls.CONFIG['max_open_rise']
         min_open_rise = cls.CONFIG['min_open_rise']
@@ -233,6 +250,82 @@ class BuyPreFilter:
                 'error': str(e)
             }
     
+    @classmethod
+    def _check_limit_up_history(cls, df: pd.DataFrame, stock_code: str) -> Dict:
+        """
+        规则4: 检查近 limit_up_lookback 个交易日（不含当日）内是否出现过涨停
+        
+        涨停判定: 当日涨幅 = (close - 前一日close) / 前一日close > limit_up_threshold
+        若统计到的涨停次数 < limit_up_min_count，则不通过（视为无涨停基因）。
+
+        开关：CONFIG['enable_limit_up_check'] = False 时直接放行（用于提升成交率）。
+        """
+        if not cls.CONFIG.get('enable_limit_up_check', True):
+            return {
+                'passed': True,
+                'reason': '',
+                'value': None,
+                'threshold': 'disabled',
+                'enabled': False,
+            }
+
+        lookback = cls.CONFIG['limit_up_lookback']
+        threshold = cls.CONFIG['limit_up_threshold']
+        min_count = cls.CONFIG['limit_up_min_count']
+        
+        # 数据不足时跳过过滤（与前序规则风格一致）
+        if len(df) < 2:
+            return {
+                'passed': True,
+                'reason': '',
+                'value': None,
+                'threshold': f'>{threshold*100:.1f}%, min={min_count}次',
+            }
+        
+        try:
+            # 按日期升序排列，便于取前一日收盘计算当日涨幅
+            df_sorted = df.sort_values('date', ascending=True).reset_index(drop=True)
+            
+            # 取最近 lookback 个交易日（不含当日，即排除最后一条）
+            window = df_sorted.iloc[-(lookback + 1):-1]
+            if window.empty:
+                return {
+                    'passed': True,
+                    'reason': '',
+                    'value': 0,
+                    'threshold': f'>{threshold*100:.1f}%, min={min_count}次',
+                }
+            
+            # 计算窗口内每日涨幅（用相邻两日收盘）
+            closes = window['close'].values
+            prev_closes = window['close'].shift(1).values
+            limit_up_count = 0
+            for i in range(1, len(closes)):
+                prev = prev_closes[i]
+                if prev and prev > 0:
+                    gain = (closes[i] - prev) / prev
+                    if gain > threshold:
+                        limit_up_count += 1
+            
+            passed = limit_up_count >= min_count
+            reason = '' if passed else f'近{lookback}日涨停{limit_up_count}次(<{min_count}次)'
+            
+            return {
+                'passed': passed,
+                'reason': reason,
+                'value': limit_up_count,
+                'threshold': f'>{threshold*100:.1f}%, min={min_count}次',
+                'window_days': len(window),
+            }
+            
+        except Exception as e:
+            logger.warning(f"规则4检查异常 {stock_code}: {str(e)}")
+            return {
+                'passed': True,
+                'reason': '',
+                'error': str(e),
+            }
+
     @classmethod
     def _check_bias5(cls, df: pd.DataFrame, stock_code: str) -> Dict:
         """
@@ -371,11 +464,11 @@ if __name__ == '__main__':
     # 创建测试数据 - 注意：数据是倒序的（最新在前面）
     dates = pd.date_range(end='2026-05-03', periods=30, freq='D')
     
-    # 测试1: 正常情况 - 应该通过
-    print("\n【测试1】正常情况 - 应该通过")
-    # 目标：前20日最低点到今日涨幅<50%，开盘涨幅<3%，BIAS5<7
-    # 策略：让价格非常稳定，MA5紧贴价格
+    # 测试1: 形态正常（规则1/2/3 均达标），但近30日无涨停 -> 应该不通过（规则4：无涨停基因）
+    print("\n【测试1】形态正常但近30日无涨停 - 应该不通过（规则4：无涨停基因）")
+    # 目标：前20日最低点到今日涨幅<50%，开盘涨跌幅在±4%内，BIAS5<7 —— 规则1/2/3 均达标
     # 数据设计：30天都在10元附近波动，close=10.05，MA5≈10.05，BIAS5≈0
+    # 注意：本组数据近30日无涨停（无涨幅>9.5%的交易日），规则4 不通过，故最终判定为不通过
     
     prices1 = []
     for i in range(30):
@@ -423,10 +516,10 @@ if __name__ == '__main__':
         r = result2['details']['rise_from_low']
         print(f"  详情: 最低点={r.get('min_price')}, 今日开盘={r.get('today_open')}, 涨幅={r.get('value')*100:.1f}%")
     
-    # 测试3: 开盘涨幅超过3% - 应该不通过
-    print("\n【测试3】开盘涨幅超3% - 应该不通过")
-    # 昨天收盘10元，今日开盘10.5元，涨幅5%
-    base_prices3 = [10.5]  # 今天开盘高开5%
+    # 测试3: 开盘涨幅超过4% - 应该不通过
+    print("\n【测试3】开盘涨幅超4% - 应该不通过")
+    # 昨日收盘 = 昨日open(10.0)+0.1 = 10.1；今日开盘10.6 → 涨幅 (10.6-10.1)/10.1 ≈ 4.95% > 4%
+    base_prices3 = [10.6]  # 今天开盘高开约5%
     for i in range(29):
         base_prices3.append(10.0)  # 之前都是10元
     
@@ -446,8 +539,8 @@ if __name__ == '__main__':
         r = result3['details']['open_rise']
         print(f"  详情: 开盘涨幅={r.get('value')*100:.2f}%")
     
-    # 测试4: 开盘跌幅超过-3% - 应该不通过
-    print("\n【测试4】开盘跌幅超-3% - 应该不通过")
+    # 测试4: 开盘跌幅超过-4% - 应该不通过
+    print("\n【测试4】开盘跌幅超-4% - 应该不通过")
     # 昨天收盘10元，今日开盘9.5元，跌幅5%
     base_prices4 = [9.5]  # 今天开盘低开5%
     for i in range(29):
@@ -470,7 +563,9 @@ if __name__ == '__main__':
         print(f"  详情: 开盘涨跌幅={r.get('value')*100:.2f}%")
     
     # 测试5: BIAS5 > 7 - 应该不通过
-    print("\n【测试5】BIAS5 > 7 - 应该不通过")
+    # 注意：本组数据近30日无涨停，规则4 会先于 BIAS5 规则拦截，
+    #      因此本用例实际验证的是“规则4 不通过”，BIAS5 规则在此未被覆盖到
+    print("\n【测试5】BIAS5 > 7 - 应该不通过（实际由规则4先拦截：近30日无涨停）")
     # 构造数据：今日收盘12元，前5日价格在10元附近
     # MA5 ≈ 10.2，BIAS5 = (12-10.2)/10.2*100 ≈ 18% > 7
     # 确保前20日最低点到今日开盘涨幅<50%（最低点=10元，今日开盘=10.1，涨幅=1%）

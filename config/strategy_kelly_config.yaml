@@ -38,6 +38,11 @@ strategies:
     profit_loss_ratio: 3.4
     description: 阻力突破策略
 
+  MainUptrendDipBuyStrategy:
+    win_rate: 0.45
+    profit_loss_ratio: 2.2
+    description: 主升低吸策略
+
   StrongWashWeakToStrongStrategy:
     win_rate: 0.25
     profit_loss_ratio: 3.5
@@ -74,14 +79,24 @@ strategies:
     description: 金三角策略
 
   OversoldReboundStrategy:
-    win_rate: 0.25
-    profit_loss_ratio: 3.5
-    description: 超跌反弹策略（含英文名匹配）
-
-  OversoldRebound:
-    win_rate: 0.25
-    profit_loss_ratio: 3.5
+    win_rate: 0.28
+    profit_loss_ratio: 3.0
     description: 超跌反弹策略
+
+  LowTD9Strategy:
+    win_rate: 0.28
+    profit_loss_ratio: 3.0
+    description: 低位九转策略
+
+  GoldenCrossNotGreenStrategy:
+    win_rate: 0.28
+    profit_loss_ratio: 3.3
+    description: 金叉不绿策略
+
+  LeaderStrategy:
+    win_rate: 0.3
+    profit_loss_ratio: 3.5
+    description: 龙头策略
 
   _default_:
     win_rate: 0.28

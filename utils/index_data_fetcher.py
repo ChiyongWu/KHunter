@@ -22,23 +22,37 @@ INDEX_NAME_MAP = {
     '000905': '中证500',
     '000001': '上证指数',
     '000300': '沪深300',
+    '000985': '中证全指',
 }
 
 
 class IndexDataFetcher:
     """指数数据获取器 - 获取指数历史数据"""
     
-    def __init__(self, cache_dir: str = 'data/risk_cache'):
+    def __init__(self, cache_dir: str = 'data/risk_cache', ts_code: str = None):
         """
         初始化指数数据获取器
         
         参数：
             cache_dir: 缓存目录路径
+            ts_code: 显式指定指数代码（如 '000985.CSI'），优先级高于配置文件；
+                     不传时沿用 config/risk_config.yaml 的 risk.index_code
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_manager = CacheManager(str(self.cache_dir))
         
+        # 显式指定指数代码时优先使用（如全A指数ADX需要中证全指 000985.CSI）
+        if ts_code:
+            parts = ts_code.split('.') if '.' in ts_code else (ts_code, 'SH')
+            self.index_code = parts[0]
+            self.index_suffix = parts[1]
+            self.ts_code = f'{self.index_code}.{self.index_suffix}'
+            self.index_name = INDEX_NAME_MAP.get(self.index_code, f'指数({self.index_code})')
+            logger.info(
+                f"IndexDataFetcher 初始化完成，指数: {self.index_name}({self.ts_code})【外部指定】")
+            return
+
         # 从配置文件读取指数代码
         try:
             config_loader = RiskConfigLoader()

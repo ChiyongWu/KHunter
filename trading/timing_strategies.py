@@ -23,7 +23,10 @@ class TimingResult:
         self.indicators = {}       # 指标值
         self.message = ""          # 信号说明
         self.trade_type = ""       # 交易类型：buy, add, sell, reduce
-        self.add_count = 0         # 加仓次数（用于海龟等加仓策略）
+        # 加仓后的【累计总次数】（1-based）：首次加仓=1，第2次=2，...，上限由各策略自定
+        # 语义必须与 position['add_count'] 一致（回测引擎与实盘运行器均据此跟踪加仓进度），
+        # 非加仓信号保持 0。策略产生 trade_type='add' 时必须设置该值。
+        self.add_count = 0
 
 
 class TimingStrategy(ABC):
@@ -161,6 +164,10 @@ class TimingStrategyFactory:
             logger.info("创建支撑位策略实例")
             from trading.support_strategy import SupportStrategy
             return SupportStrategy(config)
+        elif strategy_name == "uptrend_pullback":
+            logger.info("创建趋势回调缩量策略实例")
+            from trading.uptrend_pullback_strategy import UptrendPullbackStrategy
+            return UptrendPullbackStrategy(config)
         elif strategy_name == "macd_bollinger":
             logger.info("创建顺势宝策略实例")
             from trading.macd_bollinger_strategy import ShunShiBaoStrategy

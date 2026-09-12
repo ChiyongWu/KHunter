@@ -157,7 +157,7 @@ class TechnicalScorer:
         # 记录初始化日志
         logger.info("技术面评分器初始化完成")
         # 记录使用的 DBManager 实例
-        logger.info(f"使用的 DBManager 实例: {id(self.db)}")
+        logger.debug(f"使用的 DBManager 实例: {id(self.db)}")
 
     def _query_hit_strategies(
         self, stock_code: str, score_date: str
@@ -173,36 +173,21 @@ class TechnicalScorer:
         """
         # 统一日期格式为 YYYY-MM-DD（数据库中存储格式）
         formatted_date = self._format_date(score_date)
-        logger.info(
-            f"查询策略命中情况: stock_code={stock_code}, date={formatted_date}"
-        )
 
         # 直接使用 SQLite 连接查询，避免 DBManager 实例之间的冲突
         import sqlite3
         from utils.db_config import get_db_path
-        
+
         strategies = []
         try:
-            # 获取数据库路径
             db_path = get_db_path()
-            logger.info(f"使用数据库路径: {db_path}")
-            
+
             # 创建新的 SQLite 连接
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            
-            # 先查询所有记录，验证数据是否存在
-            test_sql = """
-                SELECT *
-                FROM stock_selection_record
-                WHERE stock_code = ?
-            """
-            cursor.execute(test_sql, (stock_code,))
-            test_results = cursor.fetchall()
-            logger.info(f"测试查询结果: {test_results}")
-            
+
             # 从 stock_selection_record 表查询命中策略
-            # 使用selection_date限制日期，确保只查询指定日期的策略
+            # 使用 selection_date 限制日期，确保只查询指定日期的策略
             sql = """
                 SELECT DISTINCT strategy_name
                 FROM stock_selection_record
@@ -210,30 +195,29 @@ class TechnicalScorer:
                   AND selection_date = ?
                   AND is_active = 1
             """
-            # 执行查询
-            logger.info(f"执行查询: {sql}, 参数: ({stock_code}, {formatted_date})")
             cursor.execute(sql, (stock_code, formatted_date))
-            
+
             # 获取查询结果
             results = cursor.fetchall()
-            logger.info(f"查询结果: {results}")
-            
+
             # 提取策略名称列表
             strategies = [
                 row[0]
                 for row in results
                 if row[0]
             ]
-            
+
             # 关闭连接
             conn.close()
+
+            # 详细过程日志降级为 debug（避免逐股刷屏）
+            logger.debug(
+                f"股票 {stock_code} 在 {formatted_date} 命中 "
+                f"{len(strategies)} 个策略: {strategies}（DB: {db_path}）"
+            )
         except Exception as e:
             logger.error(f"查询策略命中情况失败: {e}")
-        
-        # 记录查询结果
-        logger.info(
-            f"股票 {stock_code} 在 {formatted_date} 命中 {len(strategies)} 个策略: {strategies}"
-        )
+
         return strategies
 
     def _format_date(self, date_str: str) -> str:
@@ -492,6 +476,7 @@ class TechnicalScorer:
                             'TrendAccelerationInflectionStrategy': '趋势加速拐点',
                             'TrendResonanceReversalStrategy': '趋势共振反转策略',
                             'ResistanceBreakoutStrategy': '阻力位突破策略',
+                            'MainUptrendDipBuyStrategy': '主升低吸策略',
                             'WBottomStrategy': 'W底策略',
                             'MultiGoldenCrossStrategy': '多金叉共振策略',
                             'MorningStarStrategy': '启明星策略',

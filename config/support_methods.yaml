@@ -37,6 +37,11 @@ strategies:
     support_method: key_close_5
     description: 突破关键阻力位，使用关键日收盘价下跌5%作为支撑位
 
+  # 主升低吸策略
+  MainUptrendDipBuyStrategy:
+    support_method: key_close_5
+    description: 一拉二调后贴紧突破R，使用关键日收盘价下跌5%作为支撑位
+
   # 强势洗盘弱转强策略
   StrongWashWeakToStrongStrategy:
     support_method: key_close
@@ -87,6 +92,21 @@ strategies:
     support_method: ma20
     description: 金三角策略，使用20日均线作为支撑位
 
+  # 超跌反弹策略
+  OversoldReboundStrategy:
+    support_method: t_day_low
+    description: 超跌反弹策略，使用T日（选股日）最低价作为支撑位
+
+  # 低位九转策略
+  LowTD9Strategy:
+    support_method: t_day_low
+    description: 低位九转策略，使用T日（选股日）最低价作为支撑位
+
+  # 龙头策略
+  LeaderStrategy:
+    support_method: key_open
+    description: 龙头策略，使用关键日开盘价作为支撑位
+
 # 默认支撑位计算方法（当策略未配置时使用）
 default_support_method: ma20
 
@@ -95,6 +115,11 @@ support_methods:
   ma20:
     name: 20日均线
     description: 使用20日均线作为支撑位
+    requires_key_date: false
+
+  t_day_low:
+    name: T日最低价
+    description: 使用T日（选股日/selection_date当日）最低价作为支撑位
     requires_key_date: false
     
   key_close_5:

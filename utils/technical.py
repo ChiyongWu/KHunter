@@ -228,6 +228,88 @@ def RSI(df, period=14):
     return result
 
 
+def ADX(df, period=14):
+    """
+    ADX 指标（DMI 体系，Wilder 平滑）
+
+    计算口径：
+        TR   = max(high-low, |high-REF(close,1)|, |low-REF(close,1)|)
+        +DM  = 向上动量（high 抬升幅度 > low 下降幅度且为正）
+        -DM  = 向下动量（low 下降幅度 > high 抬升幅度且为正）
+        +DI  = 100 * SMA(+DM, N, 1) / SMA(TR, N, 1)
+        -DI  = 100 * SMA(-DM, N, 1) / SMA(TR, N, 1)
+        DX   = 100 * |(+DI)-(-DI)| / ((+DI)+(-DI))
+        ADX  = SMA(DX, N, 1)        # SMA(X,N,1) 等价于 Wilder 平滑
+
+    常用判读：ADX < 20 无趋势（震荡）；20~25 趋势萌芽；25~50 趋势明确；> 50 强趋势。
+    配合 +DI/-DI 判断方向：+DI > -DI 为多头方向，反之为空头方向。
+
+    参数：
+        df: 含 date/high/low/close 的 DataFrame（支持倒序，最新在前）
+        period: 周期，默认 14
+
+    返回：
+        DataFrame，含 adx / plus_di / minus_di 三列，index 与入参对齐
+    """
+    if df is None or df.empty:
+        return pd.DataFrame({'adx': [], 'plus_di': [], 'minus_di': []},
+                            index=df.index if df is not None else [])
+
+    # 检测数据顺序（项目内K线多为倒序：最新在前）
+    try:
+        is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+    except (IndexError, KeyError):
+        is_descending = False
+
+    if is_descending:
+        df_calc = df.iloc[::-1].copy().reset_index(drop=True)
+    else:
+        df_calc = df.copy().reset_index(drop=True)
+
+    high = df_calc['high'].astype(float)
+    low = df_calc['low'].astype(float)
+    close = df_calc['close'].astype(float)
+
+    prev_close = close.shift(1)
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    # 方向动量：只保留"更大的那一侧"，两侧相等则都为 0
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0).fillna(0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0).fillna(0.0)
+
+    # 真实波幅
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1
+    ).max(axis=1).fillna(0.0)
+
+    # 统一转为数值类型，避免 SMA 返回 object dtype 导致后续运算异常
+    smooth_tr = pd.to_numeric(SMA(tr, period, 1), errors='coerce')
+    smooth_plus = pd.to_numeric(SMA(plus_dm, period, 1), errors='coerce')
+    smooth_minus = pd.to_numeric(SMA(minus_dm, period, 1), errors='coerce')
+
+    # 分母为 0 时（如开盘一字板无波幅）置 NaN，再填 0，避免除零
+    safe_tr = smooth_tr.replace(0, float('nan'))
+    plus_di = (100 * smooth_plus / safe_tr).fillna(0.0).astype(float)
+    minus_di = (100 * smooth_minus / safe_tr).fillna(0.0).astype(float)
+
+    di_sum = (plus_di + minus_di).replace(0, float('nan'))
+    dx = (100 * (plus_di - minus_di).abs() / di_sum).fillna(0.0).astype(float)
+    adx = pd.to_numeric(SMA(dx, period, 1), errors='coerce')
+
+    result = pd.DataFrame({
+        'adx': adx,
+        'plus_di': plus_di,
+        'minus_di': minus_di,
+    })
+
+    if is_descending:
+        result = result.iloc[::-1].reset_index(drop=True)
+    result.index = df.index
+    return result
+
+
 def calculate_zhixing_trend(df, m1=14, m2=28, m3=57, m4=114):
     """
     计算知行趋势线指标

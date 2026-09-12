@@ -1,4 +1,206 @@
 strategies:
+  BowlReboundStrategy:
+    color: '#8b5cf6'
+    description: 圆弧底（碗形反弹）：股价回落到短期趋势线与多空线之间（碗中），趋势未坏且处于低位
+    display_name: 圆弧底
+    icon: 🥣
+    param_details:
+      neck_lookback:
+        default: 60
+        description: 颈线取值窗口：近 N 日最高收盘价（真突破基准）
+        display_name: 颈线窗口(日)
+        group: 形态窗口
+        max: 250
+        min: 20
+        type: int
+      min_cycle_days:
+        default: 30
+        description: 圆弧最小周期（颈线距今至少多少个交易日）
+        display_name: 圆弧最小周期(日)
+        group: 形态窗口
+        max: 120
+        min: 10
+        type: int
+      bottom_min_days:
+        default: 5
+        description: 碗底最低点距今日的最少交易日（右侧回升段长度）
+        display_name: 碗底起始(日)
+        group: 形态窗口
+        max: 60
+        min: 0
+        type: int
+      min_bottom_days:
+        default: 5
+        description: 碗底平台期最少交易日数（排除尖底/V形）
+        display_name: 碗底平台(日)
+        group: 圆弧平滑
+        max: 60
+        min: 1
+        type: int
+      bottom_flat_tol_pct:
+        default: 5.0
+        description: 碗底"平"的容差（收盘 ≤ 碗底×(1+tol%)即视为在底部）
+        display_name: 碗底容差(%)
+        group: 圆弧平滑
+        max: 20.0
+        min: 1.0
+        type: float
+      min_curve_r2:
+        default: 0.0
+        description: 整段二次拟合 R² 下限（0=不限；圆度改由"分段 R²"判断）
+        display_name: 整段R²下限
+        group: 圆弧平滑
+        max: 1.0
+        min: 0.0
+        type: float
+      max_curve_r2:
+        default: 0.0
+        description: 整段二次拟合 R² 上限（0=不限）
+        display_name: 整段R²上限
+        group: 圆弧平滑
+        max: 1.0
+        min: 0.0
+        type: float
+      min_segment_r2:
+        default: 0.6
+        description: 【分段圆度】左段(颈线→碗底)/右段(碗底→今日) 各自拟合 R² 的下限（越大越平滑单调）
+        display_name: 分段R²下限
+        group: 圆弧平滑
+        max: 1.0
+        min: 0.0
+        type: float
+      max_segment_r2:
+        default: 0.0
+        description: 【分段圆度】左段/右段 各自拟合 R² 的上限（0=不限；一般无需限制）
+        display_name: 分段R²上限
+        group: 圆弧平滑
+        max: 1.0
+        min: 0.0
+        type: float
+      segment_r2_agg:
+        default: both
+        description: 两段R²的合并方式：both=两段都要满足 / min=取较小者 / mean=取均值
+        display_name: 分段R²合并方式
+        group: 圆弧平滑
+        type: str
+      max_daily_change_pct:
+        default: 3.0
+        description: 形态段内日均|涨跌幅|上限（%），排除陡V/暴涨暴跌
+        display_name: 日均波动上限(%)
+        group: 圆弧平滑
+        max: 10.0
+        min: 0.5
+        type: float
+      bottom_max_days:
+        default: 30
+        description: 碗底距今日的最多交易日
+        display_name: 碗底结束(日)
+        group: 形态窗口
+        max: 120
+        min: 5
+        type: int
+      breakout_max_pct:
+        default: 5.0
+        description: 突破幅度上限（%），收盘相对短期趋势线，防止追高
+        display_name: 突破幅度上限(%)
+        group: 突破条件
+        max: 15.0
+        min: 0.0
+        type: float
+      min_drop_pct:
+        default: 8.0
+        description: 颈线到碗底的最小回落幅度（%），碗深下限
+        display_name: 碗深下限(%)
+        group: 碗形条件
+        max: 60.0
+        min: 0.0
+        type: float
+      max_drop_pct:
+        default: 60.0
+        description: 颈线到碗底的最大回落幅度（%），碗深上限
+        display_name: 碗深上限(%)
+        group: 碗形条件
+        max: 100.0
+        min: 10.0
+        type: float
+      max_rise_from_bottom_pct:
+        default: 30.0
+        description: 碗底到今日的累计涨幅上限（%），涨幅过大即V形反弹非圆弧
+        display_name: 底→今涨幅上限(%)
+        group: 碗形条件
+        max: 100.0
+        min: 5.0
+        type: float
+      max_wave_pct:
+        default: 10.0
+        description: 形态段内允许的最大反向波动（反弹/回调，%）
+        display_name: 最大反向波动(%)
+        group: 圆弧平滑
+        max: 50.0
+        min: 1.0
+        type: float
+      max_slope_ratio:
+        default: 0.02
+        description: 归一化斜率(拟合斜率÷段内均价)上限，即"每日平均涨跌幅"，与股价水平无关；0=不限制
+        display_name: 倾斜角度上限(/天)
+        group: 圆弧平滑
+        max: 0.2
+        min: 0.0
+        type: float
+      lead_in_days:
+        default: 20
+        description: 反弹观察窗口向前延伸的交易日数（覆盖颈线之前，防"急涨冲高后见顶"）
+        display_name: 颈线前延伸(日)
+        group: 圆弧平滑
+        max: 60
+        min: 0
+        type: int
+      volume_ratio_min:
+        default: 1.2
+        description: 量比下限（当日量/均量），突破需放量确认
+        display_name: 量比下限
+        group: 量能条件
+        max: 5.0
+        min: 0.5
+        type: float
+      require_two_phase:
+        default: true
+        description: 要求前半段下跌、后半段上升（以碗底为界的两段结构）
+        display_name: 两段结构(前跌后升)
+        group: 圆弧平滑
+        type: bool
+      require_prev_below:
+        default: true
+        description: 要求前一日收盘仍在颈线下方（今日刚突破）
+        display_name: 要求前一日在颈线下
+        group: 突破条件
+        type: bool
+    params:
+      bottom_flat_tol_pct: 5.0
+      bottom_max_days: 60
+      bottom_min_days: 5
+      breakout_max_pct: 5.0
+      enable_volume_filter: true
+      neck_lookback: 60
+      lead_in_days: 20
+      max_daily_change_pct: 3.0
+      max_drop_pct: 60.0
+      max_rise_from_bottom_pct: 30.0
+      max_slope_ratio: 0.02
+      max_wave_pct: 10.0
+      min_bottom_days: 5
+      max_curve_r2: 0.0
+      min_curve_r2: 0.0
+      max_segment_r2: 0.0
+      min_segment_r2: 0.6
+      segment_r2_agg: both
+      min_cycle_days: 30
+      min_drop_pct: 8.0
+      require_prev_below: true
+      require_two_phase: true
+      vol_avg_days: 5
+      volume_ratio_min: 1.0
+    support_method: low
   BottomTrendInflectionStrategy:
     color: '#10b981'
     description: 识别深度下跌后的底部反转拐点，通过深度下跌、MACD底背离、放量反弹的组合判断
@@ -1216,6 +1418,154 @@ strategies:
         min: 3
         type: int
     support_method: ma20
+  MainUptrendDipBuyStrategy:
+    color: '#10b981'
+    description: 主升途中回调结束后，放量长阳贴紧突破回调中最近反弹高点R（一拉→二调→突破R）
+    display_name: 主升低吸策略
+    icon: 🎣
+    param_details:
+      breakout_max_pct:
+        default: 2.0
+        description: 突破R的幅度上限（%）；贴紧R突破最优，不宜放宽到5%以上
+        display_name: 突破幅度上限(%)
+        group: 突破条件
+        max: 10.0
+        min: 0.0
+        type: float
+      ma_period:
+        default: 5
+        description: 均线周期（选股日收盘价需站上该均线，含选股日收盘）
+        display_name: 均线周期
+        group: 均线与其他
+        max: 60
+        min: 0
+        type: int
+      min_body_pct:
+        default: 5.0
+        description: 突破日阳线实体下限（%）
+        display_name: 阳线实体下限(%)
+        group: 突破条件
+        max: 20.0
+        min: 1.0
+        type: float
+      min_data_len:
+        default: 106
+        description: 最小K线长度（= recent_days + rally_low_lookback + 1）
+        display_name: 最小数据长度
+        group: 均线与其他
+        max: 300
+        min: 60
+        type: int
+      pullback_gap_pct:
+        default: 8.0
+        description: 二调回撤动态上限 = 一拉涨幅 - 该值（%）；0=关闭该约束
+        display_name: 回调动态余量(%)
+        group: 二调条件
+        max: 30.0
+        min: 0.0
+        type: float
+      pullback_min_pct:
+        default: 18.0
+        description: 二调回撤下限（%）；12~25为最佳区间
+        display_name: 回调下限(%)
+        group: 二调条件
+        max: 60.0
+        min: 0.0
+        type: float
+      rally_low_lookback:
+        default: 45
+        description: L的取值窗口（H之前多少个交易日内取最低价）
+        display_name: 起始低点窗口(日)
+        group: 一拉条件
+        max: 120
+        min: 5
+        type: int
+      rally_max_pct:
+        default: 100.0
+        description: 一拉涨幅上限（%）；100为极端涨幅兜底，0=不限制
+        display_name: 一拉上限(%)
+        group: 一拉条件
+        max: 300.0
+        min: 0.0
+        type: float
+      rally_min_pct:
+        default: 30.0
+        description: 一拉涨幅下限（%）；30~40区间，≥35收益更优但信号更少
+        display_name: 一拉下限(%)
+        group: 一拉条件
+        max: 100.0
+        min: 10.0
+        type: float
+      recent_days:
+        default: 60
+        description: 近期窗口的定义，H只在该窗口（近N个交易日）内寻找
+        display_name: 近期窗口(日)
+        group: 一拉条件
+        max: 250
+        min: 20
+        type: int
+      require_close_above_ma:
+        default: true
+        description: 是否要求选股日收盘价站上均线
+        display_name: 要求站上均线
+        group: 均线与其他
+        type: bool
+      require_p_above_l:
+        default: true
+        description: 二调低点P必须高于起始低点L（排除一拉被全额回吐的形态）
+        display_name: 回调不破起始低点
+        group: 二调条件
+        type: bool
+      swing_window:
+        default: 2
+        description: swing high识别窗口（前后各N根最高价均更低）
+        display_name: 高低点窗口(根)
+        group: 均线与其他
+        max: 10
+        min: 1
+        type: int
+      volume_ma_period:
+        default: 5
+        description: 量比均量周期（不含今日）
+        display_name: 均量周期
+        group: 突破条件
+        max: 60
+        min: 3
+        type: int
+      volume_ratio:
+        default: 1.8
+        description: 量比下限（≥2.0更优）
+        display_name: 量比下限
+        group: 突破条件
+        max: 5.0
+        min: 1.0
+        type: float
+    param_groups:
+    - description: 一拉（近期最高点H与起始低点L的涨幅区间）
+      name: 一拉条件
+    - description: 二调（H之后的回撤幅度）
+      name: 二调条件
+    - description: 突破日的实体、幅度与量能
+      name: 突破条件
+    - description: 均线过滤与其他
+      name: 均线与其他
+    params:
+      breakout_max_pct: 2.0
+      ma_period: 5
+      min_body_pct: 5.0
+      min_data_len: 106
+      pullback_gap_pct: 8.0
+      pullback_min_pct: 18.0
+      rally_low_lookback: 45
+      rally_max_pct: 100.0
+      rally_min_pct: 30.0
+      recent_days: 60
+      require_close_above_ma: true
+      require_p_above_l: true
+      swing_window: 2
+      volume_ma_period: 5
+      volume_ratio: 1.8
+    support_method: key_close_5
   MorningStarStrategy:
     color: '#f59e0b'
     description: 识别三根K线启明星形态，通过长阴线、小实体、长阳线的组合判断底部反转
@@ -1735,68 +2085,82 @@ strategies:
     icon: 🚪
     param_details:
       breakout_ratio:
-        default: -0.02
-        description: 突破阈值，-0.02表示达到阻力位98%即视为突破
+        default: 0.0
+        description: 突破阈值，0.0=今日收盘须严格超过平台高点；-0.02=允许到98%
         display_name: 突破阈值
         group: 突破参数
         max: 0.05
         min: -0.05
         type: float
+      enable_ma_bullish:
+        default: false
+        description: 是否要求均线多头排列（MA5>MA10>MA20）；窄幅震荡常缠绕，默认关闭
+        display_name: 要求均线多头
+        group: 其他参数
+        type: bool
       lookback_days:
-        default: 60
-        description: 回溯天数，用于计算前N日最高价作为阻力位
-        display_name: 回溯天数
+        default: 70
+        description: 平台（阻力位）回溯天数（单位：交易日）
+        display_name: 平台天数(交易日)
         group: 阻力位参数
-        max: 120
+        max: 250
         min: 30
         type: int
       max_market_cap:
         default: 1000
-        description: 最大市值（亿元）
+        description: 最大市值（亿元，当前未被策略使用）
         display_name: 最大市值(亿)
         group: 其他参数
         max: 5000
         min: 100
         type: int
-      max_search_days:
-        default: 5
-        description: 最大搜索天数，在最近N天内搜索突破日
-        display_name: 搜索天数
-        group: 突破参数
-        max: 20
-        min: 5
-        type: int
+      max_range_pct:
+        default: 25.0
+        description: 平台振幅上限（%）：(前N日最高价-最低价)/最低价，越小越"窄幅"
+        display_name: 平台振幅上限(%)
+        group: 阻力位参数
+        max: 60.0
+        min: 5.0
+        type: float
       min_change_pct:
-        default: 0.08
-        description: 突破日最小涨幅，0.08表示8%
+        default: 0.05
+        description: 今日最小涨幅，0.05 表示需 > 5%
         display_name: 最小涨幅(%)
         group: 突破参数
         max: 0.15
-        min: 0.05
+        min: 0.03
         type: float
       min_market_cap:
         default: 20
-        description: 最小市值（亿元）
+        description: 最小市值（亿元，当前未被策略使用）
         display_name: 最小市值(亿)
         group: 其他参数
         max: 100
         min: 10
         type: int
+      min_peak_days:
+        default: 10
+        description: 平台最高点距今日的最少交易日数，排除近日已冲高/已突破的股票（0=不限制）
+        display_name: 最高点最小间隔(日)
+        group: 阻力位参数
+        max: 60
+        min: 0
+        type: int
       volume_ma_period:
         default: 5
-        description: 成交量均值周期，用于计算成交量倍数
+        description: 成交量均值周期，用于计算放量倍数
         display_name: 成交量周期
         group: 成交量参数
         max: 20
         min: 5
         type: int
       volume_ratio:
-        default: 2.0
-        description: 成交量倍数，突破日成交量需要是成交量均值的倍数
+        default: 1.8
+        description: 放量倍数，今日成交量需 ≥ 前N日均量 × 该倍数
         display_name: 成交量倍数
         group: 成交量参数
         max: 5.0
-        min: 1.5
+        min: 1.0
         type: float
     param_groups:
     - description: 控制阻力位计算的参数
@@ -1808,12 +2172,14 @@ strategies:
     - description: 其他控制参数
       name: 其他参数
     params:
-      breakout_ratio: -0.02
-      lookback_days: 60
+      breakout_ratio: 0.0
+      enable_ma_bullish: false
+      lookback_days: 70
       max_market_cap: 1000
-      max_search_days: 5
-      min_change_pct: 0.08
+      max_range_pct: 25.0
+      min_change_pct: 0.05
       min_market_cap: 20
+      min_peak_days: 10
       volume_ma_period: 5
       volume_ratio: 1.8
     support_method: key_close_5

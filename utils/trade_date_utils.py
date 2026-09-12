@@ -113,7 +113,19 @@ def is_trading_day(date_str: str) -> bool:
     if _trading_calendar_cache and display_str in _trading_calendar_cache:
         return True
     
-    # 2. 缓存未命中（缓存为空 或 日期超出缓存范围），回退到 Tushare 查询
+    # 1.5 周末快速判断：缓存只存交易日，周六/周日永远不会命中缓存，
+    # 若直接回退 Tushare 会在离线（网络异常）时抛 RuntimeError 导致任务失败；
+    # 周末必然是非交易日，直接返回 False，保证周末/节假日场景完全离线可用
+    try:
+        check_date = datetime.strptime(date_str_fmt, '%Y%m%d')
+        if check_date.weekday() >= 5:  # 5=周六, 6=周日
+            logger.debug(f"{display_str} 是周末，直接判定为非交易日")
+            return False
+    except ValueError:
+        # 日期格式异常时交由后续 Tushare 逻辑处理（调用方应保证格式正确）
+        pass
+
+    # 2. 缓存未命中且非周末（缓存为空、工作日或节假日），回退到 Tushare 查询
     try:
         import tushare as ts
         import json

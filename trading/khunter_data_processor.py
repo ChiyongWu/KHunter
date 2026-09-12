@@ -461,7 +461,8 @@ class KHunterDataProcessor:
                 'turtle': '海龟策略',
                 'rsi': 'RSI策略',
                 'bollinger': '布林带策略',
-                'support': '支撑位策略'
+                'support': '支撑位策略',
+                'uptrend_pullback': '趋势回调缩量策略'
             }.get(timing_strategy_name, timing_strategy_name)
             
             # 10. 计算买入区间（当前价格±1%）

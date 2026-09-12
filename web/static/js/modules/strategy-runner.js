@@ -278,16 +278,26 @@ const StrategyRunnerModule = {
         taskCount.textContent = this.tasks.length;
         startBtn.disabled = false;
         
-        taskBody.innerHTML = this.tasks.map((task, index) => `
+        taskBody.innerHTML = this.tasks.map((task, index) => {
+            // 择时策略中文名称映射
+            const timingStrategyMap = {
+                'turtle': '海龟策略',
+                'low_turtle': '低位海龟策略',
+                'rsi': 'RSI策略',
+                'bollinger': '布林带策略',
+                'support': '支撑位策略',
+                'uptrend_pullback': '趋势回调缩量策略'
+            };
+            return `
             <tr>
                 <td>${index + 1}</td>
                 <td style="word-break:break-all;">${task.selection_strategy_display_name || task.selection_strategy}</td>
-                <td>${task.timing_strategy_display_name || task.timing_strategy}</td>
+                <td>${timingStrategyMap[task.timing_strategy] || task.timing_strategy_display_name || task.timing_strategy}</td>
                 <td style="text-align:center;">
                     <button class="btn btn-sm btn-outline-danger remove-task-btn" data-index="${index}">删除</button>
                 </td>
             </tr>
-        `).join('');
+        `}).join('');
     },
     
     // 检查策略运行器状态

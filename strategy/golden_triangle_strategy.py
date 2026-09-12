@@ -88,12 +88,12 @@ class GoldenTriangleStrategy(BaseStrategy):
         ]
         if self.params.get('ma60_rise_required', True):
             criteria.append(
-                f"8. 60日均线向上：选股日MA{self.params['super_long_period']} > 前一交易日MA{self.params['super_long_period']}"
+                f"6. 60日均线向上：选股日MA{self.params['super_long_period']} > 前一交易日MA{self.params['super_long_period']}"
             )
         return criteria
 
     def quick_filter(self, df):
-        """快速过滤：检查数据是否足够并进行涨幅过滤"""
+        """快速过滤：仅检查数据量是否足够（已去除涨幅过滤）"""
         if df is None or df.empty:
             return False
         
@@ -101,27 +101,6 @@ class GoldenTriangleStrategy(BaseStrategy):
         min_length = max(int(self.params['super_long_period']), 60)
         if len(df) < min_length:
             return False
-        
-        # 获取C点涨幅阈值作为快速过滤标准
-        min_gain = float(self.params.get('c_cross_min_gain', 0.01))
-        
-        # 今日涨幅过滤：必须满足最小涨幅要求
-        if len(df) >= 2:
-            # 检查日期顺序
-            if str(df['date'].iloc[0]) > str(df['date'].iloc[1]):
-                # 倒序排列
-                latest = df.iloc[0]
-                prev_close = df.iloc[1]['close']
-            else:
-                # 正序排列
-                latest = df.iloc[-1]
-                prev_close = df.iloc[-2]['close']
-            
-            if prev_close > 0:
-                today_gain = (latest['close'] - prev_close) / prev_close
-                # 涨幅 >= c_cross_min_gain（默认1%）
-                if today_gain < min_gain:
-                    return False
         
         return True
 
@@ -150,13 +129,17 @@ class GoldenTriangleStrategy(BaseStrategy):
         if ac_interval_days > int(self.params['ac_interval']):
             return []
 
+        # 记录C点涨幅与量能比（用于展示与过滤）
         c_day_data = df.iloc[c_idx]
         c_gain = c_day_data['gain'] if not pd.isna(c_day_data['gain']) else 0
+        c_volume_ratio = c_day_data['volume'] / c_day_data['volume_ma5'] \
+            if c_day_data['volume_ma5'] > 0 else 0
+
+        # C点涨幅限制：C点当日涨幅需达到最小阈值（资金力度确认）
         if c_gain < float(self.params['c_cross_min_gain']):
             return []
 
-        c_volume_ratio = c_day_data['volume'] / c_day_data['volume_ma5'] \
-            if c_day_data['volume_ma5'] > 0 else 0
+        # C点量能限制：C点当日成交量/MA5成交量需达到最小量能比（放量确认）
         if c_volume_ratio < float(self.params['c_cross_min_volume_ratio']):
             return []
 

@@ -862,11 +862,18 @@ class StrategyRunner:
             strategy = self.strategy_registry.get_strategy(strategy_name)
         strategy_display_name = strategy.name if strategy else strategy_name
         
+        # 入池规则：简化模式下评分器只判一票否决（跳过所有维度打分）
+        from trading.pool_entry_rules import resolve_pool_entry_simplified
+
+        _simplified = resolve_pool_entry_simplified(
+            getattr(self, 'config', None) or {}, self._load_engine_config())
+
         # 使用回测评分器进行批量评分
         scored_stocks = self.score_calculator.calculate_batch_scores(
             stocks=stocks,
             score_date=current_date,
-            strategy_name=strategy_display_name
+            strategy_name=strategy_display_name,
+            simplified=_simplified
         )
         
         return scored_stocks
@@ -921,11 +928,14 @@ class StrategyRunner:
         for stock in scored_stocks:
             logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 综合评分={stock['score']}，否决标志={stock.get('veto_flag', False)}")
         
-        # 筛选：去除否决票且评分达标
-        candidate_stocks = [
-            stock for stock in scored_stocks 
-            if not stock.get('veto_flag', False) and stock['score'] >= score_threshold
-        ]
+        # 筛选：入池规则（与回测共用，见 trading/pool_entry_rules.py）
+        from trading.pool_entry_rules import filter_candidates, resolve_pool_entry_simplified
+
+        _simplified = resolve_pool_entry_simplified(
+            getattr(self, 'config', None) or {}, self._load_engine_config())
+        candidate_stocks = filter_candidates(scored_stocks, score_threshold, _simplified)
+        logger.info("【入池规则】" + ("简化：只剔除一票否决"
+                                     if _simplified else f"标准：评分>={score_threshold}"))
         
         logger.info(f"\n筛选后待买入股票数: {len(candidate_stocks)}")
         if candidate_stocks:
@@ -987,7 +997,7 @@ class StrategyRunner:
         
         return 0.0
     
-    def _check_pool_removal(self, current_date: str) -> List[Dict]:
+    def _check_pool_removal(self, current_date: str, held_codes=None) -> List[Dict]:
         """检查股票池中需要移除的股票
         
         移除条件：
@@ -1010,6 +1020,12 @@ class StrategyRunner:
         
         removed = []
         remaining = []
+
+        # 持仓代码集合（缺省取当前实盘持仓）：**持仓中的候选一律不移除**
+        if held_codes is None:
+            held_codes = set((self.portfolio or {}).keys())
+        else:
+            held_codes = set(held_codes)
         
         # 获取前一个交易日
         prev_date = get_previous_trading_day(current_date)
@@ -1024,6 +1040,13 @@ class StrategyRunner:
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
             strategy_name = candidate.get('strategy_name', '')
+
+            # ===== 持仓股不移除（2026-09-11）：持仓中的候选一律保留 =====
+            if stock_code in held_codes:
+                remaining.append(candidate)
+                logger.info(f"【保留】{current_date} {stock_code} {stock_name}: "
+                            f"当前持仓中，不参与移除判断")
+                continue
 
             # ========== 更新过期冷却状态 ==========
             # 调用 _check_cool_down 更新冷却状态，如果冷却期已过期会自动重置
@@ -1431,6 +1454,99 @@ class StrategyRunner:
             import traceback
             logger.error(traceback.format_exc())
             return self._DEFAULT_CONFIG.copy()
+    
+    def _load_engine_config(self) -> Dict:
+        """加载回测引擎行为配置（config/backtest_engine_config.yaml）
+        
+        与回测引擎共用同一配置文件，保证回测与实盘的开关（如涨停基因检测）语义一致。
+        路径基于文件绝对路径推导，不依赖进程 cwd（避免服务启动时配置加载失败）；
+        使用实例级缓存避免重复读取。
+        
+        Returns:
+            引擎配置字典；文件缺失或读取失败时返回空字典，由调用方取默认值
+        """
+        if getattr(self, '_engine_config_cache', None) is not None:
+            return self._engine_config_cache
+        
+        config_path = Path(__file__).resolve().parent.parent / "config" / "backtest_engine_config.yaml"
+        
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    yaml_config = yaml.safe_load(f) or {}
+                self._engine_config_cache = yaml_config
+                logger.info(
+                    f"加载回测引擎配置成功（{config_path}）: "
+                    f"enable_limit_up_check="
+                    f"{yaml_config.get('enable_limit_up_check', True)}")
+                return yaml_config
+            except Exception as e:
+                logger.warning(f"加载回测引擎配置失败，使用默认值: {str(e)}")
+        else:
+            logger.warning(f"回测引擎配置文件不存在: {config_path}，使用默认值")
+        
+        self._engine_config_cache = {}
+        return self._engine_config_cache
+    
+    # 买入执行方式默认配置（与回测引擎 BacktestEngine.DEFAULT_BUY_EXECUTION 保持一致，
+    # 配置源共用 config/backtest_engine_config.yaml 的 buy_execution 节）
+    DEFAULT_BUY_EXECUTION = {
+        'mode': 'open',               # open=T日收盘价（原行为） | ma_limit=均线委托价
+        'ma_period': 5,               # 委托价基准均线周期（5日线）
+        'ma_source': 'close',         # 均线计算所用价格字段
+        'slippage': 0.005,            # 滑点 0.5%（买入取不利方向，即更贵）
+        'min_periods': 5,             # 均线有效所需最小样本数
+    }
+    
+    def _resolve_buy_execution(self, stock_code: str, df_to_date, default_price: float) -> Dict:
+        """解析实盘买入执行价（与回测共用 config/backtest_engine_config.yaml）
+        
+        两种模式（buy_execution.mode）：
+          - open（默认）：T日收盘价，行为与改造前一致（后向兼容）
+          - ma_limit    ：委托价 = 均线（默认MA5，截至T-1防前视）× (1 + 滑点)
+        
+        说明：实盘仅生成委托价，不模拟是否成交（实际成交以 PTrade 反馈为准）。
+        
+        Args:
+            stock_code: 股票代码
+            df_to_date: 截至T日的K线（倒序，最新在 index 0）
+            default_price: 默认价格（T日收盘价），用于 open 模式与样本不足回退
+            
+        Returns:
+            dict: {'price': 记账/委托价, 'order_price': 委托价, 'mode': 模式, 'reason': 说明}
+        """
+        cfg = dict(self.DEFAULT_BUY_EXECUTION)
+        cfg.update((self._load_engine_config() or {}).get('buy_execution') or {})
+        mode = cfg.get('mode', 'open')
+        
+        if mode != 'ma_limit':
+            return {'price': default_price, 'order_price': default_price,
+                    'mode': mode, 'reason': '收盘价模式（T日收盘价）'}
+        
+        ma_period = int(cfg.get('ma_period', 5))
+        ma_source = cfg.get('ma_source', 'close')
+        min_periods = int(cfg.get('min_periods', ma_period))
+        slippage = float(cfg.get('slippage', 0.005))
+        
+        # 实盘基准：信号在 T 日盘后生成（T 日已收盘），五日线按【截至 T 日收盘】计算，
+        # 含当日不构成前视。
+        # 注意与回测不同：回测是 T-1 信号、T 日成交，必须剔除 T 日（ma_base=prev_day）防前视。
+        ma_value = None
+        if df_to_date is not None and len(df_to_date) > 0 and ma_source in df_to_date.columns:
+            hist = pd.to_numeric(df_to_date[ma_source], errors='coerce').dropna()
+            if len(hist) >= min_periods:
+                ma_value = float(hist.iloc[:ma_period].mean())
+        
+        if ma_value is None or ma_value <= 0:
+            return {'price': default_price, 'order_price': default_price,
+                    'mode': mode, 'reason': '均线样本不足，回退T日收盘价'}
+        
+        # 买入滑点取不利方向（更贵）
+        order_price = ma_value * (1.0 + slippage)
+        return {'price': order_price, 'order_price': order_price,
+                'mode': mode,
+                'reason': f'MA{ma_period}={ma_value:.2f}，委托价={order_price:.2f}'
+                          f'（滑点{slippage * 100:.1f}%）'}
     
     def _check_cool_down(self, stock_code: str, current_date: str) -> bool:
         """检查股票是否在冷却期内（从股票池的属性中检查）
@@ -3540,6 +3656,7 @@ class StrategyRunner:
             'BullishHaramiStrategy': '多方炮策略',
             'BottomTrendReversalStrategy': '底部趋势拐点策略',
             'ResistanceBreakoutStrategy': '阻力位突破策略',
+            'MainUptrendDipBuyStrategy': '主升低吸策略',
             'MultiPartyCannonStrategy': '多方炮策略',
             'MorningStarStrategy': '启明星策略',
             'TrendStartStrategy': '趋势起点策略',
@@ -3549,7 +3666,8 @@ class StrategyRunner:
             'turtle': '海龟策略',
             'bollinger': '布林带策略',
             'rsi': 'RSI策略',
-            'support': '支撑位策略'
+            'support': '支撑位策略',
+            'uptrend_pullback': '趋势回调缩量策略'
         }
         return name_mapping.get(strategy_class_name, strategy_class_name)
     
@@ -3654,11 +3772,12 @@ class StrategyRunner:
     
     def _calc_trailing_stop(self, buy_price, current_price, holding_df,
                             enable_trailing_stop=True, base_stop_level=-6,
-                            trailing_trigger_threshold=5):
+                            trailing_trigger_threshold=5,
+                            trailing_drawdown_pct=8):
         """计算移动止损价(通用方法，便于单元测试)
 
         直接基于持仓期K线的最高价计算移动止损：
-        - 持仓期最高收益率 >= 触发阈值(默认5%)：移动止损 = 最高价 × 92%
+        - 持仓期最高收益率 >= 触发阈值(默认5%)：移动止损 = 最高价 × (1 - 回撤%)
         - 否则(或未启用/无数据)：固定止损 = 买入价 × (1 + 基础止损)
 
         Args:
@@ -3668,6 +3787,8 @@ class StrategyRunner:
             enable_trailing_stop: 是否启用移动止损
             base_stop_level: 基础止损百分比(默认 -6)
             trailing_trigger_threshold: 触发移动止损的最低收益率(%)
+            trailing_drawdown_pct: 移动止损自最高价的回撤比例(%)，默认 8
+                                   （设为 6 可更早锁定盈利）
 
         Returns:
             (stop_price, current_stop, highest_price, highest_price_return)
@@ -3683,9 +3804,9 @@ class StrategyRunner:
             highest_price = holding_df['high'].max()  # 持仓期最高价
             # 最高收益率 = (最高价 - 买入价) / 买入价
             highest_price_return = (highest_price - buy_price) / buy_price * 100
-            # 达到触发阈值才启用移动止损(最高价 × 92%)
+            # 达到触发阈值才启用移动止损：最高价 × (1 - 回撤%)
             if highest_price_return >= trailing_trigger_threshold:
-                stop_price = highest_price * 0.92
+                stop_price = highest_price * (1 - trailing_drawdown_pct / 100)
                 current_stop = (stop_price - buy_price) / buy_price
 
         return stop_price, current_stop, highest_price, highest_price_return
@@ -3837,6 +3958,8 @@ class StrategyRunner:
                 enable_trailing_stop = self.config.get('enable_trailing_stop', True)
                 base_stop_level = -6  # 基础止损固定为-6%
                 trailing_trigger_threshold = 5  # 触发移动止损的最低收益率
+                # 移动止损自最高价的回撤比例(%，默认8；设为 6 可更早锁定盈利)
+                trailing_drawdown_pct = self.config.get('trailing_drawdown_pct', 8)
 
                 # 移动止损：直接基于持仓期K线(持久化数据库)最高价计算
                 # 先确定持仓期K线来源：优先持久化数据库(建仓日到当日)，缺数据兜底用近期数据
@@ -3865,9 +3988,10 @@ class StrategyRunner:
                 stop_price, current_stop, highest_price, highest_price_return = \
                     self._calc_trailing_stop(buy_price, current_price, holding_df,
                                              enable_trailing_stop, base_stop_level,
-                                             trailing_trigger_threshold)
+                                             trailing_trigger_threshold,
+                                             trailing_drawdown_pct)
 
-                logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={highest_price*0.92:.2f}, 数据来源={data_source}")
+                logger.debug(f"  移动止损: 买入价={buy_price:.2f}, 最高价={highest_price:.2f}, 当前价={current_price:.2f}, 最高收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}(回撤{trailing_drawdown_pct}%), 数据来源={data_source}")
                 # ========== 移动止损逻辑结束 ==========
 
                 # 记录择时信号详情
@@ -3890,11 +4014,15 @@ class StrategyRunner:
                         signal_type = 'stop_loss'
                     
                     # 计算止损价
-                    stop_price = highest_price * 0.92 if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold else buy_price * (1 + current_stop)
+                    stop_price = (highest_price * (1 - trailing_drawdown_pct / 100)
+                                  if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold
+                                  else buy_price * (1 + current_stop))
                     
                     # 构建止损方式说明
                     if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
-                        stop_method = f"移动止损(最高价{highest_price:.2f}×92%={highest_price*0.92:.2f})"
+                        stop_method = (f"移动止损(最高价{highest_price:.2f}×"
+                                       f"{100 - trailing_drawdown_pct:.0f}%="
+                                       f"{highest_price * (1 - trailing_drawdown_pct / 100):.2f})")
                     else:
                         stop_method = f"固定止损({base_stop_level}%)"
                     
@@ -3933,10 +4061,14 @@ class StrategyRunner:
                 else:
                     # 没有卖出信号，记录日志
                     # 计算止损价格（参考回测引擎逻辑）
-                    stop_price = highest_price * 0.92 if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold else buy_price * (1 + current_stop)
+                    stop_price = (highest_price * (1 - trailing_drawdown_pct / 100)
+                                  if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold
+                                  else buy_price * (1 + current_stop))
                     # 构建止损方式说明
                     if enable_trailing_stop and highest_price_return >= trailing_trigger_threshold:
-                        stop_method = f"移动止损(最高价{highest_price:.2f}×92%={highest_price*0.92:.2f})"
+                        stop_method = (f"移动止损(最高价{highest_price:.2f}×"
+                                       f"{100 - trailing_drawdown_pct:.0f}%="
+                                       f"{highest_price * (1 - trailing_drawdown_pct / 100):.2f})")
                     else:
                         stop_method = f"固定止损({base_stop_level}%)"
                     
@@ -4136,6 +4268,15 @@ class StrategyRunner:
                 
                 # 记录择时信号详情
                 current_price = df_to_date.iloc[0]['close']  # 倒序数据，iloc[0]是最新数据
+                
+                # 买入执行价：与回测共用 config/backtest_engine_config.yaml 的 buy_execution 配置
+                # open(默认)=T日收盘价（原行为） | ma_limit=均线委托价（仅生成委托，实际成交以PTrade反馈为准）
+                exec_result = self._resolve_buy_execution(stock_code, df_to_date, current_price)
+                buy_price = exec_result['price']
+                if exec_result['mode'] != 'open':
+                    logger.info(f"【买入执行方式】{trade_date} {stock_code} {stock_name} | "
+                               f"mode={exec_result['mode']} | {exec_result['reason']}")
+                
                 logger.info(f"【择时信号】{trade_date} {stock_code} {stock_name} | "
                            f"评分: {score:.1f} | 现价: ¥{current_price:.2f} | "
                            f"支撑位: ¥{candidate.get('support_level', 0):.2f} | "
@@ -4148,10 +4289,34 @@ class StrategyRunner:
                 if timing_result.is_buy:
                     # 根据交易类型决定买入数量计算方式
                     if timing_result.trade_type == 'add':
-                        # 加仓：使用策略返回的买入数量（不检查涨幅、不检查重复信号）
-                        buy_quantity = timing_result.buy_quantity
-                        quantity_source = '择时策略（加仓）'
+                        # 加仓（不检查涨幅、不检查重复信号）：
+                        # 数量 = max(策略信号数量, 1/2 凯利金额对应数量)
                         trade_type = 'add'  # 加仓
+                        signal_qty = timing_result.buy_quantity or 0
+                        half_kelly_qty = 0
+                        add_kelly_amount = 0.0
+                        _add_total_assets = getattr(self, 'current_total_asset', None)
+                        if _add_total_assets and _add_total_assets > 0:
+                            add_kelly_amount = KellyCalculator.calculate_position_amount(
+                                total_capital=_add_total_assets,
+                                available_cash=current_cash,
+                                strategy_name=candidate.get('strategy_name', 'N/A')
+                            )
+                            half_kelly_qty = KellyCalculator.calculate_buy_quantity(
+                                position_amount=add_kelly_amount / 2,
+                                price=buy_price,
+                                stock_code=stock_code
+                            )
+                        else:
+                            logger.warning(f"【加仓数量】{trade_date} {stock_code} {stock_name} "
+                                           f"未获取到 PTrade 权威总资产，1/2 凯利金额不可用，"
+                                           f"按策略信号数量 {signal_qty} 股执行")
+                        buy_quantity = max(signal_qty, half_kelly_qty)
+                        quantity_source = ('择时策略（加仓）' if buy_quantity == signal_qty
+                                           else '半凯利金额（加仓）')
+                        logger.info(f"【加仓数量】{trade_date} {stock_code} {stock_name} | "
+                                    f"策略信号: {signal_qty}股 | 1/2凯利金额: ¥{add_kelly_amount / 2:.2f} "
+                                    f"→ {half_kelly_qty}股 | 取大者: {buy_quantity}股 ({quantity_source})")
                     else:
                         # 首次建仓：使用凯莉公式计算
                         trade_type = 'first'  # 首次建仓
@@ -4170,12 +4335,19 @@ class StrategyRunner:
                         
                         # ========== 涨停基因检查：近30交易日(不含当日)至少1次涨停(>9.5%)（仅首次建仓）==========
                         # 复用回测引擎的 BuyPreFilter，保证两套流程规则一致
-                        from trading.buy_filter import BuyPreFilter
-                        limit_up_result = BuyPreFilter._check_limit_up_history(df_to_date, stock_code)
-                        if not limit_up_result['passed']:
+                        # 开关：enable_limit_up_check=false 时跳过该检查（用于提升成交率，默认开启）
+                        # 开关统一取自 config/backtest_engine_config.yaml（与回测引擎同一配置源）
+                        limit_up_enabled = self._load_engine_config().get('enable_limit_up_check', True)
+                        if limit_up_enabled:
+                            from trading.buy_filter import BuyPreFilter
+                            limit_up_result = BuyPreFilter._check_limit_up_history(df_to_date, stock_code)
+                            if not limit_up_result['passed']:
+                                logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} "
+                                            f"无涨停基因（{limit_up_result.get('reason', '')}），跳过首仓买入")
+                                continue
+                        else:
                             logger.info(f"【买入检查】{trade_date} {stock_code} {stock_name} "
-                                        f"无涨停基因（{limit_up_result.get('reason', '')}），跳过首仓买入")
-                            continue
+                                        f"涨停基因检测已关闭（enable_limit_up_check=false），跳过该检查")
                         # ========== 涨停基因检查结束 ==========
                         
                         # ========== 重复信号检查：信号去重（仅首次建仓，与冷却期无关）==========
@@ -4235,14 +4407,14 @@ class StrategyRunner:
                         )
                         buy_quantity = KellyCalculator.calculate_buy_quantity(
                             position_amount=position_amount,
-                            price=current_price,
+                            price=buy_price,
                             stock_code=stock_code
                         )
                         quantity_source = '凯莉公式'
                         
                         # 记录买入数量计算详情
                         logger.info(f"【买入数量计算】{trade_date} {stock_code} {stock_name} | "
-                                   f"凯利金额: ¥{position_amount:.2f} | 现价: ¥{current_price:.2f} | "
+                                   f"凯利金额: ¥{position_amount:.2f} | 买入价: ¥{buy_price:.2f} (现价¥{current_price:.2f}) | "
                                    f"计算数量: {buy_quantity}股 | 策略: {strategy_name}")
 
                     from utils.stock_utils import get_min_trade_unit
@@ -4253,8 +4425,9 @@ class StrategyRunner:
                     
                     # 记录买入决策
                     logger.info(f"【买入决策】{trade_date} {stock_code} {stock_name} | "
-                               f"数量: {buy_quantity}股 ({quantity_source}) | 价格: ¥{current_price:.2f} | "
-                               f"金额: ¥{current_price * buy_quantity:.2f} | "
+                               f"数量: {buy_quantity}股 ({quantity_source}) | 价格: ¥{buy_price:.2f} | "
+                               f"金额: ¥{buy_price * buy_quantity:.2f} | "
+                               f"执行方式: {exec_result['mode']} | "
                                f"信号: {timing_result.message}")
                     
                     signal = {
@@ -4265,8 +4438,10 @@ class StrategyRunner:
                         'signal_type': 'buy',
                         'trade_type': trade_type,  # 标记是首次建仓还是加仓
                         'quantity': buy_quantity,
-                        'price': current_price,
-                        'amount': current_price * buy_quantity,
+                        'price': buy_price,
+                        'amount': buy_price * buy_quantity,
+                        'exec_mode': exec_result['mode'],           # open | ma_limit
+                        'order_price': exec_result['order_price'],  # 委托价（open 模式下等于 price）
                         'reason': timing_result.message,
                         'strategy_name': candidate.get('strategy_name', 'N/A'),
                         'timing_strategy': self.timing_strategy_name,
@@ -4278,7 +4453,7 @@ class StrategyRunner:
                     
                     # T+1日执行模式：更新可用资金
                     if check_capital:
-                        current_cash -= current_price * buy_quantity
+                        current_cash -= buy_price * buy_quantity
                         current_cash = round(current_cash, 2)
                         self.current_total_capital = current_cash
                 
@@ -4659,6 +4834,7 @@ class StrategyRunner:
             
             # 初始化计数器（removed_count已在前面计算，这里只初始化added_count）
             added_count = 0
+            selection_strategy = ''      # 循环内被覆盖；循环外（持仓入池）兜底使用
             
             # 顺序执行每个策略任务
             for idx, task in enumerate(tasks, 1):
@@ -4749,7 +4925,20 @@ class StrategyRunner:
                     })
             
             logger.info(f"选股完成，股票池数量: {len(self.buy_candidate_pool)}")
-            
+
+            # ===== 持仓股自动入池（当日已卖出的不计），便于加仓 =====
+            # 说明：实盘持仓键已在 _normalize_portfolio_keys 中归一化为纯数字代码，
+            #      与候选池一致；当日已产生卖出信号的股票不再入池。
+            from trading.pool_entry_rules import resolve_auto_add_holdings
+
+            if resolve_auto_add_holdings(config, self._load_engine_config()):
+                _sold_codes = {s.get('stock_code') for s in (sell_signals or [])
+                               if s.get('stock_code')}
+                _n_hold = self._add_holdings_to_pool(
+                    self.portfolio or {}, working_date, _sold_codes, selection_strategy)
+                if _n_hold:
+                    logger.info(f"【持仓入池】{_n_hold} 只持仓股已回到候选池（当日卖出不计）")
+
             # ========== 所有策略执行完成后，统一保存文件 ==========
             
             # 保存股票池

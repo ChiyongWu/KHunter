@@ -232,9 +232,11 @@ const ExecutionPlanModule = {
     getTimingLabel: function(timingStrategy) {
         const mapping = {
             'turtle': '海龟策略',
+            'low_turtle': '低位海龟策略',
             'rsi': 'RSI策略',
             'bollinger': '布林带策略',
-            'support': '支撑位策略'
+            'support': '支撑位策略',
+            'uptrend_pullback': '趋势回调缩量策略'
         };
         return mapping[timingStrategy] || timingStrategy;
     },

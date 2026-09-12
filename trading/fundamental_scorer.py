@@ -486,6 +486,38 @@ class FundamentalScorer:
     #     # 市值 ≥ 50亿：不扣分
     #     return 0
 
+    def check_veto(self, stock_code: str, score_date: str) -> Tuple[bool, str]:
+        """检查基本面一票否决条件（**只判否决，不做打分**）
+
+        否决条件（与 calculate_score 内保持一致）：
+          1. 净利润同比下滑 > 50%
+          2. ROE < -5%
+        指标缺失（None）时不否决。
+
+        返回:
+            Tuple[bool, str]: (是否触发一票否决, 否决原因)
+        """
+        try:
+            df = self._fetch_fina_indicator(stock_code, score_date)
+            indicators = self._extract_latest_indicators(df, score_date)
+        except Exception as e:
+            logger.debug(f"基本面否决检查失败({stock_code}): {e}")
+            return False, ""
+
+        net_profit_yoy = indicators.get("net_profit_yoy")
+        if net_profit_yoy is not None and net_profit_yoy < -50:
+            reason = f"净利润同比下滑超过50%（{net_profit_yoy:.1f}%）"
+            logger.warning(f"股票 {stock_code} 触发基本面一票否决: {reason}")
+            return True, reason
+
+        roe = indicators.get("roe")
+        if roe is not None and roe < -5:
+            reason = f"ROE低于-5%（{roe:.1f}%）"
+            logger.warning(f"股票 {stock_code} 触发基本面一票否决: {reason}")
+            return True, reason
+
+        return False, ""
+
     def calculate_score(
         self, stock_code: str, score_date: str
     ) -> Tuple[float, FundamentalDetail]:

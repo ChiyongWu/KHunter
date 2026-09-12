@@ -277,11 +277,17 @@ class PreloadManager:
             if not stocks:
                 return []
             
+            # 入池规则：简化模式下评分器只判一票否决（跳过所有维度打分）
+            from trading.pool_entry_rules import resolve_pool_entry_simplified
+
+            _simplified = resolve_pool_entry_simplified({}, self.backtest_engine._load_engine_config())
+
             # 使用回测评分器进行批量评分
             scored_stocks = self.backtest_engine.score_calculator.calculate_batch_scores(
                 stocks=stocks,
                 score_date=date,
-                strategy_name=strategy_name
+                strategy_name=strategy_name,
+                simplified=_simplified
             )
             
             return scored_stocks

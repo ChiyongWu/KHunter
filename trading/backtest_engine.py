@@ -387,6 +387,13 @@ class BacktestEngine:
                             logger.info(f"股票 {stock['stock_code']} {stock['stock_name']} 加入可买股票池, 支撑位计算失败")
                         new_added += 1
                 
+                # ===== 持仓股自动入池（当日已卖出的不计），便于加仓 =====
+                from trading.pool_entry_rules import resolve_auto_add_holdings
+
+                if resolve_auto_add_holdings(config, self._load_engine_config()):
+                    self._add_holdings_to_pool(positions, current_date,
+                                               today_sold_stocks, strategy_name)
+
                 # 处理可买股票池
                 logger.info(f"\n当前可买股票池数量: {len(self.buy_candidate_pool)} (新增 {new_added} 只)")
                 if self.buy_candidate_pool:
@@ -452,6 +459,15 @@ class BacktestEngine:
                             continue
                     # ========== 冷却期和连续亏损限制检查结束 ==========
                     
+                    # 当日已卖出的股票不再买入（与实盘一致）
+                    # 说明：today_sold_stocks 此前只被写入、从未在买入循环读取，
+                    #       导致回测允许"当日卖出后当日买回"，与实盘行为不一致。
+                    if stock_code in today_sold_stocks:
+                        logger.info(f"【未买入】{stock_code} {stock.get('stock_name', '')}: "
+                                    f"当日已卖出，不再买入")
+                        remaining_candidates.append(candidate)
+                        continue
+                    
                     # 检查当日最大买入限制
                     if daily_buys >= max_daily_buys:
                         logger.info(f"【未执行买入】{stock_code} {stock.get('stock_name', '')}: 达到今日买入次数{max_daily_buys}次限制，未执行")
@@ -501,6 +517,18 @@ class BacktestEngine:
                                 }])
                                 df_to_date = pd.concat([df_to_date, new_row], ignore_index=True)
                                 logger.info(f"股票 {stock_code} 添加实时数据: {date_str} 开盘={open_price}, 收盘={realtime_price}")
+
+                                # 同步回写缓存：否则后续 _has_trading_data_on_date（停牌/退市检查）、
+                                # 卖出/止损等直接读缓存的逻辑仍看不到当日数据，会把"已有实时数据"
+                                # 误判为停牌而跳过买入。
+                                try:
+                                    merged = pd.concat([df, new_row], ignore_index=True)
+                                    self.stock_filtered_cache[stock_code] = merged
+                                    if stock_code in self.stock_data_cache:
+                                        self.stock_data_cache[stock_code] = merged.copy()
+                                except Exception as cache_err:
+                                    logger.warning(
+                                        f"股票 {stock_code} 实时数据回写缓存失败: {cache_err}")
                         except Exception as e:
                             logger.warning(f"股票 {stock_code} 获取实时数据失败: {str(e)}")
                     
@@ -534,12 +562,23 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
-                    # 买入前K线过滤检查
-                    filter_result = BuyPreFilter.check_filters(df_to_date, stock_code)
-                    if not filter_result['passed']:
-                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: K线过滤未通过 - {filter_result['reason']}")
-                        remaining_candidates.append(candidate)
-                        continue
+                    # 买入前K线过滤检查（仅首次建仓；加仓不做该过滤）
+                    # 说明：加仓由择时策略自身条件把关（如盈利门槛 + 趋势/BIAS/缩量），
+                    #       再叠加"20日涨幅>50%"等规则会把已大幅盈利的持仓加仓误杀；
+                    #       同时与实盘运行器保持一致（运行器加仓本就不做涨幅/涨停基因检查）。
+                    # 涨停基因（规则4）可通过 enable_limit_up_check=false 关闭以提升成交率（默认开启）
+                    # 优先级：config 传入 > config/backtest_engine_config.yaml > 默认 true
+                    if self._should_apply_buy_filter(result, existing_pos):
+                        limit_up_enabled = config.get(
+                            'enable_limit_up_check',
+                            self._load_engine_config().get('enable_limit_up_check', True))
+                        filter_result = BuyPreFilter.check_filters_with_config(
+                            df_to_date, stock_code,
+                            {'enable_limit_up_check': limit_up_enabled})
+                        if not filter_result['passed']:
+                            logger.info(f"【未买入】{stock_code} {stock['stock_name']}: K线过滤未通过 - {filter_result['reason']}")
+                            remaining_candidates.append(candidate)
+                            continue
                     
                     # 停牌/退市检查：确认当日有真实行情数据（防止使用前一日收盘价兜底）
                     if not self._has_trading_data_on_date(stock_code, current_date):
@@ -547,46 +586,53 @@ class BacktestEngine:
                         remaining_candidates.append(candidate)
                         continue
                     
-                    # 获取买入价格（T日开盘价：策略基于T-1收盘数据出信号，T日开盘价成交）
-                    buy_price = self._get_stock_price(stock_code, current_date, 'open')
-                    if buy_price is None or buy_price <= 0:
-                        # T日无开盘数据时回退到前一交易日（T-1）开盘价，避免无法成交
-                        prev_buy_day = self._get_previous_trading_day(current_date)
-                        buy_price = self._get_stock_price(stock_code, prev_buy_day, 'open')
-                    logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} 买入价格(T日开盘): {buy_price}")
+                    # 解析买入执行方式：open=开盘价成交(原行为) / ma_limit=均线委托+滑点+触达成交
+                    exec_result = self._resolve_buy_execution(
+                        stock_code, current_date, config, df_to_date)
+                    buy_price = exec_result['price']
+                    if not exec_result['filled']:
+                        # 未成交（如当日最低价未触及委托价）：保留候选池，不记为交易
+                        logger.info(f"【未买入】{current_date} {stock_code} "
+                                   f"{stock['stock_name']}: {exec_result['reason']}"
+                                   f"（委托价={exec_result['order_price']:.2f}）")
+                        remaining_candidates.append(candidate)
+                        continue
+                    logger.info(f"股票 {current_date} {stock_code} {stock['stock_name']} "
+                               f"买入成交价: {buy_price:.2f}（委托价="
+                               f"{exec_result['order_price']:.2f}, 方式={exec_result['mode']}）")
                     
                     # 获取交易类型（首次建仓或加仓）
                     trade_type = result.trade_type if result else 'new'
                     
+                    # ---- 凯利金额（首次建仓基准；加仓时取 1/2 作为数量下限）----
+                    strategy_name = candidate.get('strategy_name', 'N/A')
+                    total_assets = self._calc_total_assets(current_date, positions, current_capital)
+                    kelly_result = KellyCalculator.calculate_position_amount_with_params(
+                        total_capital=total_assets,
+                        available_cash=current_capital,
+                        strategy_name=strategy_name
+                    )
+                    kelly_amount = kelly_result['amount']
+
                     # 计算买入数量
                     if trade_type == 'add':
-                        # 加仓：优先使用策略返回的数量，否则使用配置的买入金额
-                        if result and result.buy_quantity > 0:
-                            quantity = result.buy_quantity
-                        else:
+                        # 加仓：策略信号数量 与 1/2 凯利金额对应数量 **取大者**
+                        #   —— 策略信号偏小时按"半仓凯利"补足；信号偏大时尊重策略
+                        signal_qty = result.buy_quantity if (result and result.buy_quantity > 0) else 0
+                        if signal_qty <= 0:
                             config_buy_amount = config.get('buy_amount', 100000)
-                            quantity = int(config_buy_amount / buy_price) // 100 * 100
-                    else:
-                        # 首次建仓：使用凯莉公式计算（获取完整参数）
-                        strategy_name = candidate.get('strategy_name', 'N/A')
-
-                        # 计算总资产（可用资金 + 持仓市值）
-                        # 注意：使用前一交易日收盘价，避免未来函数
-                        total_assets = current_capital
-                        prev_trading_day = self._get_previous_trading_day(current_date)
-                        for position in positions:
-                            position_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
-                            if position_price is None or position_price <= 0:
-                                position_price = position['buy_price']
-                            total_assets += position['quantity'] * position_price
-
-                        kelly_result = KellyCalculator.calculate_position_amount_with_params(
-                            total_capital=total_assets,
-                            available_cash=current_capital,
-                            strategy_name=strategy_name
+                            signal_qty = int(config_buy_amount / buy_price) // 100 * 100
+                        half_kelly_qty = KellyCalculator.calculate_buy_quantity(
+                            position_amount=kelly_amount / 2,
+                            price=buy_price,
+                            stock_code=stock_code
                         )
-                        kelly_amount = kelly_result['amount']
-                        
+                        quantity = max(signal_qty, half_kelly_qty)
+                        logger.info(f"【加仓数量】{current_date} {stock_code} {stock['stock_name']}: "
+                                    f"策略信号={signal_qty}股, 1/2凯利金额={kelly_amount / 2:.2f}元"
+                                    f"→{half_kelly_qty}股, 取大者={quantity}股")
+                    else:
+                        # 首次建仓：使用凯利公式计算（获取完整参数）
                         # 确定最终可用金额
                         if current_capital >= kelly_amount:
                             # 可用资金充足，用凯利金额，不预留费用
@@ -647,10 +693,17 @@ class BacktestEngine:
                         # 加权平均买入价
                         existing_pos['buy_price'] = existing_pos['buy_amount'] / existing_pos['quantity']
                         # 更新加仓次数和加仓价格
-                        existing_pos['add_count'] = result.add_count if result and hasattr(result, 'add_count') else existing_pos.get('add_count', 0) + 1
+                        # add_count 语义：加仓后的累计总次数（1-based），与 position['add_count'] 一致
+                        # 策略未设置该字段（如顺势宝）时取 0，此处回退为自增，
+                        # 避免 hasattr 恒为真导致计数被清零，同时与实盘运行器行为保持一致
+                        result_add_count = getattr(result, 'add_count', 0) if result else 0
+                        existing_pos['add_count'] = (result_add_count if result_add_count > 0
+                                                     else existing_pos.get('add_count', 0) + 1)
                         existing_pos['last_add_price'] = buy_price
-                        # 重置持仓日期（加仓代表趋势较好，重新计算持有时间）
-                        existing_pos['buy_date'] = current_date
+                        # 加仓不重置建仓日期（统一口径，所有策略一致）
+                        # 说明：历史上此处把 buy_date 重置为当日，导致"持仓过期"被反复续命；
+                        # 现统一保留首次建仓日期，加仓日期记入 last_add_date（仅用于展示/排查）。
+                        existing_pos['last_add_date'] = current_date
                         logger.info(f"【加仓#{existing_pos['add_count']}】{current_date} {stock_code} {stock['stock_name']}: "
                                    f"原数量={old_quantity}, 加仓={quantity}, 合计={existing_pos['quantity']}, "
                                    f"均价={existing_pos['buy_price']:.2f}, 金额={buy_amount}")
@@ -836,14 +889,20 @@ class BacktestEngine:
             filtered_by_veto = 0
             filtered_by_score = 0
             
-            # 将预加载的股票添加到可买股票池（格式与正常选股一致，需通过评分过滤）
+            # 将预加载的股票添加到可买股票池（与正常选股同一套入池规则）
+            from trading.pool_entry_rules import resolve_pool_entry_simplified
+
+            _simplified = resolve_pool_entry_simplified(config, self._load_engine_config())
+            logger.info("预加载入池规则: " + (
+                f"简易评分（先排除一票否决，资金面得分>={score_threshold}）"
+                if _simplified else f"标准（综合评分>={score_threshold}）"))
             for stock in preloaded_stocks:
-                # 评分过滤：与正常选股一致
+                # 评分过滤：与正常选股一致（统一规则：否决票 + 评分达标）
                 if stock.get('veto_flag', False):
                     logger.debug(f"预加载股票 {stock['stock_code']} 被否决标志过滤，veto_flag={stock.get('veto_flag')}")
                     filtered_by_veto += 1
                     continue
-                    
+
                 if stock.get('score', 0) < score_threshold:
                     logger.debug(f"预加载股票 {stock['stock_code']} 评分不达标，score={stock.get('score', 0)} < {score_threshold}")
                     filtered_by_score += 1
@@ -1443,7 +1502,7 @@ class BacktestEngine:
         self._fund_flow_rules = yaml_config.get('fund_flow_rules', {})
         logger.info(f"加载资金流向移除规则: enabled={self._fund_flow_rules.get('is_enabled', False)}, "
                    f"threshold={self._fund_flow_rules.get('net_flow_threshold', -10000)}万元, "
-                   f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 5)}")
+                   f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 1)}")
         
         strategies = yaml_config.get('removal_strategies', {})
         for name, cfg in strategies.items():
@@ -1554,15 +1613,24 @@ class BacktestEngine:
         # 获取资金流向规则配置
         fund_flow_enabled = getattr(self, '_fund_flow_rules', {}).get('is_enabled', True)
         fund_flow_threshold = getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000)
-        fund_flow_min_hold_days = getattr(self, '_fund_flow_rules', {}).get('min_hold_days', 5)
+        fund_flow_min_hold_days = getattr(self, '_fund_flow_rules', {}).get('min_hold_days', 1)
         
         for candidate in self.buy_candidate_pool:
             # 提取股票信息
             stock_code = candidate['stock']['stock_code']
             stock_name = candidate['stock']['stock_name']
             strategy_name = candidate.get('strategy_name', '')
-            
-            # 轮动模式：非持仓候选直接轮出，不参与条件判断（持仓候选仍走下方条件移除）
+
+            # ===== 持仓股不移除（2026-09-11）=====
+            # 处于持仓中的候选一律保留（persistent / rotation 均适用），
+            # 既避免"移除后又加回"的抖动，也保证加仓链路可用。
+            if stock_code in held_codes:
+                remaining_candidates.append(candidate)
+                logger.info(f"【保留】{current_date} {stock_code} {stock_name}: "
+                            f"当前持仓中，不参与移除判断")
+                continue
+
+            # 轮动模式：非持仓候选直接轮出，不参与条件判断（持仓候选已在上方保留）
             if pool_mode == 'rotation' and stock_code not in held_codes:
                 removed_candidates.append(candidate)
                 logger.info(f"【轮出】{current_date} {stock_code} {stock_name}: "
@@ -2013,11 +2081,17 @@ class BacktestEngine:
         strategy_display_name = strategy.name if strategy else strategy_name
         logger.info(f"评分使用的策略名称: {strategy_display_name} (类名: {strategy_name})")
 
+        # 入池规则：简化模式下评分器只判一票否决（跳过所有维度打分）
+        from trading.pool_entry_rules import resolve_pool_entry_simplified
+
+        _simplified = resolve_pool_entry_simplified({}, self._load_engine_config())
+
         # 使用回测专用评分器进行批量评分
         scored_stocks = self.score_calculator.calculate_batch_scores(
             stocks=stocks,
             score_date=date_str,
-            strategy_name=strategy_display_name
+            strategy_name=strategy_display_name,
+            simplified=_simplified
         )
 
         return scored_stocks
@@ -2053,13 +2127,19 @@ class BacktestEngine:
         for stock in scored_stocks:
             logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 综合评分={stock['score']}，否决标志={stock.get('veto_flag', False)}")
         
-        # 筛选：去除否决票且评分达标
+        # 筛选：入池规则（可配置，见 trading/pool_entry_rules.py）
+        #   simplified=True  → 只剔除一票否决，其余全部入池（解决池/持仓不足）
+        #   simplified=False → 原行为：否决票 + 评分达标
+        from trading.pool_entry_rules import filter_candidates, resolve_pool_entry_simplified
+
         score_threshold = config.get('score_threshold', 60)
-        candidate_stocks = [
-            stock for stock in scored_stocks 
-            if not stock.get('veto_flag', False) and stock['score'] >= score_threshold
-        ]
-        
+        _simplified = resolve_pool_entry_simplified(config, self._load_engine_config())
+        candidate_stocks = filter_candidates(scored_stocks, score_threshold, _simplified)
+        if _simplified:
+            logger.info(f"【入池规则】简易评分：先排除一票否决，资金面得分>={score_threshold} 入池")
+        else:
+            logger.info(f"【入池规则】标准评分：否决票 + 综合评分>={score_threshold}")
+
         logger.info(f"\n筛选后待买入股票数: {len(candidate_stocks)}")
         if candidate_stocks:
             logger.info("待买入股票列表:")
@@ -2067,6 +2147,78 @@ class BacktestEngine:
                 logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 评分={stock['score']}")
         
         return candidate_stocks
+
+    def _add_holdings_to_pool(self, positions, current_date, today_sold_stocks,
+                              strategy_name: str = '', enabled: bool = True) -> int:
+        """持仓股自动入池（**当日已卖出的不计**），返回新增数量
+
+        目的：策略切换清空股票池 / 候选被买入消费后，持仓股仍留在候选池中，
+              这样择时给出 add 信号时才能正常加仓（否则池空 → 无法加仓）。
+
+        Args:
+            positions: 持仓。回测为 `list[dict]`（含 stock_code/stock_name）；
+                       实盘为 `dict{code: {...}}`（键已归一化为纯数字代码）——两者均支持。
+            current_date: 当日日期
+            today_sold_stocks: 当日已卖出代码集合（不计入池）
+            strategy_name: 当日策略名（写入池条目，供 Kelly/池移除配置查找）
+            enabled: 开关（调用方从 `pool_entry.auto_add_holdings` 解析后传入）
+
+        说明：
+          - 已在池中的不重复加入；
+          - 入池评分记为 0（仅用于池内排序，不会抢占新股优先级）；
+          - 支撑位按当前策略计算（失败则记 0，不影响流程）。
+        """
+        if not enabled:
+            return 0
+
+        added = 0
+        try:
+            # 兼容 dict（实盘 self.portfolio）与 list（回测 positions）
+            if isinstance(positions, dict):
+                items = [{'stock_code': code,
+                          'stock_name': (pos or {}).get('stock_name', '')}
+                         for code, pos in positions.items()]
+            else:
+                items = list(positions or [])
+
+            pool_codes = {c.get('stock', {}).get('stock_code')
+                          for c in self.buy_candidate_pool}
+            for pos in items:
+                code = pos.get('stock_code')
+                if (not code or code in pool_codes
+                        or code in (today_sold_stocks or set())):
+                    continue
+
+                info = {'stock_code': code,
+                        'stock_name': pos.get('stock_name', ''),
+                        'score': 0,
+                        'veto_flag': False}
+                try:
+                    sup = self._calculate_support_level(info, current_date, strategy_name)
+                    sup_method = self._get_support_method_for_strategy(strategy_name)
+                except Exception as e:
+                    sup, sup_method = 0.0, 'unknown'
+                    logger.debug(f"持仓股 {code} 支撑位计算失败: {e}")
+
+                self.buy_candidate_pool.append({
+                    'stock': info,
+                    'added_date': current_date,
+                    'key_date': (current_date.strftime('%Y-%m-%d')
+                                 if hasattr(current_date, 'strftime') else str(current_date)),
+                    'strategy_name': strategy_name,
+                    'support_level': sup,
+                    'support_method': sup_method,
+                    'from_holding': True,      # 标记来源：持仓股自动入池
+                })
+                pool_codes.add(code)
+                added += 1
+
+            if added:
+                logger.info(f"【持仓入池】新增 {added} 只持仓股到股票池（当日卖出不计），"
+                            f"池内合计 {len(self.buy_candidate_pool)} 只")
+        except Exception as e:
+            logger.warning(f"持仓股入池失败（不影响回测）: {e}")
+        return added
     
     def _has_trading_data_on_date(self, stock_code: str, date: date) -> bool:
         """检查股票在指定日期是否有真实行情数据（非停牌、非退市）
@@ -2101,6 +2253,163 @@ class BacktestEngine:
                 return False
         
         return True
+
+    # 买入执行方式默认配置
+    # mode 默认 'open'，保证不配置时行为与改造前完全一致（后向兼容）
+    DEFAULT_BUY_EXECUTION = {
+        'mode': 'open',               # open=开盘价无条件成交 | ma_limit=均线委托+滑点+触达成交
+        'ma_period': 5,               # 委托价基准均线周期（5日线）
+        'ma_source': 'close',         # 均线计算所用价格字段
+        'ma_base': 'prev_day',        # 均线基准日：prev_day=截至T-1（防前视）
+        'slippage': 0.005,            # 滑点 0.5%（买入取不利方向，即更贵）
+        'fill_price': 'better',       # better=min(开盘价, 委托价) | limit=委托价
+        'min_periods': 5,             # 均线有效所需最小样本数
+        'insufficient_data': 'fallback_open',  # 样本不足时回退开盘价成交
+        'on_unfilled': 'keep',        # 未成交时保留候选池
+    }
+
+    @staticmethod
+    def _should_apply_buy_filter(result, existing_pos) -> bool:
+        """买入前K线过滤是否生效
+
+        仅【首次建仓】生效；【加仓】跳过该过滤：
+          - 加仓由择时策略自身条件把关，重复过滤会误杀已盈利的加仓信号
+          - 与实盘运行器保持一致（运行器加仓不做涨幅/涨停基因检查）
+
+        Args:
+            result: 择时结果（TimingResult）
+            existing_pos: 已有持仓（None 表示首次建仓）
+
+        Returns:
+            True=执行K线过滤，False=跳过
+        """
+        if result is None:
+            return existing_pos is None
+        trade_type = getattr(result, 'trade_type', '') or ''
+        if trade_type == 'add':
+            return False
+        return existing_pos is None
+
+    def _get_highest_price_since_entry(self, stock_code: str, buy_date,
+                                       until_date, buy_price: float) -> float:
+        """获取建仓以来（【不含建仓日】）至 until_date 的最高价（用于移动止损）
+
+        与实盘运行器保持一致（实盘 `_exclude_buy_day` 排除建仓日）：
+        建仓日成交前形成的高点不应计入"买入以来最高价"，
+        否则移动止损位被抬高，建仓首日即可能误触发移动止损。
+
+        Args:
+            stock_code: 股票代码
+            buy_date: 建仓日（date）
+            until_date: 截止日（date，含）；None 时返回 buy_price
+            buy_price: 买入价（无有效数据时兜底）
+
+        Returns:
+            最高价（不低于 buy_price）
+        """
+        if buy_date is None or until_date is None:
+            return buy_price
+
+        df = self.stock_data_cache.get(stock_code)
+        if df is None or df.empty:
+            return buy_price
+
+        buy_date_str = buy_date.strftime('%Y-%m-%d')
+        until_str = until_date.strftime('%Y-%m-%d')
+        # 不含建仓日：起始日严格大于建仓日
+        mask = (df['date'] > buy_date_str) & (df['date'] <= until_str)
+        filtered_df = df[mask]
+        if filtered_df.empty:
+            return buy_price
+
+        return max(buy_price, float(filtered_df['high'].max()))
+
+    def _resolve_buy_execution(self, stock_code: str, current_date: date,
+                               config: Dict, df_to_date: pd.DataFrame = None) -> Dict:
+        """解析买入执行结果：委托价、是否成交、成交价与未成交原因
+
+        两种模式（由 config['buy_execution']['mode'] 决定）：
+          - 'open'（默认）：T 日开盘价无条件成交，行为与改造前一致（后向兼容）
+          - 'ma_limit'：以截至 T-1 的均线为基准计算委托价（含滑点），
+            仅当 T 日最低价 <= 委托价 才视为成交；成交价取 min(开盘价, 委托价)
+
+        Args:
+            stock_code: 股票代码
+            current_date: 当前回测日期（T 日）
+            config: 回测配置，读取其中的 buy_execution 节
+            df_to_date: 截至 T 日的K线（倒序，最新在前），用于计算均线
+
+        Returns:
+            dict: {'filled': 是否成交, 'price': 成交价, 'order_price': 委托价,
+                   'reason': 未成交原因, 'mode': 执行方式}
+        """
+        # 合并配置：引擎内置默认 < 配置文件(backtest_engine_config.yaml) < 回测参数
+        cfg = dict(self.DEFAULT_BUY_EXECUTION)
+        engine_config = self._load_engine_config() or {}
+        cfg.update(engine_config.get('buy_execution') or {})
+        cfg.update(config.get('buy_execution') or {})
+        mode = cfg.get('mode', 'open')
+
+        # T 日开盘价：两种模式都需要（ma_limit 用于 better 成交价与样本不足回退）
+        open_price = self._get_stock_price(stock_code, current_date, 'open')
+        if open_price is None or open_price <= 0:
+            # T 日无开盘数据时回退到前一交易日，避免无法成交（沿用原有逻辑）
+            prev_buy_day = self._get_previous_trading_day(current_date)
+            open_price = self._get_stock_price(
+                stock_code, prev_buy_day, 'open') if prev_buy_day else None
+
+        # 模式一：开盘价无条件成交（保持原行为）
+        if mode != 'ma_limit':
+            if open_price is None or open_price <= 0:
+                return {'filled': False, 'price': 0.0, 'order_price': 0.0,
+                        'reason': '无有效开盘价', 'mode': mode}
+            return {'filled': True, 'price': open_price, 'order_price': open_price,
+                    'reason': '', 'mode': mode}
+
+        # 模式二：均线委托 + 滑点 + 最低价触达判定
+        ma_period = int(cfg.get('ma_period', 5))
+        min_periods = int(cfg.get('min_periods', ma_period))
+        ma_source = cfg.get('ma_source', 'close')
+        slippage = float(cfg.get('slippage', 0.005))
+
+        # 1) 计算截至 T-1 的均线：df_to_date 为倒序（最新在前），第 0 行是 T 日，
+        #    必须剔除后再取窗口，否则会把 T 日收盘价算进去造成前视偏差
+        ma_value = None
+        if df_to_date is not None and not df_to_date.empty and ma_source in df_to_date.columns:
+            hist = df_to_date[ma_source].iloc[1:] if len(df_to_date) > 1 else df_to_date[ma_source]
+            hist = pd.to_numeric(hist, errors='coerce').dropna()
+            if len(hist) >= min_periods:
+                ma_value = float(hist.iloc[:ma_period].mean())
+
+        # 2) 样本不足（如新上市不足5日）→ 按确认口径取开盘价成交
+        if ma_value is None or ma_value <= 0:
+            if open_price and open_price > 0:
+                return {'filled': True, 'price': open_price, 'order_price': open_price,
+                        'reason': '均线样本不足，回退开盘价成交', 'mode': mode}
+            return {'filled': False, 'price': 0.0, 'order_price': 0.0,
+                    'reason': '均线样本不足且无开盘价', 'mode': mode}
+
+        # 3) 委托价：买入滑点取不利方向（更贵）
+        order_price = ma_value * (1.0 + slippage)
+
+        # 4) 当日最低价（用于判断是否触达委托价）
+        low_price = self._get_stock_price(stock_code, current_date, 'low')
+        if low_price is None or low_price <= 0:
+            low_price = open_price
+
+        # 5) 触达判定：最低价 <= 委托价 才算成交
+        if low_price is None or low_price > order_price:
+            return {'filled': False, 'price': order_price, 'order_price': order_price,
+                    'reason': '当日最低价未触及委托价', 'mode': mode}
+
+        # 6) 成交价：better=min(开盘价, 委托价)，即以更优价格成交
+        if cfg.get('fill_price', 'better') == 'better' and open_price and open_price > 0:
+            fill_price = min(open_price, order_price)
+        else:
+            fill_price = order_price
+
+        return {'filled': True, 'price': fill_price, 'order_price': order_price,
+                'reason': '', 'mode': mode}
 
     def _get_stock_price(self, stock_code: str, date: date, price_type: str) -> float:
         """获取股票价格
@@ -2255,6 +2564,83 @@ class BacktestEngine:
             'sell_stamp_tax': 0
         }
     
+    def _calc_total_assets(self, current_date, positions: List[Dict],
+                           current_capital: float) -> float:
+        """计算总资产 = 可用资金 + 持仓市值
+
+        持仓市值用**前一交易日收盘价**估值，避免未来函数（与首次建仓的凯利金额口径一致）。
+        供首次建仓与加仓共用，确保两处凯利金额一致。
+        """
+        total_assets = current_capital
+        prev_trading_day = self._get_previous_trading_day(current_date)
+        for position in positions:
+            position_price = self._get_stock_price(position['stock_code'], prev_trading_day, 'close')
+            if position_price is None or position_price <= 0:
+                position_price = position['buy_price']
+            total_assets += position['quantity'] * position_price
+        return total_assets
+
+    def _check_no_new_high_exit(self, stock_code: str, as_of_date, window: int,
+                                ma_period: int, buy_date=None) -> Tuple[bool, bool, str]:
+        """判断"三日（滚动）未创新高 且 收盘跌破 N 日线"卖出条件
+
+        判据（均以 as_of_date 及之前的数据为准，避免前视偏差）：
+          A. **未创新高**：最近 window 日的最高价 < **买入以来**的最高价
+             `max(high[-window:]) < max(high[buy_date .. as_of_date])`
+             —— 即近 window 日再也刷不出持仓期新高，涨势已停滞
+          B. **跌破均线**：as_of_date 收盘 < MA(ma_period)（默认 5 日线）
+
+        Args:
+            stock_code: 股票代码
+            as_of_date: 判定基准日（调用方传 T-1，避免前视偏差）
+            window: 未创新高的滚动窗口（默认 3 个交易日）
+            ma_period: 均线周期（默认 5）
+            buy_date: 建仓日；"买入以来最高价"自该日起算（含建仓日）。
+                      未提供时退化为"截至基准日的全部数据"。
+
+        返回:
+            (A 是否成立, B 是否成立, 说明文本)
+        """
+        try:
+            df = self.stock_filtered_cache.get(stock_code)
+            if df is None or df.empty:
+                return False, False, '无K线数据'
+            d = df
+            # 统一为正序（最旧在前）
+            if len(d) > 1 and str(d['date'].iloc[0]) > str(d['date'].iloc[-1]):
+                d = d.iloc[::-1].reset_index(drop=True)
+            date_str = (as_of_date.strftime('%Y-%m-%d')
+                        if hasattr(as_of_date, 'strftime') else str(as_of_date))
+            d = d[d['date'] <= date_str]
+            need = max(window, ma_period)
+            if len(d) < need:
+                return False, False, f'数据不足({len(d)}<{need})'
+            high = d['high'].astype(float)
+            close = d['close'].astype(float)
+            recent_high = float(high.iloc[-window:].max())
+
+            # 买入以来最高价（含建仓日）
+            if buy_date is not None:
+                bd_str = (buy_date.strftime('%Y-%m-%d')
+                          if hasattr(buy_date, 'strftime') else str(buy_date))
+                since_entry = d[d['date'] >= bd_str]
+            else:
+                since_entry = d
+            since_high = (float(since_entry['high'].max())
+                          if not since_entry.empty else recent_high)
+
+            ma = float(close.iloc[-ma_period:].mean())
+            cur_close = float(close.iloc[-1])
+            a = recent_high < since_high
+            b = cur_close < ma
+            detail = (f'近{window}日最高{recent_high:.2f} < 买入以来最高{since_high:.2f}'
+                      f'(未创新高={a})；收盘{cur_close:.2f} vs MA{ma_period} '
+                      f'{ma:.2f}(破线={b})')
+            return a, b, detail
+        except Exception as e:
+            logger.debug(f'三日未创新高判定异常({stock_code}): {e}')
+            return False, False, '判定异常'
+
     def _process_sell(self, positions: List[Dict], current_date: date, config: Dict) -> Tuple[List[Dict], List[Dict]]:
         """处理卖出操作
         
@@ -2282,6 +2668,8 @@ class BacktestEngine:
         enable_trailing_stop = config.get('enable_trailing_stop', True)
         base_stop_level = -6  # 基础止损固定为-6%
         trailing_trigger_threshold = 5  # 触发移动止损的最低收益率（最高收益≥5%才启用移动止损）
+        # 移动止损自最高价的回撤比例(%，默认8；与实盘运行器一致)
+        trailing_drawdown_pct = config.get('trailing_drawdown_pct', 8)
         
         # 获取亏损冷却期配置
         enable_loss_cool_down = config.get('enable_loss_cool_down', True)
@@ -2349,19 +2737,11 @@ class BacktestEngine:
             
             # 计算从买入日期到前一交易日的最高价
             # 移动止损的最高价应该是买入日期至前一日的最高价，不包括当日最高价
-            current_highest_price = buy_price
-            if stock_code in self.stock_data_cache:
-                df = self.stock_data_cache[stock_code]
-                buy_date_str = buy_date.strftime('%Y-%m-%d')
-                # 获取前一交易日
-                prev_trading_day = self._get_previous_trading_day(current_date)
-                if prev_trading_day:
-                    prev_day_str = prev_trading_day.strftime('%Y-%m-%d')
-                    # 筛选买入日期到前一交易日的数据
-                    mask = (df['date'] >= buy_date_str) & (df['date'] <= prev_day_str)
-                    filtered_df = df[mask]
-                    if not filtered_df.empty:
-                        current_highest_price = filtered_df['high'].max()
+            # 移动止损的最高价：截至前一日的最高价，且【不含建仓日】
+            # 与实盘运行器一致（实盘 _exclude_buy_day 排除建仓日）：
+            # 建仓日成交前形成的高点不应抬高移动止损位，否则建仓首日即可能误触发
+            current_highest_price = self._get_highest_price_since_entry(
+                stock_code, buy_date, prev_trading_day, buy_price)
             
             # 计算最高价收益率
             highest_price_return = (current_highest_price - buy_price) / buy_price * 100
@@ -2393,9 +2773,9 @@ class BacktestEngine:
                     if enable_trailing_stop:
                         # 移动止损逻辑：
                         # - 最高收益 < 5%：使用固定止损 -6%
-                        # - 最高收益 >= 5%：移动止损 = 截至前一日的最高价 × 92%
+                        # - 最高收益 >= 5%：移动止损 = 截至前一日的最高价 × (1 - 回撤%)
                         if highest_price_return >= trailing_trigger_threshold:
-                            stop_price = current_highest_price * 0.92
+                            stop_price = current_highest_price * (1 - trailing_drawdown_pct / 100)
                             current_stop = (stop_price - buy_price) / buy_price * 100
                         
                         logger.info(f"  {stock_code} {stock_name} - 移动止损: 买入价={buy_price:.2f}, 最高价={current_highest_price:.2f}, 最高价收益率={highest_price_return:.2f}%, 止损价={stop_price:.2f}")
@@ -2443,6 +2823,22 @@ class BacktestEngine:
                                     sell_quantity = position['quantity']
                                     logger.info(f"  策略信号: 清仓 - {result.message}")
                 
+                # 4. 【可选】三日（滚动）未创新高 且 收盘跌破 N 日线 → 卖出
+                #    "未创新高" = max(最近 N 日最高价) < max(买入以来最高价)
+                #    默认关闭（普通回测不受影响）；自适应回测在 config 中默认开启
+                #    （enable_no_new_high_exit=True）
+                if (not sell_type and not reduce_quantity
+                        and config.get('enable_no_new_high_exit', False)):
+                    _w = int(config.get('no_new_high_window', 3))
+                    _mp = int(config.get('no_new_high_ma', 5))
+                    _no_new_high, _below_ma, _detail = self._check_no_new_high_exit(
+                        stock_code, prev_trading_day, _w, _mp, buy_date)
+                    if _no_new_high and _below_ma:
+                        sell_type = 'no_new_high'
+                        logger.info(f"  {stock_code} {stock_name} - "
+                                    f"近{_w}日未创新高（未超买入以来最高价）且收盘跌破"
+                                    f"{_mp}日线，卖出: {_detail}")
+
                 if not sell_type and not reduce_quantity:
                     logger.info(f"  {stock_code} {stock_name} - 无卖出信号，继续持有")
             else:
@@ -2510,7 +2906,9 @@ class BacktestEngine:
                             logger.warning(f"  股票 {stock_code} 连续亏损 {current_count} 次，加入冷却池至 {cool_down_end}")
             
             # 检查是否触发亏损冷却期（单笔亏损超阈值）
-            elif enable_loss_cool_down and return_rate <= cool_down_threshold:
+            # 与实盘一致：使用【独立 if】。原为 elif，因上方 enable_consecutive_loss_limit
+            # 默认为 True，该分支永远不会执行，导致回测"单笔亏损 ≤ -8% 冷却 20 天"完全失效。
+            if enable_loss_cool_down and return_rate <= cool_down_threshold:
                 cool_down_end = self._get_future_trading_day(current_date, cool_down_days)
                 self.loss_cool_down_pool[stock_code] = cool_down_end
                 logger.warning(f"  股票 {stock_code} 单笔亏损 {return_rate:.2f}% 超过阈值 {cool_down_threshold}%，加入冷却池至 {cool_down_end}")

@@ -14,9 +14,9 @@
   3. 北向资金（最近季度）- 权重 20%
   4. 主力与散户方向 - 权重 25%
 
-一票否决条件：
-  - 5日主力净额 < -1000万元
-  - 大单净流入 < 0 且 小单净流入 > 0（出货信号）
+一票否决条件（2026-09-11 增加"占成交额比"强度口径）：
+  - 5日主力净额 < -10000 万元 且 大单净流入占比 < -5%（无占比字段时回退 净额/成交额）
+  - 大单净流出占比 > 1% 且 小单净流入占比 > 1%（出货信号）
 """
 
 import json
@@ -49,8 +49,22 @@ WEIGHT_DIRECTION = 0.25       # 主力散户方向权重
 
 # 一票否决得分
 VETO_SCORE = -100
-# 主力净流入一票否决阈值（万元）
+# 主力净流入一票否决阈值（万元，绝对口径）
 VETO_MAIN_NET_FLOW_THRESHOLD = -10000
+# 【2026-09-11】主力净额"占成交额比"一票否决阈值（%，相对口径）
+#   问题：绝对阈值（-10000 万元）对不同成交额的股票不等价——
+#        大成交额股票正常的资金波动就可能超过 1 亿，容易被错杀。
+#   处理：采用**联合判定**——仅当【绝对额超阈】且【净额/成交额 < 本阈值】时才否决；
+#        成交额很大导致占比很轻时，视为正常波动 → 不否决。
+#        设 None 可关闭相对口径（回退为纯绝对阈值）。
+VETO_NET_FLOW_RATIO_THRESHOLD = -5.0
+# 【2026-09-11】出货信号（条件2）占比阈值（%）：需**同时**满足——
+#   ① 大单净流出额占成交额 >  1%
+#   ② 小单净流入额占成交额 >  1%
+#   原口径（大单净流入<0 且 小单净流入>0）不含强度，轻微流动即被判出货；
+#   改为占比口径后，只有"量级显著"的流出/流入才判出货。
+#   设 None 可关闭（回退为纯方向判定）。
+VETO_DISTRIBUTION_RATIO_THRESHOLD = 1.0
 
 # Tushare API 重试配置
 MAX_RETRIES = 3        # 最大重试次数
@@ -411,6 +425,11 @@ class MoneyflowScorer:
         if df is None or df.empty:
             return metrics
 
+        # 5日成交额（用于"净额占成交额比"的相对口径；缺失时保持 0 → 回退绝对阈值）
+        if "amount" in df.columns:
+            _amt = pd.to_numeric(df["amount"], errors='coerce').fillna(0).sum()
+            metrics["amount_5d"] = float(_amt)
+
         # 主力净流入 = 大单 + 特大单（moneyflow 接口不直接提供，用这个近似）
         if "buy_elg_amount" in df.columns and "sell_elg_amount" in df.columns:
             elg_buy = pd.to_numeric(df["buy_elg_amount"], errors='coerce').fillna(0)
@@ -711,14 +730,16 @@ class MoneyflowScorer:
             logger.debug(f"北向资金持平: {stock_code}")
             return base_score, "hold"
 
-    def _score_direction(self, large_net: float, small_net: float) -> float:
+    def _score_direction(self, large_net: float, small_net: float,
+                         amount_5d: float = 0.0) -> float:
         """
         计算主力与散户方向维度得分
 
         评分标准：
           大单净流入 > 0 且 小单净流入 < 0：100分
           大单净流入 > 0 且 小单净流入 >= 0：60分
-          大单净流入 < 0 且 小单净流入 > 0：-100分（一票否决）
+          大单净流入 < 0 且 小单净流入 > 0：-100分（出货方向；
+              是否**否决**由 _is_distribution_veto 结合"占成交额比"判定）
           其他情况：0分
 
         参数:
@@ -828,6 +849,11 @@ class MoneyflowScorer:
             "small_net": 0.0,
         }
 
+        # 5日成交额（用于"净额占成交额比"的相对口径；缺失时保持 0 → 回退绝对阈值）
+        if "amount" in df.columns:
+            _amt = pd.to_numeric(df["amount"], errors='coerce').fillna(0).sum()
+            metrics["amount_5d"] = float(_amt)
+
         # 5日主力净额直接使用Tushare已计算好的net_d5_amount字段
         # net_d5_amount是Tushare统一计算的5日主力净额，避免自己求和导致范围不一致
         if "net_d5_amount" in df.columns:
@@ -845,6 +871,20 @@ class MoneyflowScorer:
             metrics["daily_ratios"] = df["buy_lg_amount_rate"].fillna(0).tolist()
         elif "net_buy_rate" in df.columns:
             metrics["daily_ratios"] = df["net_buy_rate"].fillna(0).tolist()
+
+        # 【2026-09-11】出货信号（条件2）直接用接口现成的"净流入占比"字段（%），
+        #   无需拿 5 日成交额去算：
+        #     buy_lg_amount_rate —— 大单净流入占比（负 = 净流出）
+        #     buy_sm_amount_rate —— 小单净流入占比（正 = 净流入）
+        #   取近 5 日均值，与"近5日"口径保持一致。
+        if "buy_lg_amount_rate" in df.columns:
+            metrics["lg_rate_avg"] = float(
+                pd.to_numeric(df["buy_lg_amount_rate"],
+                              errors='coerce').fillna(0).mean())
+        if "buy_sm_amount_rate" in df.columns:
+            metrics["sm_rate_avg"] = float(
+                pd.to_numeric(df["buy_sm_amount_rate"],
+                              errors='coerce').fillna(0).mean())
 
         # 大单净流入累计
         if "buy_lg_amount" in df.columns and "sell_lg_amount" in df.columns:
@@ -926,12 +966,21 @@ class MoneyflowScorer:
         main_score = self._score_main_net_flow(net_flow_5d)
         detail.main_net_flow_score = main_score
 
-        # 检查主力净流入一票否决
-        if main_score == VETO_SCORE:
+        # 检查主力净流入一票否决（与 check_veto 同一套联合判定，避免绕过相对口径）
+        _veto, _reason = self._is_main_net_flow_veto(
+            net_flow_5d, metrics.get("amount_5d", 0.0),
+            metrics.get('lg_rate_avg'))
+        if _veto:
             detail.veto = True
-            detail.veto_reason = f"5日主力净额 {net_flow_5d:.0f} 万元 < -10000万元"
-            logger.warning(f"股票 {stock_code} 主力净流入一票否决")
+            detail.veto_reason = _reason
+            logger.warning(f"股票 {stock_code} 主力净流入一票否决: {_reason}")
             return VETO_SCORE, detail
+        if main_score == VETO_SCORE:
+            # 绝对额超阈但"占成交额比"温和 → 豁免否决，按最低档（净流出）计分
+            logger.info(f"股票 {stock_code} 5日主力净额超绝对阈但占比温和，"
+                        f"按最低档 -20 计分（不否决）")
+            main_score = -20
+            detail.main_net_flow_score = main_score
 
         # 2. 计算大单占比得分
         daily_ratios = metrics["daily_ratios"]
@@ -943,18 +992,27 @@ class MoneyflowScorer:
         detail.north_fund_score = north_score
         detail.north_fund_status = north_status
 
-        # 4. 计算主力散户方向得分
+        # 4. 计算主力散户方向得分（出货信号判定需要 5日成交额）
         large_net = metrics["large_net"]
         small_net = metrics["small_net"]
-        direction_score = self._score_direction(large_net, small_net)
+        amount_5d = metrics.get("amount_5d", 0.0)
+        direction_score = self._score_direction(large_net, small_net, amount_5d)
         detail.direction_score = direction_score
 
-        # 检查方向一票否决（出货信号）
-        if direction_score == VETO_SCORE:
+        # 检查方向一票否决（出货信号；首选接口占比字段，口径与 check_veto 完全一致）
+        _dv, _dreason = self._is_distribution_veto(
+            large_net, small_net, amount_5d,
+            metrics.get('lg_rate_avg'), metrics.get('sm_rate_avg'))
+        if _dv:
             detail.veto = True
-            detail.veto_reason = "出货信号：大单净流出且小单净流入"
-            logger.warning(f"股票 {stock_code} 出货信号一票否决")
+            detail.veto_reason = _dreason
+            logger.warning(f"股票 {stock_code} 出货信号一票否决: {_dreason}")
             return VETO_SCORE, detail
+        if direction_score == VETO_SCORE:
+            # 出货方向但量级轻微 → 豁免否决，归入"其他情况"（0 分）
+            logger.info(f"股票 {stock_code} 出货方向但量级轻微，按 0 分计（不否决）")
+            direction_score = 0
+            detail.direction_score = direction_score
 
         # 计算综合得分（加权求和）
         total_score = (
@@ -974,15 +1032,145 @@ class MoneyflowScorer:
         )
         return total_score, detail
 
+    @staticmethod
+    def _is_main_net_flow_veto(net_flow_5d: float,
+                               amount_5d: float = 0.0,
+                               lg_rate: float = None) -> Tuple[bool, str]:
+        """判断"5日主力净额"是否触发一票否决（绝对额 + 相对占比 联合判定）
+
+        相对占比的取值优先级（2026-09-11 实测：moneyflow_ths 接口**没有 amount 列**，
+        故"净额/成交额"在真实数据下取不到 → 改用接口现成的占比字段优先）：
+          1. 【首选】lg_rate = 接口 buy_lg_amount_rate 均值（大单净流入占比，%）
+                否决 ⟺ lg_rate < VETO_NET_FLOW_RATIO_THRESHOLD
+          2. 【回退】amount_5d > 0 → 占比 = 净额 / 5日成交额 × 100
+          3. 【兜底】两者都取不到 → 按绝对额否决（兼容旧行为）
+        """
+        try:
+            nf = float(net_flow_5d or 0)
+        except (TypeError, ValueError):
+            nf = 0.0
+        if nf >= VETO_MAIN_NET_FLOW_THRESHOLD:
+            return False, ""
+
+        th = VETO_NET_FLOW_RATIO_THRESHOLD
+
+        # ---- 1. 首选：接口现成的占比字段（大单净流入占比均值，%）----
+        if th is not None and lg_rate is not None:
+            try:
+                lgr = float(lg_rate)
+            except (TypeError, ValueError):
+                lgr = None
+            if lgr is not None:
+                if lgr < th:
+                    return True, (f"5日主力净额 {nf:.0f} 万元 < "
+                                  f"{VETO_MAIN_NET_FLOW_THRESHOLD}万元，且大单净流入占比 "
+                                  f"{lgr:.2f}% < {th}%")
+                logger.info(
+                    f"5日主力净额 {nf:.0f} 万元超绝对阈，但大单净流入占比 "
+                    f"{lgr:.2f}% 未达 {th}%（相对温和）→ 判定为正常波动，不否决")
+                return False, ""
+
+        # ---- 2. 回退：净额 / 5日成交额 ----
+        try:
+            amt = float(amount_5d or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+
+        if amt > 0 and th is not None:
+            ratio = nf / amt * 100
+            if ratio >= th:
+                logger.info(
+                    f"5日主力净额 {nf:.0f} 万元（占成交额 {ratio:.2f}%）"
+                    f"未达相对阈 {th}%（成交额 {amt:.0f} 万元）→ 正常波动，不否决")
+                return False, ""
+            return True, (f"5日主力净额 {nf:.0f} 万元 < "
+                          f"{VETO_MAIN_NET_FLOW_THRESHOLD}万元，且占成交额 "
+                          f"{ratio:.2f}% < {th}%")
+
+        # ---- 3. 兜底：绝对额 ----
+        return True, (f"5日主力净额 {nf:.0f} 万元 < "
+                      f"{VETO_MAIN_NET_FLOW_THRESHOLD}万元")
+
+    @staticmethod
+    def _is_distribution_veto(large_net: float, small_net: float,
+                              amount_5d: float = 0.0,
+                              lg_rate: float = None,
+                              sm_rate: float = None) -> Tuple[bool, str]:
+        """判断是否触发"出货信号"一票否决
+
+        判定优先级：
+          1. 【首选】接口直接提供的"净流入占比"字段（%），**无需自算成交额**：
+                 buy_lg_amount_rate（大单净流入占比）< -阈值
+                 且 buy_sm_amount_rate（小单净流入占比）>  阈值
+          2. 【回退】金额 / 成交额（接口无占比字段时）：
+                 大单净流出额/成交额 > 阈值 且 小单净流入额/成交额 > 阈值
+          3. 【兜底】纯方向判定：大单净流入 < 0 且 小单净流入 > 0
+
+        参数:
+            large_net/small_net: 大单/小单净流入金额（万元）
+            amount_5d: 5日成交额（万元，仅回退路径使用）
+            lg_rate: 大单净流入占比均值（%，接口 buy_lg_amount_rate）
+            sm_rate: 小单净流入占比均值（%，接口 buy_sm_amount_rate）
+        """
+        try:
+            lg = float(large_net or 0)
+        except (TypeError, ValueError):
+            lg = 0.0
+        try:
+            sm = float(small_net or 0)
+        except (TypeError, ValueError):
+            sm = 0.0
+
+        th = VETO_DISTRIBUTION_RATIO_THRESHOLD
+
+        # ---- 1. 首选：接口现成的占比字段（%）----
+        if th is not None and lg_rate is not None and sm_rate is not None:
+            try:
+                lgr = float(lg_rate)
+                smr = float(sm_rate)
+            except (TypeError, ValueError):
+                lgr = smr = None
+            if lgr is not None and smr is not None:
+                if lgr < -th and smr > th:
+                    return True, (f"出货信号：大单净流入占比 {lgr:.2f}% < -{th}% 且 "
+                                  f"小单净流入占比 {smr:.2f}% > {th}%")
+                logger.info(
+                    f"出货信号未达阈值（大单净流入占比 {lgr:.2f}%、小单净流入占比 "
+                    f"{smr:.2f}%；需 大单<-{th}% 且 小单>+{th}%）→ 不触发否决")
+                return False, ""
+
+        # ---- 2. 回退：金额 / 成交额 ----
+        if not (lg < 0 and sm > 0):
+            return False, ""
+
+        try:
+            amt = float(amount_5d or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+
+        if amt > 0 and th is not None:
+            lg_ratio = -lg / amt * 100      # 大单净流出占比（正值）
+            sm_ratio = sm / amt * 100       # 小单净流入占比（正值）
+            if lg_ratio > th and sm_ratio > th:
+                return True, (f"出货信号：大单净流出占成交额 {lg_ratio:.2f}% 且 "
+                              f"小单净流入占成交额 {sm_ratio:.2f}%"
+                              f"（均 > {th}%）")
+            logger.info(
+                f"出货方向但量级轻微（大单净流出占成交额 {lg_ratio:.2f}%、"
+                f"小单净流入占成交额 {sm_ratio:.2f}%，阈值 {th}%）→ 不触发否决")
+            return False, ""
+
+        return True, "出货信号：大单净流出且小单净流入"
+
     def check_veto(
         self, stock_code: str, score_date: str, metrics: dict = None
     ) -> Tuple[bool, str]:
         """
         检查资金面一票否决条件
 
-        一票否决条件：
-          1. 5日主力净额 < -1000万元
-          2. 大单净流入 < 0 且 小单净流入 > 0（出货信号）
+        一票否决条件（2026-09-11 改为"绝对额/方向 + 占比强度"联合判定）：
+          1. 5日主力净额 < -10000 万元 且 大单净流入占比 < -5%
+          2. 大单净流出占比 > 1% 且 小单净流入占比 > 1%
 
         参数:
             stock_code: 股票代码（6位数字）
@@ -1000,18 +1188,23 @@ class MoneyflowScorer:
             # 提取评分指标
             metrics = self._extract_flow_metrics(df)
 
-        # 条件1：5日主力净额 < -10000万元
+        # 条件1：5日主力净额超阈（绝对额 + 相对占比联合判定，避免大成交额错杀；
+        #        相对占比首选接口 buy_lg_amount_rate，ths 接口无成交额字段）
         net_flow_5d = metrics["net_flow_5d"]
-        if net_flow_5d < VETO_MAIN_NET_FLOW_THRESHOLD:
-            reason = f"5日主力净额 {net_flow_5d:.0f} 万元 < -10000万元"
+        amount_5d = metrics.get("amount_5d", 0.0)
+        is_veto, reason = self._is_main_net_flow_veto(
+            net_flow_5d, amount_5d, metrics.get('lg_rate_avg'))
+        if is_veto:
             logger.warning(f"股票 {stock_code} 一票否决: {reason}")
             return True, reason
 
-        # 条件2：大单净流出 + 小单净流入（出货信号）
+        # 条件2：出货信号（首选接口占比字段：大单净流入占比 < -1% 且 小单净流入占比 > 1%）
         large_net = metrics["large_net"]
         small_net = metrics["small_net"]
-        if large_net < 0 and small_net > 0:
-            reason = "出货信号：大单净流出且小单净流入"
+        is_veto, reason = self._is_distribution_veto(
+            large_net, small_net, amount_5d,
+            metrics.get('lg_rate_avg'), metrics.get('sm_rate_avg'))
+        if is_veto:
             logger.warning(f"股票 {stock_code} 一票否决: {reason}")
             return True, reason
 

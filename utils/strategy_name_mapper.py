@@ -58,6 +58,7 @@ def _get_default_mapping():
     default_map = {
         'ContinuousRisingWithVolumeStrategyV2': '连阳回调策略',
         'ResistanceBreakoutStrategy': '阻力位突破策略',
+        'MainUptrendDipBuyStrategy': '主升低吸策略',
         'TrendAccelerationInflectionStrategy': '趋势加速拐点',
         'MorningStarStrategy': '启明星策略',
         'MultiGoldenCrossStrategy': '多金叉共振',
@@ -146,6 +147,7 @@ _TIMING_NAME_MAP = {
     'rsi': 'RSI策略',
     'bollinger': '布林带策略',
     'macd_bollinger': '顺势宝',
+    'uptrend_pullback': '趋势回调缩量策略',
 }
 
 

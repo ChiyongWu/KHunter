@@ -2,6 +2,10 @@ cache:
   cache_dir: data/risk_cache
   cache_expire_hours: 24
   enabled: true
+market_index_adx:
+  enabled: true
+  index_code: 000985.CSI
+  period: 14
 evt:
   enabled: false
   extrapolation_range: 5

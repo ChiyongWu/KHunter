@@ -38,6 +38,7 @@ STRATEGY_CLASS_NAME_MAP = {
     'TrendAccelerationInflectionStrategy': '趋势加速拐点',
     'TrendResonanceReversalStrategy': '趋势共振反转策略',
     'ResistanceBreakoutStrategy': '阻力位突破策略',
+    'MainUptrendDipBuyStrategy': '主升低吸策略',
     'WBottomStrategy': 'W底策略',
     'MultiGoldenCrossStrategy': '多金叉共振策略',
     'MorningStarStrategy': '启明星策略',

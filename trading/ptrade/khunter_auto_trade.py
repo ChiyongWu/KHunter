@@ -1,20 +1,20 @@
 """
-KHunter + ETFHunter 自动交易策略 (PTrade 云端统一部署脚本)
-===========================================================
+KHunter 自动交易策略 (PTrade 云端部署脚本)
+============================================
 本文件同时维护在:
-  1. KHunter 本地:  trading/ptrade/khunter_auto_trade.py  (git 版本控制)
+  1. ETFHunter 本地:  trading/ptrade/khunter_auto_trade.py  (git 版本控制)
   2. PTrade 云端:   /home/fly/notebook/khunter_auto_trade.py (策略执行)
 
 功能:
-  9:31 开盘读取双系统信号文件（KHunter 股票 + ETFHunter ETF）并提交委托
+  9:31 开盘读取 ETFHunter 信号文件（ETF + 股票）并提交委托（通过 run_daily 定时触发）
 
 双信号文件支持:
-  - ETF 信号文件:   ETFHunter_signals_{YYYYMMDD}.csv  (ETFHunter 系统生成)
-  - 股票信号文件:   KHunter_signals_{YYYYMMDD}.csv     (KHunter 系统生成)
+  - ETF 信号文件:   ETFHunter_signals_{YYYYMMDD}.csv
+  - 股票信号文件:   KHunter_signals_{YYYYMMDD}.csv
   - 两个文件独立可选（任一缺失不影响另一方处理）
 
 处理顺序（多级优先级排序）:
-  第一优先级=卖出优于买入; 第二优先级=ETF买入优于股票买入
+  第一优先级=卖出优于买入; 第二优先级=ETF优于股票
   → ETF卖出 → 股票卖出 → ETF买入 → 股票买入
 
   阶段一: 收集全部信号，按优先级排序，分类为卖出/买入
@@ -25,8 +25,8 @@ KHunter + ETFHunter 自动交易策略 (PTrade 云端统一部署脚本)
   - 688 科创板 → 不买入（暂无科创板交易权限）
   - 开盘涨幅 > 3% → 不买入（追高风险）
   - 开盘跌幅 > 3% → 不买入（强势下跌风险）
-  - 当前价偏离信号价 > 3% → 不买入（价格波动风险）
-  - 买入时按当前价下单（limit_price = 当前价）
+  - 当前价高于信号价 > 3% → 不买入（追高风险，上行护栏）
+  - 买入/加仓委托价 = 信号文件中的价格（滑点由 KHunter 侧处理，PTrade 端不再叠加）
   - 资金三档处理:
     ① 可用资金 < 2000元 → 直接跳过（不足最小买入金额）
     ② 2000元 ≤ 可用资金 < 需要金额 → 按可用资金降级买入（100股取整）
@@ -34,8 +34,7 @@ KHunter + ETFHunter 自动交易策略 (PTrade 云端统一部署脚本)
 
 反馈机制:
   - PTrade 原生自动导出 Fund_/Hold_ CSV 文件（不需要策略中手动生成）
-  - KHunter 端 PTradeFeedbackHandler 读取 Fund_/Hold_（仅处理股票持仓，ETF 跳过）
-  - ETFHunter 端独立解析 Fund_/Hold_（仅处理 ETF 持仓，股票跳过）
+  - ETFHunter 端 PTradeFeedbackHandler 读取 Fund_/Hold_ 文件更新 portfolio
 
 在 PTrade 策略模块中配置:
   策略类型: 股票
@@ -48,17 +47,20 @@ import time
 from datetime import datetime
 
 # ============ 全局常量 ============
-# 信号文件模板（{} 填入执行日期 YYYYMMDD）
-# KHunter 生成股票信号，ETFHunter 生成 ETF 信号，PTrade 端合并处理
-SIGNAL_FILE_ETF = "ETFHunter_signals_{}.csv"      # ETFHunter ETF信号文件
-SIGNAL_FILE_STOCK = "KHunter_signals_{}.csv"       # KHunter 股票信号文件
+# 信号文件模板（{} 填入执行日期 YYYYMMDD，与 ETFHunter 端命名一致）
+SIGNAL_FILE_ETF = "ETFHunter_signals_{}.csv"      # ETF信号文件
+SIGNAL_FILE_STOCK = "KHunter_signals_{}.csv"       # 股票信号文件（沿用现有命名）
 
 # 定时触发时间
 MORNING_EXEC_TIME = '9:31'    # 开盘信号处理时间（9:31，等行情落地后再执行）
 
 # 买入价格阈值（当前价偏离信号价 ±3% 以内才下单，信号价=昨收）
 MAX_PRICE_UP_DEVIATION = 0.03    # 当前价高于信号价3%不买入（追高风险）
-MAX_PRICE_DOWN_DEVIATION = 0.03  # 当前价低于信号价3%不买入（强势下跌风险）
+# 下行护栏已取消（需求：取消买入时低于-3%的限制），不再因下跌跳过
+# 说明：PTrade 端不再处理滑点。
+# 滑点已由 KHunter 侧（信号生成端）按买入执行方式计入信号价，
+# 委托价直接取信号文件中的价格，本端不再叠加，避免双重滑点。
+# （原 BUY_SLIPPAGE 常量已移除）
 
 # 最小买入金额（元）：不足此金额直接跳过，避免碎股
 MIN_BUY_AMOUNT = 2000
@@ -134,11 +136,15 @@ def morning_event(context):
     开盘处理事件（run_daily 定时触发，9:31 执行，等第一笔行情落地）
 
     功能: 读取 KHunter 信号文件，获取当前价，
-          检查价格阈值后提交委托（按当前价下单）
+          检查价格阈值后提交委托（按【信号文件中的价格】下单）
+
+    委托价口径（需求变更）:
+      买入/加仓信号一律以信号文件中的价格（order_price）为委托价，
+      不再按开盘/当前价上浮滑点，避免与信号生成端的滑点重复叠加。
 
     参照 ptradesample 的 daily_event 模式:
-      - 使用 get_position(sec).last_sale_price 获取当前价
-      - 使用 order(sec, vol, limit_price=current_price) 按当前价下单
+      - 使用 get_position(sec).last_sale_price 获取当前价（仅用于偏离检查与异常兜底）
+      - 使用 order(sec, vol, limit_price=信号价) 按信号价下单
     """
     today_str = context.current_dt.strftime('%Y%m%d')
     log.info(f"[KHunter] 开盘处理开始, 日期={today_str}")
@@ -157,30 +163,88 @@ def handle_data(context, data):
     pass
 
 
-def _normalize_symbol(symbol):
-    """
-    标准化股票代码为 PTrade 格式（上海 .SS，深圳 .SZ）
+# 交易所代码段前缀 → 后缀映射（A股/场内基金）
+# 上交所 .SS：50/51/52/55/56/58/59(ETF/基金), 60/68/69(股票/科创板), 90/91(B股)
+# 深交所 .SZ：00/30/20(股票), 15/16/18/19(ETF/基金)
+_EXCHANGE_PREFIX_SUFFIX = {
+    '50': 'SS', '51': 'SS', '52': 'SS', '55': 'SS', '56': 'SS', '58': 'SS', '59': 'SS',
+    '60': 'SS', '68': 'SS', '69': 'SS', '90': 'SS', '91': 'SS',
+    '00': 'SZ', '30': 'SZ', '20': 'SZ',
+    '15': 'SZ', '16': 'SZ', '18': 'SZ', '19': 'SZ',
+}
 
-    KHunter 信号文件使用 .SH 表示上海，PTrade 需要转为 .SS
+
+def _infer_exchange_suffix(code):
+    """
+    根据 6 位代码前缀推断交易所后缀（.SS/.SZ）
+
+    仅依据代码前两位在映射表中查找，命中返回对应后缀，未命中返回空串
+    （交由调用方决定如何处理无法推断的代码）。
 
     Args:
-        symbol: 如 "688147.SH" 或 "301314.SZ" 或 "688147"
+        code: 6 位纯数字证券代码（如 "517380"）
 
     Returns:
-        str: PTrade 标准代码，如 "688147.SS" 或 "301314.SZ"
+        str: ".SS" / ".SZ"，无法推断时返回 ""
+    """
+    # 仅取前两位前缀查表，避免越界
+    if len(code) >= 2:
+        return _EXCHANGE_PREFIX_SUFFIX.get(code[:2], "")
+    return ""
+
+
+def _normalize_symbol(symbol):
+    """
+    标准化证券代码为 PTrade 格式（上海 .SS，深圳 .SZ）
+
+    KHunter 信号文件约定上海代码带 .SH、深圳带 .SZ；但 CSV 中纯数字代码
+    （如 ETF 517380）会被 pandas 解析为 int/float，且部分信号可能缺失交易所
+    后缀。本函数统一处理：
+      1) 数值类型(int/float) 先转字符串（整型浮点如 517380.0 去 .0）
+      2) 已带 .SH → 转 .SS；已带 .SZ/.SS → 保留
+      3) 无后缀的 6 位数字代码 → 按交易所前缀自动补全 .SS/.SZ
+      4) NaN/None/空串 → 抛 ValueError
+
+    Args:
+        symbol: 如 "688147.SH"、"301314.SZ"、517380(int)、"517380"
+
+    Returns:
+        str: PTrade 标准代码，如 "688147.SS"、"301314.SZ"、"517380.SS"
 
     Raises:
-        ValueError: 若 symbol 无效（NaN/None/空字符串/非字符串类型）
+        ValueError: 若 symbol 无效（NaN/None/空字符串/类型不可识别）
     """
-    # 防御：NaN 是 float 类型，不是 str
+    # 1) 数值类型先转字符串（CSV 纯数字代码被 pandas 解析为 int/float）
+    if isinstance(symbol, (int, float)):
+        # NaN 是 float，需先排除再转字符串
+        if pd.isna(symbol):
+            raise ValueError(f"无效的股票代码: {symbol} (类型: {type(symbol).__name__})")
+        # 整型浮点(517380.0)去掉 .0，避免 PTrade 无法识别
+        symbol = str(int(symbol)) if isinstance(symbol, float) and symbol == int(symbol) else str(symbol)
+
+    # 2) 防御空值与非字符串
     if symbol is None or not isinstance(symbol, str) or pd.isna(symbol):
         raise ValueError(f"无效的股票代码: {symbol} (类型: {type(symbol).__name__})")
-    symbol = str(symbol).strip()
+
+    symbol = symbol.strip()
     if not symbol:
         raise ValueError("股票代码为空字符串")
+
+    # 3) 已带交易所后缀：直接规范化
     if symbol.endswith('.SH'):
         return symbol[:-3] + '.SS'
-    return symbol  # .SZ 已正确，或无后缀时保留原样
+    if symbol.endswith('.SZ') or symbol.endswith('.SS'):
+        return symbol  # 已是 PTrade 标准后缀，原样返回
+
+    # 4) 无后缀的 6 位数字代码：按前缀补全交易所后缀
+    if symbol.isdigit() and len(symbol) == 6:
+        suffix = _infer_exchange_suffix(symbol)
+        if suffix:
+            return symbol + '.' + suffix
+
+    # 5) 其他无法识别的格式（如无后缀的非6位/非法字符）：告警并原样返回
+    log.warning(f"[KHunter] 代码 {symbol} 无法推断交易所后缀，将尝试原样提交（可能下单失败）")
+    return symbol
 
 
 def _get_pos_symbol(pos):
@@ -394,21 +458,22 @@ def _read_signal_csv(file_path, today_str):
 
 def process_khunter_signals(context, today_str):
     """
-    读取双系统信号文件（KHunter 股票 + ETFHunter ETF）并提交委托
+    读取 KHunter 信号文件（ETF + 股票）并提交委托
 
-    双信号文件:
-      - KHunter_signals_{YYYYMMDD}.csv     (KHunter 股票信号)
-      - ETFHunter_signals_{YYYYMMDD}.csv   (ETFHunter ETF信号)
+    支持双信号文件:
+      - ETFHunter_signals_{YYYYMMDD}.csv  (ETF信号)
+      - stock_signals_{YYYYMMDD}.csv      (股票信号)
       任一文件缺失不影响另一方处理。
 
-    优先级排序:
-      ① 卖出优先于买入（ETF卖出 > 股票卖出 > ETF买入 > 股票买入）
-      ② 买入中 ETF 优先于股票
+    多级优先级排序:
+      ① 卖出优先于买入
+      ② ETF优先于股票
+      → ETF卖出 → 股票卖出 → ETF买入 → 股票买入
 
     三阶段处理:
       阶段一: 收集全部信号，按优先级排序
       阶段二: 先提交全部卖出委托，等待成交到账
-      阶段三: 卖出资金到账后，再处理买入委托（ETF买入优先）
+      阶段三: 卖出资金到账后，再处理买入委托
 
     买入规则:
       1. 获取当前价
@@ -510,6 +575,12 @@ def process_khunter_signals(context, today_str):
             sell_signals.append((idx, signal_id, symbol, volume, src))
             sell_source_count[src] = sell_source_count.get(src, 0) + 1
         elif side == 'buy':
+            # 跳过无效信号: volume <= 0 或 price <= 0 无实际交易意义
+            if volume <= 0 or price <= 0:
+                log.warning(f"[KHunter] {symbol} 买入信号无效 "
+                           f"(volume={volume}, price={price:.2f})，跳过")
+                parse_skip_count += 1
+                continue
             # 科创板权限检查: 688 开头跳过（暂无科创板交易权限）
             if symbol.startswith('688'):
                 log.info(f"[KHunter] {symbol} 科创板暂无交易权限，跳过买入信号")
@@ -557,13 +628,28 @@ def process_khunter_signals(context, today_str):
 
     # ========== 阶段三：等待卖出成交到账 ==========
     if sell_orders:
-        log.info(f"[KHunter] 等待 {len(sell_orders)} 笔卖出成交后继续买入...")
-        pre_sell_cash = context.portfolio.cash
-        filled = _wait_sell_orders_filled(sell_orders, context)
-        post_sell_cash = context.portfolio.cash
-        cash_change = post_sell_cash - pre_sell_cash
-        log.info(f"[KHunter] 卖出成交完成: {filled}/{len(sell_orders)} 笔, "
-                 f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
+        # 识别运行模式：回测中 order() 由回测引擎同步撮合，无需轮询等待成交
+        # 实盘模式仍需轮询 get_order 确认资金到账后再买入，避免资金不足
+        # PTrade 不同定制版/运行入口下 run_type 标识不统一，兼容多种回测取值
+        _BACKTEST_TYPES = ('backtest', 'backtesting', 'history', 'simulate', 'sim', 'paper')
+        run_type = getattr(context, 'run_type', None)
+        is_backtest = run_type is not None and str(run_type).lower() in _BACKTEST_TYPES
+        if is_backtest:
+            # 跳过无效等待，直接确认全部卖出已按当前价撮合成交
+            log.info(f"[KHunter] 回测模式，跳过卖出成交等待（回测引擎已同步撮合 {len(sell_orders)} 笔）")
+            filled = len(sell_orders)
+            post_sell_cash = context.portfolio.cash
+            log.info(f"[KHunter] 卖出成交完成: {filled}/{len(sell_orders)} 笔, "
+                     f"可用资金: {post_sell_cash:.0f}")
+        else:
+            # 实盘：轮询等待成交到账后再继续买入
+            log.info(f"[KHunter] 等待 {len(sell_orders)} 笔卖出成交后继续买入...")
+            pre_sell_cash = context.portfolio.cash
+            filled = _wait_sell_orders_filled(sell_orders, context)
+            post_sell_cash = context.portfolio.cash
+            cash_change = post_sell_cash - pre_sell_cash
+            log.info(f"[KHunter] 卖出成交完成: {filled}/{len(sell_orders)} 笔, "
+                     f"资金变动: {pre_sell_cash:.0f} → {post_sell_cash:.0f} (+{cash_change:.0f})")
 
     # ========== 阶段四：处理买入委托（此时可用资金已包含卖出回款）==========
     # 独立追踪可用资金快照，每笔买入后从中扣除。
@@ -585,7 +671,8 @@ def process_khunter_signals(context, today_str):
             log.warning(f"[KHunter] {symbol} 获取当前价失败: {e}，使用信号价 {price:.2f}")
             current_price = price
 
-        # 规则2: 当前价偏离信号价（昨收）阈值检查，-3% ~ +3% 内才下单
+        # 规则2: 当前价偏离信号价（昨收）阈值检查，仅保留上行护栏（+3% 追高风险跳过）
+        # 下行护栏已取消（需求：取消买入时低于-3%的限制）
         if price > 0 and current_price > 0:
             price_deviation = (current_price - price) / price
             # 当前价过高（追高风险）
@@ -595,17 +682,21 @@ def process_khunter_signals(context, today_str):
                          f"> {MAX_PRICE_UP_DEVIATION:.0%}，跳过买入")
                 buy_skip_count += 1
                 continue
-            # 当前价过低（强势下跌风险）
-            if price_deviation < -MAX_PRICE_DOWN_DEVIATION:
-                log.info(f"[KHunter] {symbol} 当前价 {current_price:.2f} "
-                         f"低于信号价 {price:.2f} ({price_deviation:.1%}) "
-                         f"< -{MAX_PRICE_DOWN_DEVIATION:.0%}，跳过买入")
-                buy_skip_count += 1
-                continue
 
         # 规则3: 检查可用资金（使用自追踪快照，兼容回测/实盘双模式）
+        # 资金预占用按上浮委托价计算，避免实盘成交价略高于当前价导致资金不足
+        # ETF保留3位小数(0.001)，股票保留2位小数(0.01)，与A股价格最小变动单位一致
+        price_precision = 3 if src == 'etf' else 2
+        # 委托价以【信号文件中的价格】为准，不再按当前价上浮滑点。
+        # 信号价由 ETFHunter 按买入执行方式生成（收盘价 或 五日线×滑点），
+        # PTrade 端若再叠加 BUY_SLIPPAGE 会造成双重滑点。
+        if price and price > 0:
+            limit_price = round(price, price_precision)
+        else:
+            # 信号价异常（缺失/为0）时回退当前价（同样不叠加滑点）
+            limit_price = round(current_price, price_precision)
         available_cash = tracked_cash
-        required_amount = volume * current_price * 1.001  # 以当前价计算，预留手续费
+        required_amount = volume * limit_price * 1.001  # 以委托价计算，预留手续费
         if available_cash < required_amount:
             # 可用资金本身已不足最小买入金额，直接跳过，无需尝试调整
             if available_cash < MIN_BUY_AMOUNT:
@@ -615,8 +706,8 @@ def process_khunter_signals(context, today_str):
                 buy_skip_count += 1
                 continue
             # 可用资金不足但 >= MIN_BUY_AMOUNT，按实际资金调整买入数量（100股取整）
-            adjusted_volume = int(available_cash / (current_price * 1.001) / 100) * 100
-            adjusted_amount = adjusted_volume * current_price * 1.001
+            adjusted_volume = int(available_cash / (limit_price * 1.001) / 100) * 100
+            adjusted_amount = adjusted_volume * limit_price * 1.001
             if adjusted_amount < MIN_BUY_AMOUNT:
                 log.warning(f"[KHunter] {symbol} 买入需要 {required_amount:.0f}，"
                            f"可用 {available_cash:.0f}，"
@@ -628,18 +719,18 @@ def process_khunter_signals(context, today_str):
                      f"{volume}股 → {adjusted_volume}股 "
                      f"(需要 {required_amount:.0f}, 可用 {available_cash:.0f})")
             volume = adjusted_volume
-            required_amount = volume * current_price * 1.001  # 更新实际占用金额
+            required_amount = volume * limit_price * 1.001  # 更新实际占用金额
 
-        # 提交委托：按当前价下单
-        order_id = order(symbol, volume, limit_price=current_price)
+        # 提交委托：按【信号文件中的价格】下单（限价单）
+        order_id = order(symbol, volume, limit_price=limit_price)
         g.executed_signals[signal_id] = {
             'order_id': order_id,
             'symbol': symbol,
             'side': 'buy',
             'volume': volume,
-            'price': current_price,        # 记录实际下单价格
+            'price': limit_price,          # 记录实际委托价（= 信号文件中的价格）
             'signal_price': price,         # 保留原始信号价供参考
-            'price_type': 'current',       # 标记为按当前价下单
+            'price_type': 'signal',        # 标记为按信号价下单
             'signal_id': signal_id,
             'source_type': src,
             'submit_time': context.current_dt.strftime('%H:%M:%S')
@@ -649,9 +740,13 @@ def process_khunter_signals(context, today_str):
         tracked_cash -= required_amount
         reserved_cash += required_amount  # 日志累计
 
+        # 偏离计算仅在 price > 0 时有效，防御零除异常
+        deviation_str = ""
+        if price > 0:
+            deviation_str = f"偏离={(current_price/price-1)*100:+.2f}% "
         log.info(f"[KHunter] 买入委托[{src}]: {symbol} {volume}股 "
                  f"信号价={price:.2f} 当前价={current_price:.2f} "
-                 f"偏离={(current_price/price-1)*100:+.2f}% "
+                 f"{deviation_str}"
                  f"占用 {required_amount:.0f} (累计占用 {reserved_cash:.0f}) order_id={order_id}")
 
     log.info(f"[KHunter] 信号处理完成: 卖出{sell_count}条, 买入{buy_count}条, "

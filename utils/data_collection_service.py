@@ -1085,6 +1085,35 @@ class DataCollectionService:
                 self._add_update_log(f"⚠ 风控状态计算失败: {str(e)}")
                 logger.warning(f"风控状态计算失败: {str(e)}")
             
+            # 【第12步】计算并保存全A指数ADX（市场趋势强度，与温度同批次产出）
+            self._add_update_log("【第11步】计算并保存全A指数ADX...")
+            try:
+                from utils.market_index_adx import MarketIndexADX, DataNotAvailableError
+                from trading.market_index_adx_dao import MarketIndexADXDAO
+
+                # 计算全A指数（默认中证全指 000985.CSI）ADX，不使用缓存确保取最新数据
+                adx_calculator = MarketIndexADX()
+                adx_result = adx_calculator.calculate(trade_date_yyyymmdd, use_cache=False)
+
+                adx_dao = MarketIndexADXDAO()
+                adx_dao.save(adx_result)
+
+                self._add_update_log(
+                    f"✓ 全A指数ADX计算完成: ADX={adx_result.get('adx')} "
+                    f"(强度={adx_result.get('trend_strength')}, "
+                    f"方向={adx_result.get('trend_direction')})")
+                logger.info(f"全A指数ADX已保存: {trade_date_yyyymmdd} - {adx_result}")
+
+            except DataNotAvailableError as e:
+                # 非交易日或接口无数据，属正常情况，跳过（不影响更新结果判定）
+                self._add_update_log(f"ℹ 全A指数ADX跳过: {str(e)}")
+                logger.info(f"全A指数ADX跳过（非交易日或数据不可用）: "
+                            f"{trade_date_yyyymmdd} - {str(e)}")
+
+            except Exception as e:
+                self._add_update_log(f"⚠ 全A指数ADX计算失败: {str(e)}")
+                logger.warning(f"全A指数ADX计算失败: {str(e)}")
+            
             # 检查是否有数据被成功更新
             total_added = self.update_status['totalStats']['kline_added'] + self.update_status['totalStats']['fund_flow_added']
             total_updated = self.update_status['totalStats']['kline_updated'] + self.update_status['totalStats']['fund_flow_updated']

@@ -29,7 +29,7 @@ class OversoldReboundStrategy(BaseStrategy):
 
     # 默认参数（与 config/strategy_params.yaml 的 params 段保持一致）
     DEFAULT_PARAMS = {
-        'lookback_days': 30,          # 超跌检查回溯交易日数
+        'lookback_days': 100,         # 超跌检查回溯交易日数
         'decline_threshold': 0.50,    # 区间最高→最低下跌幅度阈值
         'bottom_window': 3,           # 底部特征搜索窗口
         'macd_divergence_days': 20,   # MACD底背离判断窗口
@@ -37,12 +37,16 @@ class OversoldReboundStrategy(BaseStrategy):
         'macd_slow': 26,              # MACD慢线EMA周期
         'macd_signal': 9,             # MACD信号线EMA周期
         'enable_bottom_fractal': True,   # 启用底分型特征
-        'fractal_require_yang': False,   # 底分型右侧是否要求阳线
+        'fractal_require_yang': True,    # 底分型右侧是否要求阳线
         'enable_low_td9': True,          # 启用低位九转特征
         'enable_morning_star': True,     # 启用启明星形态（宽松版）特征
         'morning_star_body_threshold': 0.03,  # 第一根阴线实体最小百分比
         'morning_star_small_ratio': 0.5,      # 第二根小实体相对第一根实体的比例上限
         'rebound_cap': 0.30,            # 选股日收盘相对区间最低价涨幅上限
+        'require_selection_day_yang': True,  # 选股日必须阳线且涨幅>0
+        'selection_day_min_gain': 0.01,      # 选股日相对前一日收盘最小涨幅(1%)
+        'volume_surge_ratio': 1.3,           # 选股日量能/前5日均量 倍数下限
+        'volume_avg_days': 5,                # 量能比较的基准均量窗口
     }
 
     def __init__(self, params=None):
@@ -130,6 +134,91 @@ class OversoldReboundStrategy(BaseStrategy):
         rebound = (close0 - min_low) / min_low  # 相对最低价反弹幅度
         if rebound <= cap:
             reasons.append(f"选股日收盘较区间最低价反弹{rebound*100:.1f}%（上限{cap*100:.0f}%）")
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    # 规则C3b：选股日阳线且涨幅>0（必要条件）
+    # ------------------------------------------------------------------ #
+    def _check_selection_day_yang(self, df: pd.DataFrame, reasons: list) -> bool:
+        """
+        检查选股日（最新交易日，倒序 idx0）是否为阳线且相对前一日收盘涨幅>0
+
+        df 倒序：idx0 = 选股日，idx1 = 前一交易日。
+        阳线：close[idx0] > open[idx0]
+        涨幅>0：close[idx0] > close[idx1]（相对前一日收盘上涨）
+
+        :param df: 含 open/close 的 DataFrame（倒序，index=0最新）
+        :param reasons: 命中理由列表
+        :return: True 表示选股日为阳线且涨幅>0
+        """
+        if len(df) < 2:
+            return False  # 至少需要两根K线以判断涨幅
+        today_close = df['close'].iloc[0]   # 选股日收盘价
+        today_open = df['open'].iloc[0]     # 选股日开盘价
+        prev_close = df['close'].iloc[1]    # 前一交易日收盘价
+        # 阳线：收 > 开
+        is_yang = today_close > today_open
+        # 涨幅 > 0：收 > 昨收
+        is_rising = today_close > prev_close
+        if is_yang and is_rising:
+            reasons.append("选股日为阳线且相对前一日收盘上涨")
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    # 规则C4：选股日涨幅阈值（必要条件）
+    # ------------------------------------------------------------------ #
+    def _check_selection_day_gain(self, df: pd.DataFrame, reasons: list) -> bool:
+        """
+        检查选股日（倒序 idx0）相对前一交易日收盘涨幅是否达到最小阈值
+
+        涨幅 = (close[idx0] - close[idx1]) / close[idx1]
+        要求涨幅 > selection_day_min_gain（默认 2%），用于过滤弱反弹。
+
+        :param df: 含 close 的 DataFrame（倒序，index=0最新）
+        :param reasons: 命中理由列表
+        :return: True 表示选股日涨幅达到阈值
+        """
+        min_gain = float(self.params['selection_day_min_gain'])  # 最小涨幅阈值
+        if len(df) < 2:
+            return False  # 至少需要两根K线
+        today_close = df['close'].iloc[0]   # 选股日收盘价
+        prev_close = df['close'].iloc[1]    # 前一交易日收盘价
+        if prev_close <= 0 or pd.isna(prev_close) or pd.isna(today_close):
+            return False  # 价格异常
+        gain = (today_close - prev_close) / prev_close  # 相对前收涨幅
+        if gain > min_gain:
+            reasons.append(f"选股日涨幅{gain*100:.1f}%（下限{min_gain*100:.0f}%）")
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    # 规则C5：选股日量能放大（必要条件）
+    # ------------------------------------------------------------------ #
+    def _check_volume_surge(self, df: pd.DataFrame, reasons: list) -> bool:
+        """
+        检查选股日（倒序 idx0）成交量是否达到前 N 日均量的 volume_surge_ratio 倍
+
+        基准均量：选股日之前 volume_avg_days 日（idx1~idxN）收盘量均值
+        要求：vol[idx0] >= avg_vol * volume_surge_ratio（默认 1.5 倍）
+
+        :param df: 含 volume 的 DataFrame（倒序，index=0最新）
+        :param reasons: 命中理由列表
+        :return: True 表示选股日量能放大达到阈值
+        """
+        ratio = float(self.params['volume_surge_ratio'])  # 量能放大倍数下限
+        avg_days = int(self.params['volume_avg_days'])     # 基准均量窗口
+        if len(df) < avg_days + 1:
+            return False  # 数据不足（需选股日 + 前 N 日）
+        today_vol = df['volume'].iloc[0]  # 选股日成交量
+        # 选股日之前的 avg_days 日量能均值（idx1 ~ idxN）
+        base_vol = df['volume'].iloc[1:1 + avg_days].mean()
+        if base_vol <= 0 or pd.isna(base_vol) or pd.isna(today_vol):
+            return False  # 量能异常
+        actual_ratio = today_vol / base_vol  # 实际放大倍数
+        if actual_ratio >= ratio:
+            reasons.append(f"选股日量能达前{avg_days}日均量{actual_ratio:.1f}倍（下限{ratio:.1f}倍）")
             return True
         return False
 
@@ -298,6 +387,19 @@ class OversoldReboundStrategy(BaseStrategy):
         if not self._check_rebound_cap(df, reasons):
             return []  # 反弹幅度已超过上限，快速剪枝
 
+        # 规则C3b：选股日必须阳线且涨幅>0（必要条件，可通过参数关闭）
+        if self.params.get('require_selection_day_yang', True):
+            if not self._check_selection_day_yang(df, reasons):
+                return []  # 选股日非阳线或收跌，快速剪枝
+
+        # 规则C4：选股日涨幅需达到最小阈值（必要条件，过滤弱反弹）
+        if not self._check_selection_day_gain(df, reasons):
+            return []  # 选股日涨幅未达阈值，快速剪枝
+
+        # 规则C5：选股日量能需放大至前 N 日均量的指定倍数（必要条件）
+        if not self._check_volume_surge(df, reasons):
+            return []  # 选股日量能未放大，快速剪枝
+
         # 规则2a：MACD底背离（必须条件，不满足则直接剪枝）
         hit_features = []  # 记录命中的特征标签
         if not self._check_macd_divergence(df, reasons):
@@ -344,6 +446,9 @@ class OversoldReboundStrategy(BaseStrategy):
         return [
             f"必要条件：近{lb}交易日区间最高价到最低价下跌幅度 > {t*100:.0f}%",
             f"必要条件：选股日收盘较区间最低价反弹幅度 <= {cap*100:.0f}%",
+            "必要条件：选股日为阳线且相对前一日收盘涨幅 > 0",
+            f"必要条件：选股日相对前一日收盘涨幅 > {float(self.params['selection_day_min_gain'])*100:.0f}%",
+            f"必要条件：选股日成交量达前{int(self.params['volume_avg_days'])}日均量的 {float(self.params['volume_surge_ratio']):.1f} 倍及以上",
             "必须特征：",
             "  ① MACD底背离：价格创新低而MACD柱未同步新低（必须）",
             "附加特征（满足之一）：",

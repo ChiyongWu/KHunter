@@ -2778,3 +2778,294 @@ def export_execution_plan(plan_id):
             'message': f'导出执行方案失败: {str(e)}',
             'data': None
         }), 500
+
+
+# ======================================================================
+# 自适应回测（ADX regime 路由）—— 独立功能，不影响现有策略回测
+# ======================================================================
+
+from pathlib import Path as _RegimePath
+
+_REGIME_CONFIG_PATH = _RegimePath(__file__).resolve().parent.parent / 'config' / 'regime_router.yaml'
+
+
+def _load_regime_config_raw() -> dict:
+    """读取 regime_router.yaml（缺失/异常时返回空字典）"""
+    try:
+        import yaml
+        if _REGIME_CONFIG_PATH.exists():
+            with open(_REGIME_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.warning(f'读取 regime_router.yaml 失败: {e}')
+    return {}
+
+
+def _fill_buy_execution(rules: dict) -> dict:
+    """为每条规则补齐 buy_execution（缺失时按方向推导：多头 open / 空头 ma_limit）
+
+    兼容旧配置：yaml 中未写该字段时，页面也能正确显示，不会静默丢失。
+    """
+    from trading.regime_router import default_buy_execution
+
+    out = {}
+    for reg, rule in (rules or {}).items():
+        r = dict(rule or {})
+        if not r.get('buy_execution'):
+            r['buy_execution'] = default_buy_execution(reg)
+        out[reg] = r
+    return out
+
+
+@trading_bp.route('/backtest/regime/config', methods=['GET'])
+def get_regime_config():
+    """获取自适应回测路由配置（默认=上次保存；首次=内置默认）"""
+    try:
+        from trading.regime_router import DEFAULT_CONFIG, DEFAULT_RULES
+
+        raw = (_load_regime_config_raw().get('regime_router') or {})
+        resp = jsonify({
+            'success': True,
+            'data': {
+                'enabled': raw.get('enabled', DEFAULT_CONFIG['enabled']),
+                'confirm_days': raw.get('confirm_days', DEFAULT_CONFIG['confirm_days']),
+                'rules': _fill_buy_execution(raw.get('rules') or DEFAULT_RULES),
+                'is_default': not raw.get('rules'),
+            }
+        })
+        # 禁止缓存：否则保存配置后页面可能仍显示旧值
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+        return resp, 200
+    except Exception as e:
+        logger.error(f'获取自适应路由配置失败: {e}')
+        return jsonify({'success': False, 'message': str(e), 'data': None}), 500
+
+
+@trading_bp.route('/backtest/regime/config', methods=['POST'])
+def save_regime_config():
+    """保存路由配置到 config/regime_router.yaml（写前自动备份 .bak）"""
+    try:
+        import shutil
+
+        import yaml
+
+        data = request.get_json() or {}
+        rules = data.get('rules')
+        if not isinstance(rules, dict) or not rules:
+            return jsonify({'success': False, 'message': 'rules 不能为空', 'data': None}), 400
+
+        raw = _load_regime_config_raw()
+        section = raw.get('regime_router') or {}
+        section['rules'] = rules
+        if data.get('confirm_days') is not None:
+            section['confirm_days'] = int(data['confirm_days'])
+        # 保持默认关闭，避免影响其它入口（页面运行时会显式开启）
+        section.setdefault('enabled', False)
+        raw['regime_router'] = section
+
+        _REGIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _REGIME_CONFIG_PATH.exists():
+            shutil.copy2(str(_REGIME_CONFIG_PATH), str(_REGIME_CONFIG_PATH) + '.bak')
+        with open(_REGIME_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            yaml.dump(raw, f, allow_unicode=True, sort_keys=False)
+
+        logger.info(f'自适应路由配置已保存: {len(rules)} 条规则')
+        return jsonify({'success': True, 'message': '配置已保存', 'data': {'rules': rules}}), 200
+    except Exception as e:
+        logger.error(f'保存自适应路由配置失败: {e}')
+        return jsonify({'success': False, 'message': str(e), 'data': None}), 500
+
+
+@trading_bp.route('/backtest/regime/run', methods=['POST'])
+def run_regime_backtest():
+    """执行自适应回测（同步，与现有策略回测一致；结果入库）
+
+    请求体：{start_date, end_date, confirm_days?, rules?}
+    初始资金/单笔比例/止盈止损等自动取自 backtest_config 表（与 /backtest/run 同源）
+    """
+    try:
+        from trading.regime_backtest_engine import RegimeBacktestEngine
+
+        data = request.get_json() or {}
+        start_date = data.get('start_date', '')
+        end_date = data.get('end_date', '')
+        if not start_date or not end_date:
+            return jsonify({
+                'success': False,
+                'message': '缺少必要的执行条件（开始日期、结束日期）',
+                'data': None
+            }), 400
+
+        # 回测参数来源：DB backtest_config（与 /backtest/run 一致）
+        db_config = db_manager.query_one(
+            "SELECT stop_loss, take_profit, hold_period, initial_capital, buy_amount, "
+            "max_daily_buys, score_threshold FROM backtest_config LIMIT 1") or {}
+
+        def _cfg(key, default):
+            """字段存在但为 NULL 时也要回退默认值"""
+            v = db_config.get(key)
+            return default if v is None else v
+
+        score_threshold = _cfg('score_threshold', 60)
+        max_hold_days = _cfg('hold_period', 10)
+        stop_loss = _cfg('stop_loss', -7)
+        take_profit = _cfg('take_profit', 21)
+        initial_capital = _cfg('initial_capital', 300000)
+        buy_amount = _cfg('buy_amount', 100000)
+        max_daily_buys = _cfg('max_daily_buys', 8)
+
+        # 路由配置：请求传入优先，否则用配置文件（enabled 显式开启）
+        router_cfg = {'enabled': True}
+        if isinstance(data.get('rules'), dict) and data['rules']:
+            router_cfg['rules'] = data['rules']
+        if data.get('confirm_days'):
+            router_cfg['confirm_days'] = int(data['confirm_days'])
+
+        config = {
+            'config_name': '自适应回测',
+            'score_threshold': score_threshold,
+            'hold_period': max_hold_days,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'initial_capital': initial_capital,
+            'buy_amount': buy_amount,
+            'max_daily_buys': max_daily_buys,
+            # 入口择时仅作兜底（每日由 regime 决定）
+            'timing_strategy': data.get('timing_strategy', 'turtle'),
+            'timing_params': data.get('timing_params', {}) or {},
+            'support_level_method': data.get('support_level_method', 'ma20'),
+            'start_date': start_date,
+            'end_date': end_date,
+            'regime_router': router_cfg,
+        }
+
+        logger.info(f"[自适应回测] {start_date} ~ {end_date}, 参数: "
+                    f"initial_capital={initial_capital}, max_daily_buys={max_daily_buys}, "
+                    f"confirm_days={router_cfg.get('confirm_days', '(配置)')}")
+        engine = RegimeBacktestEngine(router_config=router_cfg)
+        result = engine.run_backtest('', config)
+
+        perf = result.get('performance', {})
+
+        # 入库（复用现有 DAO，便于在"回测历史"与普通回测对比）
+        result_id = None
+        try:
+            save_result = {
+                'strategy_name': f"自适应回测({result.get('strategy_name', '')})",
+                'support_level_method': 'regime',
+                'backtest_name': f"自适应_{start_date}_{end_date}",
+                'start_date': start_date,
+                'end_date': end_date,
+                'total_trades': perf.get('total_trades', 0),
+                'win_trades': perf.get('win_trades', 0),
+                'loss_trades': perf.get('loss_trades', 0),
+                'win_rate': perf.get('win_rate', 0),
+                'avg_return': perf.get('avg_return', 0),
+                'total_return': perf.get('total_return', 0),
+                'max_return': perf.get('max_return', 0),
+                'min_return': perf.get('min_return', 0),
+                'profit_factor': perf.get('profit_factor', 0),
+                'profit_loss_ratio': perf.get('profit_loss_ratio', 0),
+                'max_drawdown': perf.get('max_drawdown', 0),
+                'sharpe_ratio': perf.get('sharpe_ratio', 0),
+                'initial_capital': initial_capital,
+                'final_capital': result.get('final_capital', initial_capital),
+            }
+            result_id = backtest_dao.save_result(save_result)
+
+            trades = result.get('trades') or []
+            for trade in trades:
+                trade['result_id'] = result_id
+                trade.setdefault('stock_code', '')
+                trade.setdefault('stock_name', '')
+                if not trade.get('selection_date'):
+                    trade['selection_date'] = trade.get('buy_date', start_date)
+                trade.setdefault('buy_date', '')
+                trade.setdefault('buy_price', 0)
+                trade.setdefault('sell_date', '')
+                trade.setdefault('sell_price', 0)
+                trade.setdefault('buy_amount', 0)
+                trade.setdefault('sell_amount', 0)
+                trade.setdefault('profit', trade.get('profit_loss', 0))
+                trade.setdefault('profit_rate', trade.get('return_rate', 0))
+                trade.setdefault('trade_type', 'normal')
+            if trades:
+                backtest_dao.save_trades_batch(trades)
+
+            # 保存收益曲线（与普通回测口径一致）：
+            #   capital_history[0] = 初始资金，capital_history[1:] 对应 dates
+            #   ⚠️ 之前漏了这一步，导致"回测历史"里打开自适应回测没有收益图
+            try:
+                ch = result.get('capital_history') or []
+                ds = result.get('dates') or []
+                if ch and ds:
+                    equity_curve = [{
+                        'date': str(start_date),
+                        'capital': ch[0],
+                        'return_rate': 0.0,
+                    }]
+                    for i, dv in enumerate(ds):
+                        cap = ch[i + 1] if (i + 1) < len(ch) else ch[-1]
+                        try:
+                            cap = float(cap)
+                        except (TypeError, ValueError):
+                            cap = 0.0
+                        if cap > 0 and initial_capital > 0:
+                            rr = ((cap / initial_capital) - 1) * 100
+                        else:
+                            rr = 0.0
+                        equity_curve.append({
+                            'date': str(dv),
+                            'capital': cap,
+                            'return_rate': rr,
+                        })
+                    backtest_dao.save_equity_curve(result_id, equity_curve)
+                    logger.info(f'自适应回测保存收益曲线 {len(equity_curve)} 条')
+                else:
+                    logger.warning('自适应回测缺少 capital_history/dates，收益曲线未入库')
+            except Exception as _e:
+                logger.warning(f'自适应回测收益曲线入库失败（不影响返回）: {_e}')
+        except Exception as e:
+            logger.warning(f'自适应回测结果入库失败（不影响返回）: {e}')
+
+        return jsonify({
+            'success': True,
+            'message': '自适应回测完成',
+            'data': {
+                'result_id': result_id,
+                'performance': perf,
+                'initial_capital': initial_capital,
+                'final_capital': result.get('final_capital'),
+                'trades': result.get('trades', []),
+                'capital_history': result.get('capital_history', []),
+                'dates': result.get('dates', []),
+                'regime_stats': result.get('regime_stats', []),
+                'strategy_switches': result.get('strategy_switches', []),
+                'timing_strategy': result.get('timing_strategy', {}),
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f'自适应回测失败: {str(e)}')
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'message': f'自适应回测失败: {str(e)}',
+            'data': None
+        }), 500
+
+
+@trading_bp.route('/backtest/regime/progress', methods=['GET'])
+def get_regime_backtest_progress():
+    """自适应回测进度（内存态，前端轮询）
+
+    返回：{running, percent, done_days, total_days, current_date, message,
+           started_at, finished_at}
+    """
+    try:
+        from trading.regime_backtest_engine import get_regime_progress
+
+        return jsonify({'success': True, 'data': get_regime_progress()}), 200
+    except Exception as e:
+        logger.error(f'获取自适应回测进度失败: {str(e)}')
+        return jsonify({'success': False, 'message': str(e), 'data': None}), 500

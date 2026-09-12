@@ -1,0 +1,27 @@
+regime_router:
+  enabled: false
+  confirm_days: 1
+  init_immediate: true
+  index_code: 000985.CSI
+  period: 14
+  manual_override:
+    enabled: false
+    selector: null
+    timing: null
+    position: null
+  rules:
+    明确:
+      selector: 金三角策略
+      timing: turtle
+      position: 1
+      buy_execution: open
+    萌芽:
+      selector: 主升低吸策略
+      timing: uptrend_pullback
+      position: 0.5
+      buy_execution: open
+    震荡:
+      selector: 主升低吸策略
+      timing: turtle
+      position: 0
+      buy_execution: open

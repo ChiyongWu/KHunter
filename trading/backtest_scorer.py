@@ -44,6 +44,21 @@ class VetoResult:
         return self.vetoed
 
 
+# ============================================================
+# 简化模式（只判否决）参与判定的维度白名单
+# ============================================================
+#   事件 / 基本面 —— 直接依据数据源判定（保留）
+#   资金面 —— **不走 veto 检查，改走资金面评分**（2026-09-11）：
+#             简化模式的入池分 = 资金面得分（MoneyflowScorer.calculate_score，
+#             相当于"资金面权重 100%"）；该方法内部会先判资金面一票否决，
+#             命中即短路返回 -100 分。
+#   技术面 —— 否决 = "同时命中所有否决策略"，数据源是本地 stock_selection_record
+#             表（数据库依赖；回测场景语义也不严谨），**排除**
+#   板块   —— 否决需先计算板块得分（成本高、非必要），**排除**
+# 如需恢复：把对应维度名加回元组即可（元组顺序 = 检查顺序）
+VETO_ONLY_DIMENSIONS = ('事件', '基本面')
+
+
 class BacktestScoreCalculator:
     """
     回测专用评分计算器
@@ -67,6 +82,9 @@ class BacktestScoreCalculator:
         self.db = db_manager
         # 日期级缓存：{date: {stock_code: scores_dict}}
         self.date_cache: Dict[str, Dict[str, Dict]] = {}
+        # 简化模式（只判否决）日期级缓存：{date: {stock_code: VetoResult}}
+        # 与 date_cache 相互独立，避免"简化模式写入 0 分"污染标准评分缓存
+        self.veto_cache: Dict[str, Dict[str, VetoResult]] = {}
         
         # 如果未传入 token，从配置文件加载
         if tushare_token is None:
@@ -107,8 +125,9 @@ class BacktestScoreCalculator:
             return ""
     
     def clear_cache(self):
-        """清空评分缓存"""
+        """清空评分缓存（含简化模式的否决缓存）"""
         self.date_cache.clear()
+        self.veto_cache.clear()
     
     def is_tushare_available(self) -> bool:
         """检查Tushare数据源是否可用"""
@@ -458,11 +477,137 @@ class BacktestScoreCalculator:
             score_obj.event_score = 50
             return VetoResult()
     
+    # ============================================================
+    # 简化模式：只判一票否决，不做任何打分（2026-09-11）
+    # ============================================================
+
+    def _check_veto_only(self, stock_code: str, score_date: str) -> VetoResult:
+        """只判一票否决、**不做任何打分**；任一维度触发立即返回（短路）
+
+        与标准模式的语义一致性：参与判定的维度中任一 `veto` 即否决，
+        与检查顺序无关（顺序仅影响性能）。
+
+        注：参与判定的维度由 `VETO_ONLY_DIMENSIONS` 决定 —— 默认只含
+        **事件 / 资金面 / 基本面**；技术面（依赖本地数据库）与板块
+        （需先计算板块得分）已排除。
+        """
+        # 日期级缓存（仅否决结果）：同一日期同一股票重复调用不重复请求 API
+        day_cache = self.veto_cache.setdefault(score_date, {})
+        if stock_code in day_cache:
+            return day_cache[stock_code]
+
+        # 可用的维度检查器（实际参与哪些由 VETO_ONLY_DIMENSIONS 决定）
+        all_checks = {
+            "事件": lambda: self.event_scorer.check_veto(stock_code, score_date),
+            "资金面": lambda: self.moneyflow_scorer.check_veto(stock_code, score_date),
+            "基本面": lambda: self.fundamental_scorer.check_veto(stock_code, score_date),
+            "板块": lambda: self.sector_scorer.check_veto(stock_code, score_date),
+            "技术面": lambda: self.technical_scorer.check_veto(stock_code, score_date),
+        }
+
+        for dimension in VETO_ONLY_DIMENSIONS:
+            check = all_checks.get(dimension)
+            if check is None:
+                continue
+            try:
+                veto, reason = check()
+            except Exception as e:
+                logger.debug(f"{dimension}一票否决检查异常({stock_code}): {e}")
+                continue
+            if veto:
+                logger.info(f"【简化评分】{stock_code} 触发一票否决（{dimension}）: {reason}")
+                result = VetoResult(vetoed=True, dimension=dimension, reason=reason)
+                day_cache[stock_code] = result
+                return result
+
+        result = VetoResult()
+        day_cache[stock_code] = result
+        return result
+
+    def _score_batch_veto_only(self, stocks: List[Dict], score_date: str) -> List[Dict]:
+        """简化模式批量评分：只判否决，`score` 一律置 0（不参与池内排序）
+
+        日志策略（2026-09-11 用户要求"只需要评分结果"）：
+        判定过程中**屏蔽各评分器的过程日志**，每只股票只输出一行最终结果
+        （通过 / 否决及原因），最后输出一行批次汇总。
+        """
+        scored_stocks = []
+        veto_count = 0
+
+        # 过程日志屏蔽：临时提高各评分器 logger 级别，结束后恢复
+        noisy_loggers = ('trading.moneyflow_scorer', 'trading.technical_scorer',
+                         'trading.fundamental_scorer', 'trading.sector_scorer',
+                         'trading.event_scorer')
+        saved_levels = {name: logging.getLogger(name).level
+                        for name in noisy_loggers}
+        for name in noisy_loggers:
+            logging.getLogger(name).setLevel(logging.ERROR)
+
+        try:
+            for stock in stocks:
+                stock_code = stock.get('stock_code', '')
+                stock_name = stock.get('stock_name', '')
+                try:
+                    # 第一步：排除一票否决（事件 / 基本面；资金面在评分环节判定）
+                    veto = self._check_veto_only(stock_code, score_date)
+                except Exception as e:
+                    logger.debug(f"简易评分失败({stock_code}): {e}")
+                    veto = VetoResult()
+
+                # 第二步：通过的进入「简易评分」——只算资金面得分（权重 100%）
+                mf_score = 0.0
+                if not veto.vetoed:
+                    try:
+                        mf_score, mf_detail = self.moneyflow_scorer.calculate_score(
+                            stock_code, score_date)
+                        if getattr(mf_detail, 'veto', False):
+                            # 资金面一票否决（calculate_score 内部已短路）
+                            veto = VetoResult(
+                                vetoed=True, dimension='资金面',
+                                reason=getattr(mf_detail, 'veto_reason', '') or '资金面否决')
+                    except Exception as e:
+                        logger.debug(f"资金面评分失败({stock_code}): {e}")
+                        mf_score = 0.0
+                if veto.vetoed:
+                    mf_score = 0.0
+
+                # 简化模式：score = 资金面得分（入池阈值由 filter_candidates 统一判断）
+                stock['score'] = round(float(mf_score), 1)
+                stock['moneyflow_score'] = stock['score']
+                stock['technical_score'] = 0
+                stock['fundamental_score'] = 0
+                stock['sector_score'] = 0
+                stock['event_score'] = 0
+                stock['veto_flag'] = veto.vetoed
+                stock['veto_reason'] = veto.reason
+                stock['veto_dimension'] = veto.dimension
+                stock['score_level'] = '淘汰' if veto.vetoed else '简易'
+                stock.setdefault('strategy_details', [])
+                stock.setdefault('total_strategy_weight', 0)
+
+                # 只输出结果
+                if veto.vetoed:
+                    veto_count += 1
+                    logger.info(f"【简易评分】{stock_code} {stock_name} → "
+                                f"否决（{veto.dimension}：{veto.reason}）")
+                else:
+                    logger.info(f"【简易评分】{stock_code} {stock_name} → "
+                                f"资金面得分 {stock['score']}")
+                scored_stocks.append(stock)
+        finally:
+            for name, level in saved_levels.items():
+                logging.getLogger(name).setLevel(level)
+
+        logger.info(f"【简化评分】结果：共 {len(stocks)} 只，"
+                    f"通过 {len(stocks) - veto_count} 只，否决 {veto_count} 只")
+        return scored_stocks
+
     def calculate_batch_scores(
         self,
         stocks: List[Dict],
         score_date: str,
-        strategy_name: str
+        strategy_name: str,
+        simplified: bool = False
     ) -> List[Dict]:
         """
         批量计算股票评分
@@ -471,10 +616,16 @@ class BacktestScoreCalculator:
             stocks: 股票列表，每项包含 stock_code, stock_name
             score_date: 评分日期
             strategy_name: 策略名称
+            simplified: True → **简化模式：只判一票否决，不做任何打分**
+                        （score 置 0，入池只按 veto_flag 过滤，不参与排序）
             
         返回:
             带评分的股票列表
         """
+        # 简化模式：只验证一票否决（跳过所有维度的打分）
+        if simplified:
+            return self._score_batch_veto_only(stocks, score_date)
+
         scored_stocks = []
         veto_count = 0
         

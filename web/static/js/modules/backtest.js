@@ -587,7 +587,8 @@ function displayBacktestResult(result) {
         'rsi': 'RSI策略',
         'bollinger': '布林带策略',
         'support': '支撑位策略',
-        'macd_bollinger': '顺势宝'
+        'macd_bollinger': '顺势宝',
+        'uptrend_pullback': '趋势回调缩量策略'
     };
     
     // 获取择时策略显示名称
@@ -805,7 +806,8 @@ function displayBacktestHistory(results) {
         'rsi': 'RSI策略',
         'bollinger': '布林带策略',
         'support': '支撑位策略',
-        'macd_bollinger': '顺势宝'
+        'macd_bollinger': '顺势宝',
+        'uptrend_pullback': '趋势回调缩量策略'
     };
     
     const historyBody = document.getElementById('backtest-history-body');
