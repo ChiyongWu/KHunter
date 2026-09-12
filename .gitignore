@@ -44,8 +44,12 @@ reports/
 *.log
 
 # Configuration files (local)
-# config/config.yaml 已纳入版本管理（自 2026-07-19 起跟踪，含流水线/数据源等运行配置；部署时按环境调整本地绝对路径，如 D:/ptrade/output）
+# 【2026-09-12 推送脱敏】config/config.yaml 含飞书 App Secret 等敏感值，已从版本管理移除
+# （历史由 git-filter-repo 清理）；部署请参照 config/config.yaml.template 创建本地 config/config.yaml
+config/config.yaml
 config/tushare_config.json
+config/87659999.json
+config/87659999_decrypted.json
 
 # 备份文件
 *.bak
@@ -142,3 +146,21 @@ data/test_tts*.mp3
 # 根目录更多一次性脚本
 delete_stocks.py
 detect_exdividend_*.py
+
+# ===== 2026-09-12 推送脱敏：远端仅保留源代码，以下运行数据/产物不再入库 =====
+# 说明：这些路径此前虽已写入本文件，但文件早已被跟踪，gitignore 对已跟踪文件无效；
+#       本次配合 git-filter-repo 清理历史后，新产生的文件将被正确忽略。
+# 运行数据（实时状态与批次产物）
+data/backtest_batch/
+data/running/
+data/performance/
+data/bk/
+data/hmm_model/
+data/*.sqlite
+# 测试/文档产物
+test/results/
+test/*.csv
+test/*.txt
+doc/*.csv
+# 本地推送备份目录（方案B执行用，成功后可删除）
+_push_backup/
