@@ -1097,3 +1097,113 @@ class DBManager:
         except Exception as e:
             logger.error(f"批量读取全市场K线失败: {str(e)}")
             return pd.DataFrame()
+
+    # ==================== 股票收藏夹相关方法 ====================
+
+    def add_favorite(self, stock_code: str, stock_name: str = "",
+                     strategy_name: str = "", selection_date: str = "") -> bool:
+        """添加股票到收藏夹
+        Args:
+            stock_code: 股票代码
+            stock_name: 股票名称
+            strategy_name: 选股策略名称
+            selection_date: 选入日期 YYYY-MM-DD
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            sql = """
+                INSERT OR REPLACE INTO stock_favorite
+                (stock_code, stock_name, strategy_name, selection_date, saved_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """
+            conn = self.connect()
+            conn.execute(sql, (stock_code, stock_name, strategy_name, selection_date))
+            conn.commit()
+            logger.info(f"收藏股票成功: {stock_code} {stock_name}")
+            return True
+        except Exception as e:
+            logger.error(f"收藏股票失败 {stock_code}: {str(e)}")
+            return False
+
+    def remove_favorite(self, stock_code: str) -> bool:
+        """从收藏夹移除股票
+        Args:
+            stock_code: 股票代码
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            sql = "DELETE FROM stock_favorite WHERE stock_code = ?"
+            conn = self.connect()
+            conn.execute(sql, (stock_code,))
+            conn.commit()
+            logger.info(f"取消收藏成功: {stock_code}")
+            return True
+        except Exception as e:
+            logger.error(f"取消收藏失败 {stock_code}: {str(e)}")
+            return False
+
+    def get_favorites(self) -> list:
+        """获取所有收藏股票，按保存时间倒序
+        Returns:
+            list: 收藏记录列表
+        """
+        try:
+            sql = """
+                SELECT id, stock_code, stock_name, strategy_name, selection_date, saved_at, remark
+                FROM stock_favorite
+                ORDER BY saved_at DESC
+            """
+            results = self.query(sql)
+            return results if results else []
+        except Exception as e:
+            logger.error(f"获取收藏列表失败: {str(e)}")
+            return []
+
+    def is_favorited(self, stock_code: str) -> bool:
+        """检查股票是否已收藏
+        Args:
+            stock_code: 股票代码
+        Returns:
+            bool: 是否已收藏
+        """
+        try:
+            sql = "SELECT COUNT(*) as cnt FROM stock_favorite WHERE stock_code = ?"
+            results = self.query(sql, (stock_code,))
+            return results and results[0].get('cnt', 0) > 0
+        except Exception as e:
+            logger.error(f"检查收藏状态失败 {stock_code}: {str(e)}")
+            return False
+
+    def get_latest_selection_record(self, stock_code: str) -> dict:
+        """获取股票最近一次选股命中记录
+        Args:
+            stock_code: 股票代码
+        Returns:
+            dict: 包含 strategy_name 和 selection_date 的字典，无记录返回空字典
+        """
+        try:
+            sql = """
+                SELECT strategy_name, selection_date
+                FROM stock_selection_record
+                WHERE stock_code = ? AND is_active = 1
+                ORDER BY selection_date DESC
+                LIMIT 1
+            """
+            results = self.query(sql, (stock_code,))
+            if results:
+                row = results[0]
+                sel_date = row.get('selection_date', '')
+                # 统一日期格式为 YYYY-MM-DD
+                if sel_date:
+                    sel_date = str(sel_date).replace('-', '')[:8]
+                    sel_date = f"{sel_date[:4]}-{sel_date[4:6]}-{sel_date[6:8]}"
+                return {
+                    'strategy_name': row.get('strategy_name', ''),
+                    'selection_date': sel_date,
+                }
+            return {}
+        except Exception as e:
+            logger.error(f"获取选股记录失败 {stock_code}: {str(e)}")
+            return {}

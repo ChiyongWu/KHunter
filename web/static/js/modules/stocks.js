@@ -317,6 +317,11 @@ export function renderStocks(stocks) {
 }
 
 /**
+ * 当前查看的股票代码（用于收藏功能）
+ */
+let currentStockCode = '';
+
+/**
  * 查看股票详情
  * @param {string} code - 股票代码
  */
@@ -341,8 +346,12 @@ export async function viewStockDetail(code) {
  * @param {Object} data - 股票数据
  */
 export function showStockModal(code, data) {
+    currentStockCode = code;
     const modal = document.getElementById('stock-modal');
     document.getElementById('stock-detail-modal-title').textContent = `股票详情: ${code}`;
+    
+    // 检查收藏状态并更新按钮
+    updateFavoriteButton(code);
     
     // 显示K线图表容器
     const chartContainer = document.getElementById('stock-chart-container');
@@ -361,6 +370,74 @@ export function showStockModal(code, data) {
         initKlineChart('stock-chart-container', data);
     });
 }
+
+/**
+ * 更新收藏按钮状态
+ * @param {string} code - 股票代码
+ */
+export async function updateFavoriteButton(code) {
+    const btn = document.getElementById('favorite-btn');
+    if (!btn) return;
+    try {
+        const response = await fetch(`/api/stock/favorite/${code}`);
+        const result = await response.json();
+        if (result.success && result.favorited) {
+            btn.textContent = '⭐';
+            btn.classList.add('active');
+            btn.title = '取消收藏';
+        } else {
+            btn.textContent = '☆';
+            btn.classList.remove('active');
+            btn.title = '收藏';
+        }
+    } catch (error) {
+        console.error('检查收藏状态失败:', error);
+        btn.textContent = '☆';
+        btn.classList.remove('active');
+    }
+}
+
+/**
+ * 切换收藏状态（供 onclick 调用的全局函数）
+ */
+window.toggleFavorite = async function() {
+    const code = currentStockCode;
+    if (!code) return;
+    const btn = document.getElementById('favorite-btn');
+    const isActive = btn.classList.contains('active');
+    
+    try {
+        if (isActive) {
+            // 取消收藏
+            const response = await fetch(`/api/stock/favorite/${code}`, { method: 'DELETE' });
+            const result = await response.json();
+            if (result.success) {
+                btn.textContent = '☆';
+                btn.classList.remove('active');
+                btn.title = '收藏';
+            } else {
+                alert('取消收藏失败: ' + (result.error || ''));
+            }
+        } else {
+            // 添加收藏
+            const response = await fetch('/api/stock/favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stock_code: code }),
+            });
+            const result = await response.json();
+            if (result.success) {
+                btn.textContent = '⭐';
+                btn.classList.add('active');
+                btn.title = '取消收藏';
+            } else {
+                alert('收藏失败: ' + (result.error || ''));
+            }
+        }
+    } catch (error) {
+        alert('操作失败: ' + error.message);
+    }
+};
 
 /**
  * 关闭弹窗

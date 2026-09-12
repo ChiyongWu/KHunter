@@ -900,4 +900,71 @@ CREATE TABLE IF NOT EXISTS risk_status (
 CREATE INDEX IF NOT EXISTS idx_risk_status_date ON risk_status(date);
 -- idx_risk_status_date: 日期索引，用于快速查询特定日期的风控状态
 
+-- ============================================
+-- 全A指数 ADX 表（市场趋势强度，随每日数据更新计算）
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_index_adx (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 主键ID，自增主键
+    trade_date TEXT NOT NULL,
+    -- trade_date: 交易日期，类型TEXT，必填，格式YYYYMMDD，例如20260909
+    index_code TEXT NOT NULL,
+    -- index_code: 指数代码，类型TEXT，必填，例如000985.CSI（中证全指）
+    period INTEGER NOT NULL DEFAULT 14,
+    -- period: ADX周期，类型INTEGER，必填，默认14
+    adx REAL,
+    -- adx: ADX值，类型REAL，可选，<20震荡，20-25萌芽，25-50趋势明确，>=50强趋势
+    plus_di REAL,
+    -- plus_di: +DI多头方向线，类型REAL，可选
+    minus_di REAL,
+    -- minus_di: -DI空头方向线，类型REAL，可选
+    adx_prev REAL,
+    -- adx_prev: 前一交易日ADX值，类型REAL，可选
+    adx_change REAL,
+    -- adx_change: ADX较前一日变化，类型REAL，可选
+    trend_strength TEXT,
+    -- trend_strength: 趋势强度文本，类型TEXT，可选，无趋势(震荡)/趋势萌芽/趋势明确/强趋势
+    trend_direction TEXT,
+    -- trend_direction: 趋势方向，类型TEXT，可选，多头/空头/缠绕
+    close REAL,
+    -- close: 指数当日收盘价，类型REAL，可选
+    data_points INTEGER,
+    -- data_points: 参与计算的样本K线数，类型INTEGER，可选
+    has_enough_data INTEGER NOT NULL DEFAULT 0,
+    -- has_enough_data: 样本是否充足（period*2），类型INTEGER，必填，默认0，1表示充足
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- created_at: 创建时间
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- updated_at: 更新时间
+    UNIQUE(trade_date, index_code)
+    -- 同一交易日同一指数仅保留一条记录
+);
+
+-- 为 market_index_adx 表创建索引
+CREATE INDEX IF NOT EXISTS idx_market_index_adx_date ON market_index_adx(trade_date);
+-- idx_market_index_adx_date: 日期索引，用于快速查询特定日期的指数ADX
+
+-- ==================== 股票收藏夹 ====================
+CREATE TABLE IF NOT EXISTS stock_favorite (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 自增主键，类型INTEGER，必填
+    stock_code VARCHAR(20) NOT NULL,
+    -- stock_code: 股票代码，类型VARCHAR(20)，必填，例如000001
+    stock_name VARCHAR(50),
+    -- stock_name: 股票名称，类型VARCHAR(50)，可选，例如平安银行
+    strategy_name VARCHAR(100),
+    -- strategy_name: 选入的选股策略，类型VARCHAR(100)，可选，例如启明星策略
+    selection_date DATE,
+    -- selection_date: 选入日期，类型DATE，可选，格式YYYY-MM-DD
+    saved_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- saved_at: 保存日期，类型DATETIME，必填，默认当前时间
+    remark TEXT,
+    -- remark: 备注，类型TEXT，可选
+    UNIQUE(stock_code)
+    -- 股票代码唯一，避免重复收藏
+);
+-- 为 stock_favorite 表创建索引
+CREATE INDEX IF NOT EXISTS idx_stock_favorite_code ON stock_favorite(stock_code);
+-- idx_stock_favorite_code: 股票代码索引，用于快速查询收藏状态
+
 

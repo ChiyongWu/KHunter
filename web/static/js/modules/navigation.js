@@ -46,8 +46,10 @@ export function switchPage(page) {
         'backtest-config': '策略回测',
         'backtest-results': '回测结果',
         'backtest-history': '回测历史',
+        'regime-backtest': '自适应回测',
         'khunter': '狩猎场',
         'khunter-track': '狩猎跟踪',
+        'favorites': '收藏夹',
         'strategy-runner': '策略执行器'
     };
     
@@ -107,6 +109,10 @@ export function switchPage(page) {
     } else if (page === 'backtest-history') {
         // 回测历史页面 - 初始化
         import('./backtest.js').then(module => module.initBacktestHistoryPage());
+    } else if (page === 'regime-backtest') {
+        // 自适应回测页面 - 初始化
+        // 版本参数用于突破浏览器模块缓存（改动后需递增）
+        import('./regime-backtest.js?v=20260911').then(module => module.initRegimeBacktestPage());
     } else if (page === 'khunter') {
         // 狩猎场页面 - 初始化
         import('./khunter.js').then(module => module.initKHunterPage());
@@ -116,6 +122,9 @@ export function switchPage(page) {
             module.initKHunterTrackPage();
             module.setupKHunterTrackingEvents();
         });
+    } else if (page === 'favorites') {
+        // 收藏夹页面 - 初始化
+        import('./favorites.js').then(module => module.loadFavorites());
     } else if (page === 'strategy-runner') {
         // 策略执行器页面 - 初始化
         import('./strategy-runner.js').then(module => {

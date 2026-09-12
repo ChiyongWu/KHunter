@@ -1,4 +1,4 @@
-﻿"""
+"""
 Web 服务器 - A股量化选股系统前端
 """
 from trading.strategy_runner import StrategyRunner
@@ -639,6 +639,91 @@ def get_area_stocks():
         })
     except Exception as e:
         logger.error(f"获取板块股票失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ==================== 股票收藏夹相关接口 ====================
+# 注意：收藏相关路由必须放在 /api/stock/<code> 之前，避免被 <code> 通配拦截
+
+@app.route('/api/stock/favorites', methods=['GET'])
+def get_stock_favorites():
+    """获取收藏股票列表接口"""
+    try:
+        favorites = db_manager.get_favorites()
+        return jsonify({'success': True, 'data': favorites})
+    except Exception as e:
+        logger.error(f"获取收藏列表失败: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/stock/favorite', methods=['POST'])
+def add_stock_favorite():
+    """收藏股票接口
+    接收 stock_code，自动从选股历史获取最近一次选股策略和选入日期
+    """
+    try:
+        data = request.get_json(force=True) or request.form
+        stock_code = data.get('stock_code', '').strip()
+        if not stock_code:
+            return jsonify({'success': False, 'error': '股票代码不能为空'})
+
+        # 从 stock_basic 获取股票名称
+        stock_name = ''
+        name_rows = db_manager.query(
+            "SELECT name FROM stock_basic WHERE code = ? LIMIT 1", (stock_code,)
+        )
+        if name_rows:
+            stock_name = name_rows[0].get('name', '')
+
+        # 从选股历史获取最近一次选股策略和选入日期
+        sel_record = db_manager.get_latest_selection_record(stock_code)
+        strategy_name = sel_record.get('strategy_name', '')
+        selection_date = sel_record.get('selection_date', '')
+
+        # 保存收藏
+        ok = db_manager.add_favorite(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            strategy_name=strategy_name,
+            selection_date=selection_date,
+        )
+        if ok:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'strategy_name': strategy_name,
+                    'selection_date': selection_date,
+                },
+            })
+        return jsonify({'success': False, 'error': '收藏失败'})
+    except Exception as e:
+        logger.error(f"收藏股票失败: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/stock/favorite/<code>', methods=['GET'])
+def check_stock_favorite(code):
+    """检查股票是否已收藏接口"""
+    try:
+        favorited = db_manager.is_favorited(code)
+        return jsonify({'success': True, 'favorited': favorited})
+    except Exception as e:
+        logger.error(f"检查收藏状态失败: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/stock/favorite/<code>', methods=['DELETE'])
+def remove_stock_favorite(code):
+    """取消收藏股票接口"""
+    try:
+        ok = db_manager.remove_favorite(code)
+        if ok:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': '取消收藏失败'})
+    except Exception as e:
+        logger.error(f"取消收藏股票失败: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 
@@ -1591,9 +1676,11 @@ def get_timing_strategies():
         # 基础择时策略列表
         timing_strategies = [
             {'name': 'turtle', 'display_name': '海龟策略'},
+            {'name': 'low_turtle', 'display_name': '低位海龟策略'},
             {'name': 'support', 'display_name': '支撑位策略'},
             {'name': 'rsi', 'display_name': 'RSI策略'},
-            {'name': 'bollinger', 'display_name': '布林带策略'}
+            {'name': 'bollinger', 'display_name': '布林带策略'},
+            {'name': 'uptrend_pullback', 'display_name': '趋势回调缩量策略'}
         ]
         logger.info(f"基础择时策略列表: {[s['display_name'] for s in timing_strategies]}")
         
@@ -3582,11 +3669,12 @@ def get_strategy_status():
         return jsonify({"success": False, "error": str(e)})
 
 
-def _get_ptrade_total_asset(runner, working_date: str):
-    """从 PTrade 反馈（Fund 文件）读取权威总资产
+def _get_ptrade_fund_data(runner, working_date: str):
+    """从 PTrade 反馈（Fund 文件）读取可用资金和总资产
 
     PTrade 导出的「总资产」列已包含未成交委托冻结资金、ETF 市值等，
     比「可用资金 + 重算持仓市值」口径更准确，可避免总资产偏小。
+    「可用资金」是实际可下单的资金，比反算（总资产 - 持仓市值）更可靠。
     读取失败（如反馈文件缺失或解析异常）时返回 None，由调用方回退自算。
 
     Args:
@@ -3594,7 +3682,7 @@ def _get_ptrade_total_asset(runner, working_date: str):
         working_date: 工作日期 YYYY-MM-DD
 
     Returns:
-        float 总资产（含 ETF/冻结），或 None
+        dict {'available_cash': float, 'total_asset': float} 或 None
     """
     try:
         # 延迟导入避免模块加载时的循环依赖
@@ -3606,14 +3694,133 @@ def _get_ptrade_total_asset(runner, working_date: str):
         # 工作日期 YYYY-MM-DD → 反馈日期 YYYYMMDD
         feedback_date = working_date.replace('-', '')
         fund = handler.read_fund(feedback_date)
+        available_cash = fund.get('available_cash')
         total_asset = fund.get('total_asset')
         if total_asset:
-            logger.info(f"总资产采用 PTrade 反馈值: {total_asset} (日期 {feedback_date})")
-            return float(total_asset)
+            logger.info(f"资金采用 PTrade 反馈值: 可用资金={available_cash}, 总资产={total_asset} (日期 {feedback_date})")
+            return {
+                'available_cash': float(available_cash) if available_cash else 0.0,
+                'total_asset': float(total_asset)
+            }
     except Exception as e:
         # 反馈文件缺失或解析失败时回退自算，不影响接口可用性
-        logger.warning(f"读取 PTrade 总资产失败，将回退自算: {e}")
+        logger.warning(f"读取 PTrade 资金数据失败，将回退自算: {e}")
     return None
+
+
+def _get_ptrade_total_asset(runner, working_date: str):
+    """兼容旧接口：从 PTrade 反馈读取总资产（内部调用 _get_ptrade_fund_data）"""
+    fund_data = _get_ptrade_fund_data(runner, working_date)
+    return fund_data.get('total_asset') if fund_data else None
+
+
+def _get_portfolio_auto(runner, working_date: str):
+    """自动模式下直接从 PTrade 反馈文件读取资金和持仓（展示以 PTrade 为准）
+
+    按需求处理流程：
+    1. 工作日由 get_working_date 确定（收盘后为当日，否则前一交易日）
+    2. 读取 PTrade 反馈（Fund 文件→资金，Hold 文件→持仓），更新持仓和资产信息
+    3. 展示信息以 PTrade 为准，不依赖 portfolio_*.json 缓存文件
+
+    Args:
+        runner: 策略运行器（提供 main_config 与 db_manager）
+        working_date: 工作日期 YYYY-MM-DD
+
+    Returns:
+        Flask jsonify 响应
+    """
+    from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
+    main_config = getattr(runner, 'main_config', None)
+    handler = PTradeFeedbackHandler(project_root=str(project_root), config=main_config)
+    feedback_date = working_date.replace('-', '')
+    initial_capital = getattr(runner, 'initial_capital', 300000)
+
+    # 1. 资金（Fund 文件）：可用资金、总资产均为 PTrade 权威值
+    fund = handler.read_fund(feedback_date)
+    available_cash = round(fund.get('available_cash', 0.0), 2)
+    total_assets = round(fund.get('total_asset', 0.0), 2)
+    if not total_assets:
+        logger.error(
+            f"【前端-持仓】自动模式下 PTrade 总资产为 0，反馈文件可能异常 (日期 {feedback_date})")
+        return jsonify({
+            "success": False,
+            "error": "PTrade反馈数据未就绪，无法计算总资产",
+            "data": {
+                "positions": [],
+                "available_cash": 0,
+                "total_assets": 0,
+                "total_profit_percent": 0,
+                "initial_capital": initial_capital,
+                "run_mode": "auto",
+                "ptrade_enabled": True,
+                "message": "请等待PTrade反馈文件生成后刷新页面"
+            }
+        })
+
+    # 2. 持仓（Hold 文件，已过滤 ETF）：数量/成本/市值/盈亏均取 PTrade 值
+    holdings = handler.read_holdings(feedback_date)
+
+    # 3. 构建持仓展示列表
+    positions_list = []
+    total_value = 0  # 用最新价计算的持仓总市值
+    for h in holdings:
+        stock_code = h['stock_code']
+        stock_name = h.get('stock_name', '')
+        quantity = h.get('quantity', 0)
+        cost_price = round(h.get('buy_price', 0), 2)
+        # 最新价：优先数据库 working_date 收盘价，缺失时保留 PTrade 反算价
+        current_price = h.get('current_price', 0)
+        ptrade_profit_loss = h.get('profit_loss', 0)
+        try:
+            df_price = runner.db_manager.read_stock(stock_code)
+            if df_price is not None and not df_price.empty:
+                price_row = df_price[df_price['date'] == working_date]
+                if not price_row.empty:
+                    current_price = float(price_row['close'].values[0])
+                else:
+                    current_price = float(df_price['close'].values[-1])
+        except Exception as e:
+            logger.debug(f"获取股票 {stock_code} 价格失败: {e}")
+        # 盈亏：优先 PTrade 盈亏金额，缺失时用最新价重算
+        profit_loss = round(ptrade_profit_loss if ptrade_profit_loss else (current_price - cost_price) * quantity, 2)
+        profit_loss_percent = round(((current_price - cost_price) / cost_price * 100 if cost_price > 0 else 0), 2)
+        total_value += quantity * current_price
+        positions_list.append({
+            'id': stock_code,
+            'stock_code': stock_code,
+            'stock_name': stock_name,
+            'quantity': quantity,
+            'cost_price': cost_price,
+            'current_price': current_price,
+            'stop_loss_price': round(cost_price * 0.95, 2),
+            'take_profit_price': round(cost_price * 1.15, 2),
+            'profit_loss': profit_loss,
+            'profit_loss_percent': profit_loss_percent,
+            'hold_days': 0,
+        })
+
+    positions_count = len(positions_list)
+    total_profit_percent = round(((total_assets - initial_capital) / initial_capital) * 100, 2)
+
+    logger.info(
+        f"【前端-持仓】自动模式以 PTrade 为准: 可用资金={available_cash}, "
+        f"总资产={total_assets}, 持仓数={positions_count} (日期 {working_date})")
+    return jsonify({
+        "success": True,
+        "data": {
+            "positions": positions_list,
+            "positions_count": positions_count,
+            "available_cash": available_cash,
+            "total_assets": total_assets,
+            "total_profit_percent": total_profit_percent,
+            "initial_cash": initial_capital,
+            "date": working_date,
+            "run_mode": "auto",
+            "ptrade_enabled": True,
+            "data_source": "ptrade",
+            "portfolio_date": working_date,
+        }
+    })
 
 
 @app.route('/api/portfolio')
@@ -3634,8 +3841,12 @@ def get_portfolio():
         working_date = runner.get_working_date()
         run_mode = getattr(runner, 'run_mode', 'manual')
         
-        # 查找工作日的 portfolio 文件（自动模式下应由 initialize_daily_data 通过 PTrade 同步写入当日文件）
-        # 整个过程 PTrade 反馈数据只在 initialize_daily_data 中读取一次
+        # 自动模式：展示信息以 PTrade 反馈为准，直接读取 Fund/Hold 文件
+        if run_mode == 'auto':
+            return _get_portfolio_auto(runner, working_date)
+        
+        # ===== 以下为手动模式原有逻辑（读本地 portfolio 文件） =====
+        # 查找工作日的 portfolio 文件
         portfolio_path, found_date, _ = runner.find_latest_portfolio_file(working_date)
 
         # 自动模式数据来源判定：
@@ -3646,7 +3857,8 @@ def get_portfolio():
         data_source = "current" if found_date == working_date else "history"
         if data_source == "history":
             logger.warning(
-                f"【前端-持仓】未找到 {working_date} 的 portfolio 文件，回退到最近交易日 {found_date} 的历史数据（周末/非交易日按前一交易日处理）")
+                f"【前端-持仓】未找到 {working_date} 的 portfolio 文件，回退到最近交易日 {found_date} 的历史数据"
+                f"（盘前/盘中/非交易日按前一交易日处理，盘后按当日处理）")
 
         if portfolio_path is None:
             portfolio_path = str(runner.running_dir / f"portfolio_{working_date}.json")
@@ -3762,14 +3974,15 @@ def get_portfolio():
         # 运行模式决定总资产来源：自动模式才读 PTrade 反馈；手动模式维持原有自算逻辑
         run_mode = getattr(runner, 'run_mode', 'manual')
         if run_mode == 'auto':
-            # 自动模式才读 PTrade 反馈（Fund 文件「总资产」权威值，含冻结、ETF 市值）
-            # 无反馈（文件缺失/解析失败/总资为0）说明 PTrade 同步异常，终止返回错误
-            ptrade_total_asset = _get_ptrade_total_asset(runner, working_date)
-            if ptrade_total_asset is not None:
-                total_assets = ptrade_total_asset
+            # 自动模式直接从 PTrade Fund 文件读取可用资金和总资产（权威值，含冻结、ETF 市值）
+            # 避免 portfolio 文件不是最新时，available_cash 和 total_assets 不一致
+            ptrade_fund = _get_ptrade_fund_data(runner, working_date)
+            if ptrade_fund is not None:
+                available_cash = ptrade_fund['available_cash']
+                total_assets = ptrade_fund['total_asset']
             else:
                 logger.error(
-                    f"【前端-持仓】自动模式下未获取到 PTrade 总资产，PTrade 同步可能失败，终止返回")
+                    f"【前端-持仓】自动模式下未获取到 PTrade 资金数据，PTrade 同步可能失败，终止返回")
                 return jsonify({
                     "success": False,
                     "error": "PTrade反馈数据未就绪，无法计算总资产",
