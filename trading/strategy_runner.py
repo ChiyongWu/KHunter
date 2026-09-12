@@ -247,8 +247,8 @@ class StrategyRunner:
             # 保存资金流向规则配置
             self._fund_flow_rules = yaml_config.get('fund_flow_rules', {})
             logger.info(f"加载资金流向移除规则: enabled={self._fund_flow_rules.get('is_enabled', False)}, "
-                       f"threshold={self._fund_flow_rules.get('net_flow_threshold', -10000)}万元, "
-                       f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 1)}")
+                       f"min_hold_days={self._fund_flow_rules.get('min_hold_days', 1)}"
+                       f"（判定条件与资金面一票否决一致，net_flow_threshold 已废弃）")
             
             config_map = {}
             strategies = yaml_config.get('removal_strategies', {})
@@ -1033,7 +1033,6 @@ class StrategyRunner:
         
         # 获取资金流向规则配置
         fund_flow_enabled = getattr(self, '_fund_flow_rules', {}).get('is_enabled', True)
-        fund_flow_threshold = getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000)
         fund_flow_min_hold_days = getattr(self, '_fund_flow_rules', {}).get('min_hold_days', 1)
         
         for candidate in self.buy_candidate_pool:
@@ -1180,9 +1179,9 @@ class StrategyRunner:
                     if r_squared < 0.3:
                         removal_reasons.append(f"R²{r_squared:.4f}<0.3")
             
-            # 条件3: 资金流向移除（同时满足两个条件时移除）
-            # - 5日主力资金累计净流入 < 阈值（默认-10000万元）
-            # - 大单净流出 且 小单净流入（出货信号）
+            # 条件3: 资金流向移除（判定条件与「资金面一票否决」一致，两条件为 OR）
+            # - 5日主力净额 < -1亿 且 大单净流入占比 < -5%（无占比字段→净额/成交额 < -1%）
+            # - 出货信号：大单净流出占比 > 1% 且 小单净流入占比 > 1%
             fund_flow_reason = ''
             if fund_flow_enabled:
                 if hold_days >= fund_flow_min_hold_days:
@@ -1229,8 +1228,11 @@ class StrategyRunner:
     def _check_fund_flow_condition(self, stock_code: str, stock_name: str, current_date: str) -> Dict:
         """检查资金流向移除条件
         
-        规则：
-        - 如果5日主力净额 < -10000万元 或者 大单净流出小单净流入：
+        判定条件（与「资金面一票否决」完全一致，直接复用 MoneyflowScorer.check_veto）：
+        - 条件1  5日主力净额 < -1亿 且 大单净流入占比 < -5%
+                 （无占比字段时回退：净额/成交额 < -1%）
+        - 条件2  出货信号：大单净流出占比 > 1% 且 小单净流入占比 > 1%
+        - 两条件为 **OR**：任一满足即触发处理：
           - 如果股票不在冷却期 → 加入冷却期3天，不移除
           - 如果股票已经在冷却期(is_cooling=true) → 直接移除出股票池
         
@@ -1260,28 +1262,14 @@ class StrategyRunner:
             if df is None or df.empty:
                 return {'should_remove': False, 'reason': ''}
             
-            # 提取资金流向指标（已确保类型正确）
+            # 提取指标后交由「资金面一票否决」同一套条件判定
+            #   条件1  5日主力净额 < -1亿 且 大单净流入占比 < -5%（无占比字段→净额/成交额 < -1%）
+            #   条件2  出货信号：大单净流出占比 > 1% 且 小单净流入占比 > 1%
+            #   两条件为 OR 关系
             metrics = scorer._extract_flow_metrics(df)
-            net_flow_5d = metrics['net_flow_5d']
-            large_net = metrics['large_net']
-            small_net = metrics['small_net']
-            
-            # 获取配置的阈值（确保转换为整数）
-            threshold = int(getattr(self, '_fund_flow_rules', {}).get('net_flow_threshold', -10000))
-            
-            # 判断条件：满足任一条件触发处理
-            condition1 = net_flow_5d < threshold  # 5日主力净额 < 阈值
-            condition2 = (large_net < 0) and (small_net > 0)  # 大单出+小单进（出货信号）
-            
-            if condition1 or condition2:
-                # 构建原因描述
-                if condition1 and condition2:
-                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元且大单净流出小单净流入"
-                elif condition1:
-                    reason_detail = f"5日主力净额{net_flow_5d:.0f}万元<{threshold}万元"
-                else:
-                    reason_detail = "大单净流出且小单净流入（出货信号）"
-                
+            is_veto, reason_detail = scorer.check_veto(stock_code, date_str, metrics)
+
+            if is_veto:
                 # 检查是否已在冷却期（通过股票池的is_cooling字段）
                 is_in_cool_down = self._check_cool_down(stock_code, current_date)
                 
