@@ -164,3 +164,29 @@ test/*.txt
 doc/*.csv
 # 本地推送备份目录（方案B执行用，成功后可删除）
 _push_backup/
+# 其他产物（2026-09-12 补充）
+.coverage
+*.sqlite-shm
+*.sqlite-wal
+*.bak_*
+tmp_*.py
+
+# ===== 2026-09-12 远端仅保留源码：以下内容已从版本历史剔除，不再跟踪 =====
+# 注意：文件仍保留在本地磁盘，只是不纳入版本管理、不会被推送。
+# 测试 / 文档 / 需求说明书
+test/
+doc/
+spec/
+# 本地辅助目录与发布包
+.trae/
+start.zip
+# 根目录一次性脚本（调试/查询/验证用，不入库）
+/debug_*.py
+/diagnose_*.py
+/find_*.py
+/query_*.py
+/list_*.py
+/reinit_*.py
+/restore_*.py
+/verify_*.py
+/test_*.py
