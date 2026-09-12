@@ -8,22 +8,6 @@
 
 data_dir: data
 
-# 飞书机器人配置
-# API 方式（推荐）：
-#   1. 在飞书开放平台创建企业自建应用
-#   2. 获取 App ID 和 App Secret
-#   3. 添加 im:message 权限并发布
-#   4. 将 bot 添加到目标群聊
-feishu:
-  app_id: "YOUR_APP_ID"
-  app_secret: "YOUR_APP_SECRET"
-  chat_id: "YOUR_CHAT_ID"  # 目标群聊 ID
-  # 备用 webhook 方式（可选）
-  webhook_url: ""
-  signing_secret: ""
-  # 通知模式: false=总是通知, true=仅异常时通知
-  alert_only: false
-
 # 钉钉机器人配置（已废弃，保留兼容）
 dingtalk:
   webhook_url: ""
@@ -56,13 +40,6 @@ pipeline_schedule:
     timing_strategy: "support"           # 择时策略
     score_threshold: 60                  # 评分阈值
     max_daily_buys: 3                    # 每日最大买入数
-
-  # 通知步骤 (Step 3)
-  notification:
-    enabled: true
-    feishu: true                         # 飞书通知
-    feishu_summary: true                 # 发送运行摘要
-    feishu_alert_only: false             # 仅异常时通知
 
 # 数据更新配置
 update:
