@@ -26,7 +26,11 @@ from trading.timing_strategies import TimingStrategyFactory
 from utils.strategy_name_mapper import get_english_name
 from utils.trade_date_utils import is_trading_day, get_previous_trading_day
 from utils.trading_time_validator import is_market_closed
-from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler, process_ptrade_feedback
+from trading.ptrade.ptrade_feedback import (
+    PTradeFeedbackHandler,
+    feedback_files_stamp,
+    process_ptrade_feedback,
+)
 from trading.strategy_kelly_loader import KellyCalculator
 from trading.strategy_execution_plan import ExecutionPlan, StrategyCombination
 from trading.backtest_dao import BacktestDAO
@@ -944,6 +948,85 @@ class StrategyRunner:
                 logger.info(f"  - {stock['stock_code']} {stock['stock_name']}: 评分={stock['score']}")
         return candidate_stocks
     
+    # ==================== 持仓股自动入池 ====================
+
+    def _add_holdings_to_pool(self, positions, current_date, today_sold_stocks,
+                              strategy_name: str = '', enabled: bool = True) -> int:
+        """持仓股自动入池（**当日已卖出的不计**），返回新增数量
+
+        目的：策略切换 / 候选被买入消费 / 池移除后，持仓股仍需留在候选池中，
+              否则择时给出 add 信号时无法加仓（池空 → 加不进）。
+
+        ⚠️ 实盘 2026-09-13 修复：`run_strategies_batch` 早已调用本方法，但方法漏了
+        实现（只存在于回测引擎），导致每次都抛
+        `AttributeError: 'StrategyRunner' object has no attribute '_add_holdings_to_pool'`，
+        持仓股无法回池、加仓链路中断。现按 `BacktestEngine._add_holdings_to_pool`
+        同一口径移植（回测与实盘一致）。
+
+        Args:
+            positions: 持仓。实盘为 `dict{code: {...}}`（键已归一化为纯数字代码）；
+                       同时兼容回测的 `list[dict]`（含 stock_code/stock_name）
+            current_date: 当日日期（str 或 date）
+            today_sold_stocks: 当日已卖出代码集合（不计入池）
+            strategy_name: 当日策略名（写入池条目，供 Kelly / 池移除配置查找）
+            enabled: 开关（调用方由 pool_entry.auto_add_holdings 解析后传入）
+
+        Returns:
+            int: 新增入池数量
+        """
+        if not enabled:
+            return 0
+
+        added = 0
+        try:
+            # 兼容 dict（实盘 self.portfolio）与 list（回测 positions）
+            if isinstance(positions, dict):
+                items = [{'stock_code': code,
+                          'stock_name': (pos or {}).get('stock_name', '')}
+                         for code, pos in positions.items()]
+            else:
+                items = list(positions or [])
+
+            pool_codes = {c.get('stock', {}).get('stock_code')
+                          for c in self.buy_candidate_pool}
+            for pos in items:
+                code = pos.get('stock_code')
+                if (not code or code in pool_codes
+                        or code in (today_sold_stocks or set())):
+                    continue
+
+                info = {'stock_code': code,
+                        'stock_name': pos.get('stock_name', ''),
+                        'score': 0,
+                        'veto_flag': False}
+                try:
+                    # 注意：实盘与本方法的支撑位函数签名顺序为 (stock, strategy, date)
+                    sup = self._calculate_support_level(info, strategy_name, current_date)
+                    sup_method = self._get_support_method_for_strategy(strategy_name)
+                except Exception as e:
+                    sup, sup_method = 0.0, 'unknown'
+                    logger.debug(f"持仓股 {code} 支撑位计算失败: {e}")
+
+                self.buy_candidate_pool.append({
+                    'stock': info,
+                    'added_date': current_date,
+                    'key_date': (current_date.strftime('%Y-%m-%d')
+                                 if hasattr(current_date, 'strftime') else str(current_date)),
+                    'strategy_name': strategy_name,
+                    'support_level': sup,
+                    'support_method': sup_method,
+                    'from_holding': True,      # 标记来源：持仓股自动入池
+                })
+                pool_codes.add(code)
+                added += 1
+
+            if added:
+                logger.info(f"【持仓入池】新增 {added} 只持仓股到股票池（当日卖出不计），"
+                            f"池内合计 {len(self.buy_candidate_pool)} 只")
+        except Exception as e:
+            logger.warning(f"持仓股入池失败（不影响策略运行）: {e}")
+        return added
+
     # ==================== 股票池移除检查 ====================
     
     def _calculate_support_level(self, stock: Dict, strategy_name: str, current_date: str) -> float:
@@ -1841,12 +1924,21 @@ class StrategyRunner:
                 self._save_position_tracking(position_tracking)
                 self.portfolio = self._normalize_portfolio_keys(new_positions)
                 self.current_total_capital = ptrade_portfolio.get('cash', getattr(self, 'current_total_capital', 300000))
+                # 记录 Fund 文件的「可用资金」列（前端展示口径，与反算 cash 区分）：
+                # 展示层复用本快照时，数值与直读反馈文件完全一致
+                self.current_ptrade_available_cash = ptrade_portfolio.get(
+                    'available_cash', getattr(self, 'current_ptrade_available_cash', None))
                 # 记录 PTrade 反馈的真实总资产（含 ETF 市值），供飞书通知等场景直接读取权威值，
                 # 避免用「可用现金 + 持仓市值」反算时漏算 ETF（KHunter 持仓不含 ETF 但总资产含 ETF）
                 self.current_total_asset = ptrade_portfolio.get('total_asset', getattr(self, 'current_total_asset', None))
                 self.initial_capital = ptrade_portfolio.get('initial_capital', getattr(self, 'initial_capital', 300000))
                 # 标记已同步，防止同一天重复处理
                 self._ptrade_synced_feedback_date = feedback_date
+                # 记录反馈目录与文件指纹：供前端展示层判断内存快照是否仍然新鲜
+                # （mtime 变化说明 PTrade 重新导出过，展示层应回退直读文件）
+                self._ptrade_feedback_dir = getattr(temp_handler, 'feedback_dir', None)
+                self._ptrade_feedback_stamp = feedback_files_stamp(
+                    self._ptrade_feedback_dir, feedback_date)
                 logger.info(
                     f"【PTrade同步】portfolio 已从 PTrade 更新: "
                     f"持仓={len(result.get('holdings', []))} 条, "
@@ -3414,7 +3506,10 @@ class StrategyRunner:
                     # 交易日：15:30之前处理T日（前一交易日）数据，15:30之后处理当日数据
                     if now.hour < 15 or (now.hour == 15 and now.minute < 30):
                         # 15:30之前，处理前一交易日数据
-                        trade_date = self._get_previous_trading_day(today)
+                        # 注意：_get_previous_trading_day 是回测引擎专有方法，实盘不存在
+                        # （2026-09-13 修复 AttributeError），此处统一用模块函数（返回 str，
+                        #       与下方 portfolio_{trade_date}.json 等文件名拼接口径一致）
+                        trade_date = get_previous_trading_day(today)
                         logger.info(f"【T+1执行】当前时间 {now.strftime('%H:%M')} < 15:30，处理前一交易日数据: {trade_date}")
                     else:
                         # 15:30之后，处理当日数据

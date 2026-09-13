@@ -44,7 +44,10 @@ reports/
 *.log
 
 # Configuration files (local)
-# 【2026-09-13】config/config.yaml 已移除飞书配置段（不再含敏感值），已纳入版本管理
+# 【2026-09-13】config/config.yaml 仍受版本管理（远端保留脱敏版，便于新克隆直接可用），
+# 但本地工作区版本含飞书 App Secret 等真实凭据 → 【禁止提交该文件】。
+# 已配置 .git/hooks/pre-commit 防护，误暂存时提交会被阻止。
+# 需要修改远端默认配置请改 config/config.yaml.template 并同步脱敏内容。
 config/tushare_config.json
 config/87659999.json
 config/87659999_decrypted.json

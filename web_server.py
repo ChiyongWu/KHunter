@@ -3714,12 +3714,83 @@ def _get_ptrade_total_asset(runner, working_date: str):
     return fund_data.get('total_asset') if fund_data else None
 
 
+def _get_ptrade_snapshot_from_runner(runner, feedback_date: str):
+    """方案B：复用初始化同步（sync_portfolio_from_ptrade）落在 runner 内存的权威结果
+
+    页面加载 `GET /api/portfolio` 时在同一请求内会经历两步：
+      ① get_strategy_runner(auto_init=True) 触发初始化同步：解析 Fund+Hold 并写盘；
+      ② 展示分支 _get_portfolio_auto 又新建 handler 直读 Fund+Hold。
+    于是出现「进页面就解析两次」；策略跑完后前端刷新持仓还会再解析一次。
+
+    复用条件（任一不满足即返回 None，由调用方回退直读文件）：
+      - runner 已同步的 feedback_date 与本次一致（同一天）
+      - runner.portfolio 非空、内存总资产有效
+      - 反馈文件 mtime 与同步时一致（未被 PTrade 重新导出 → 快照仍新鲜）
+
+    Args:
+        runner: 策略运行器
+        feedback_date: 反馈日期 YYYYMMDD
+
+    Returns:
+        (holdings, available_cash, total_assets) 或 None（表示应直读文件）
+    """
+    if (getattr(runner, '_ptrade_synced_feedback_date', '') or '') != feedback_date:
+        return None
+    positions = getattr(runner, 'portfolio', None) or {}
+    if not positions:
+        return None
+    total_assets = getattr(runner, 'current_total_asset', None)
+    if not total_assets:
+        return None
+
+    # 反馈文件被重新导出（mtime 变化）→ 内存快照已过期，回退直读文件
+    from trading.ptrade.ptrade_feedback import feedback_files_stamp
+    recorded_stamp = getattr(runner, '_ptrade_feedback_stamp', None)
+    current_stamp = feedback_files_stamp(
+        getattr(runner, '_ptrade_feedback_dir', None), feedback_date)
+    if recorded_stamp and current_stamp and recorded_stamp != current_stamp:
+        logger.info("【前端-持仓】PTrade 反馈文件已更新，改直读文件（不复用内存快照）")
+        return None
+
+    holdings = []
+    for code, pos in positions.items():
+        if not isinstance(pos, dict):
+            continue
+        quantity = pos.get('quantity', 0) or 0
+        if quantity <= 0:
+            continue
+        holdings.append({
+            'stock_code': pos.get('stock_code') or code,
+            'stock_name': pos.get('stock_name', ''),
+            'quantity': quantity,
+            'buy_price': pos.get('buy_price', 0) or 0,
+            'current_price': pos.get('current_price', 0) or 0,
+            'profit_loss': pos.get('profit_loss', 0) or 0,
+        })
+
+    # 展示口径与原直读 Fund 文件一致：优先 Fund「可用资金」列，缺失时退化为反算现金
+    available_cash = getattr(runner, 'current_ptrade_available_cash', None)
+    if available_cash is None:
+        available_cash = getattr(runner, 'current_total_capital', 0) or 0
+    try:
+        available_cash = round(float(available_cash), 2)
+        total_assets = round(float(total_assets), 2)
+    except (TypeError, ValueError):
+        return None
+    logger.info(
+        f"【前端-持仓】复用 PTrade 同步结果（跳过反馈文件重复解析）: "
+        f"持仓={len(holdings)} 条, 可用资金={available_cash}, "
+        f"总资产={total_assets} (日期 {feedback_date})")
+    return holdings, available_cash, total_assets
+
+
 def _get_portfolio_auto(runner, working_date: str):
-    """自动模式下直接从 PTrade 反馈文件读取资金和持仓（展示以 PTrade 为准）
+    """自动模式下读取 PTrade 资金和持仓（展示以 PTrade 为准）
 
     按需求处理流程：
     1. 工作日由 get_working_date 确定（收盘后为当日，否则前一交易日）
-    2. 读取 PTrade 反馈（Fund 文件→资金，Hold 文件→持仓），更新持仓和资产信息
+    2. 资金/持仓来源：优先复用初始化同步的内存快照（方案B，避免同一请求内重复解析
+       Fund/Hold）；未同步或反馈文件已更新时，回退直读 PTrade 反馈文件
     3. 展示信息以 PTrade 为准，不依赖 portfolio_*.json 缓存文件
 
     Args:
@@ -3731,14 +3802,22 @@ def _get_portfolio_auto(runner, working_date: str):
     """
     from trading.ptrade.ptrade_feedback import PTradeFeedbackHandler
     main_config = getattr(runner, 'main_config', None)
-    handler = PTradeFeedbackHandler(project_root=str(project_root), config=main_config)
     feedback_date = working_date.replace('-', '')
     initial_capital = getattr(runner, 'initial_capital', 300000)
 
-    # 1. 资金（Fund 文件）：可用资金、总资产均为 PTrade 权威值
-    fund = handler.read_fund(feedback_date)
-    available_cash = round(fund.get('available_cash', 0.0), 2)
-    total_assets = round(fund.get('total_asset', 0.0), 2)
+    # 1. 资金与持仓：优先复用初始化同步的内存权威结果（方案B，避免重复解析）
+    snapshot = _get_ptrade_snapshot_from_runner(runner, feedback_date)
+    if snapshot:
+        holdings, available_cash, total_assets = snapshot
+    else:
+        handler = PTradeFeedbackHandler(project_root=str(project_root), config=main_config)
+        # 1.1 资金（Fund 文件）：可用资金、总资产均为 PTrade 权威值
+        fund = handler.read_fund(feedback_date)
+        available_cash = round(fund.get('available_cash', 0.0), 2)
+        total_assets = round(fund.get('total_asset', 0.0), 2)
+        # 1.2 持仓（Hold 文件，已过滤 ETF）：数量/成本/市值/盈亏均取 PTrade 值
+        holdings = handler.read_holdings(feedback_date)
+
     if not total_assets:
         logger.error(
             f"【前端-持仓】自动模式下 PTrade 总资产为 0，反馈文件可能异常 (日期 {feedback_date})")
@@ -3756,9 +3835,6 @@ def _get_portfolio_auto(runner, working_date: str):
                 "message": "请等待PTrade反馈文件生成后刷新页面"
             }
         })
-
-    # 2. 持仓（Hold 文件，已过滤 ETF）：数量/成本/市值/盈亏均取 PTrade 值
-    holdings = handler.read_holdings(feedback_date)
 
     # 3. 构建持仓展示列表
     positions_list = []

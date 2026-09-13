@@ -476,7 +476,8 @@ class PTradeFeedbackHandler:
             cash = round(fund.get("available_cash", 0), 2)
         portfolio = {
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "cash": cash,
+            "cash": cash,                                 # 反算值：策略下单口径（含未成交委托冻结资金）
+            "available_cash": round(fund.get("available_cash", 0), 2),  # Fund 列：前端展示口径
             "total_asset": total_asset,                   # Fund 文件原始总资产，含 ETF
             "market_value": stock_market_value,           # 仅股票市值（与 positions 一致）
             "etf_market_value": etf_mv,                   # ETF 市值（独立追踪，不计入 market_value）
@@ -557,6 +558,31 @@ class PTradeFeedbackHandler:
 
 
 # ========== 便捷函数 ==========
+
+def feedback_files_stamp(feedback_dir: str, feedback_date: str):
+    """反馈文件（Fund/Hold）的 mtime 指纹，用于判断内存快照是否仍然新鲜
+
+    前端展示层复用初始化同步的内存结果时，需要知道反馈文件是否被 PTrade 重新导出过：
+    文件未变 → 内存快照与文件一致，可跳过重复解析；已变 → 回退直读文件，保证展示新鲜。
+
+    Args:
+        feedback_dir: 反馈文件目录
+        feedback_date: 反馈日期 YYYYMMDD
+
+    Returns:
+        (fund_mtime, hold_mtime) 元组；任一文件不可读时返回 None
+    """
+    if not feedback_dir:
+        return None
+    stamp = []
+    for name in ("Fund", "Hold"):
+        path = os.path.join(feedback_dir, f"{name}_{feedback_date}.csv")
+        try:
+            stamp.append(os.path.getmtime(path))
+        except OSError:
+            return None
+    return tuple(stamp)
+
 
 def process_ptrade_feedback(
         feedback_date: str,
