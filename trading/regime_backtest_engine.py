@@ -162,6 +162,28 @@ class RegimeBacktestEngine(BacktestEngine):
         return d
 
     # ------------------------------------------------------------------
+    # 内部：选股策略同一性判断（用于决定风格切换时是否清池）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _same_selector(name_a, name_b) -> bool:
+        """两个选股策略名是否指向**同一个策略**（中文名 / 英文类名 / 别名归一化后比较）
+
+        用途（2026-09-13）：风格档位切换时判断"选股策略是否真的变了" ——
+        只有真的变了才需要清理股票池。直接用字符串比较会被
+        `主升低吸策略` vs `MainUptrendDipBuyStrategy` 这类别名写法差异误判成"切换"，
+        从而把本来有效的候选池清掉。
+        """
+        if not name_a or not name_b:
+            return False
+        if name_a == name_b:
+            return True
+        try:
+            from utils.strategy_name_mapper import get_english_name
+            return get_english_name(name_a) == get_english_name(name_b)
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
     # 内部：择时策略切换（含海龟参数合并，与父类初始化口径一致）
     # ------------------------------------------------------------------
     def _switch_timing(self, timing_name: str, config: Dict) -> None:
@@ -380,20 +402,28 @@ class RegimeBacktestEngine(BacktestEngine):
                     self._current_strategy = day_strategy
                     logger.info(f"【自适应】{current_date} 起始 regime={_dec.regime} "
                                 f"策略={day_strategy} 仓位={self._regime_ratio:.0%}")
-                elif day_strategy and day_strategy != self._current_strategy:
-                    # 切换选股策略：清空**非持仓**候选（旧候选由"当时那个策略"选出，已失效）
-                    # ⚠️ 持仓股一律保留（2026-09-11）：持仓与 regime 无关，
-                    #    不论切到哪一档都留在池中，保证加仓链路不中断。
+                elif day_strategy and not self._same_selector(
+                        day_strategy, self._current_strategy):
+                    # 切换选股策略：只清掉**由其它选股策略选出**的候选
+                    # ⚠️ 三条保留规则（2026-09-13 补充第 2 条）：
+                    #   1. 持仓股一律保留（2026-09-11）：持仓与 regime 无关，
+                    #      不论切到哪一档都留在池中，保证加仓链路不中断。
+                    #   2. **同一选股策略选出的候选也保留**：风格档位切换 ≠ 选股策略切换
+                    #      （如 震荡→萌芽 两档 selector 都是"主升低吸策略"），
+                    #      此时清池纯属浪费；比较用 _same_selector 做中/英文名归一化。
+                    #   3. 只有"由其它选股策略选出"的候选才剔除（已失效）。
                     prev_pool = len(self.buy_candidate_pool)
                     _held_codes = {pos.get('stock_code') for pos in positions
                                    if pos.get('stock_code')}
-                    if _held_codes:
-                        self.buy_candidate_pool = [
-                            c for c in self.buy_candidate_pool
-                            if c.get('stock', {}).get('stock_code') in _held_codes
-                        ]
-                    else:
-                        self.buy_candidate_pool.clear()
+
+                    def _keep(c):
+                        code = c.get('stock', {}).get('stock_code')
+                        if code in _held_codes:
+                            return True
+                        return self._same_selector(c.get('strategy_name'), day_strategy)
+
+                    self.buy_candidate_pool = [c for c in self.buy_candidate_pool
+                                               if _keep(c)]
                     _kept = len(self.buy_candidate_pool)
                     self.strategy_switches.append({
                         'date': str(current_date),
@@ -404,7 +434,7 @@ class RegimeBacktestEngine(BacktestEngine):
                     logger.info(f"【自适应】{current_date} 选股策略切换 "
                                 f"{self._current_strategy} → {day_strategy}"
                                 f"（regime={_dec.regime}），清池 {prev_pool} 只"
-                                f" → 保留持仓 {_kept} 只")
+                                f" → 保留 {_kept} 只（同选股策略候选 + 持仓）")
                     self._current_strategy = day_strategy
 
                 # 择时策略按 regime 切换（须在卖出之前，保证当日卖出用新实例）
@@ -777,6 +807,19 @@ class RegimeBacktestEngine(BacktestEngine):
                                     f"策略信号={_signal_qty}股, 1/2凯利金额="
                                     f"{_add_kelly['amount'] / 2:.2f}元→{_half_kelly_qty}股, "
                                     f"额度上限={_max_qty}股, 最终={quantity}股")
+
+                        # 数量不足一手时不得下单（2026-09-13）：
+                        # 剩余可开仓额度不足一手时 _max_qty = 0 → min(...) = 0，
+                        # 此前缺少守卫会落库 0 股 / 0 元的加仓订单（本次回测 3 笔、
+                        # 全库 26 笔全部是 add），并误增 add_count / last_add_price
+                        from utils.stock_utils import get_min_trade_unit
+                        _min_unit = get_min_trade_unit(stock_code)
+                        if quantity < _min_unit:
+                            logger.info(f"【未加仓】{current_date} {stock_code} {stock['stock_name']}: "
+                                        f"数量不足{_min_unit}股（额度上限={_max_qty}股，"
+                                        f"策略信号={_signal_qty}股，半凯利={_half_kelly_qty}股），跳过")
+                            remaining_candidates.append(candidate)
+                            continue
                     else:
                         # 首次建仓：凯利公式（策略取"当日 regime 策略"）
                         kelly_strategy_name = candidate.get('strategy_name', day_strategy or 'N/A')
@@ -837,10 +880,27 @@ class RegimeBacktestEngine(BacktestEngine):
                         logger.info(f"【未执行买入】{stock_code} {stock['stock_name']}: 可用资金不足2000元（当前{current_capital:.2f}元），跳过执行")
                         remaining_candidates.append(candidate)
                         continue
-                    if buy_amount > current_capital:
-                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 资金不足（需要{buy_amount:.2f}，可用{current_capital:.2f}）")
+
+                    # 含交易费用校验（2026-09-13）：
+                    # 原逻辑仅比较 buy_amount 与可用资金，未给佣金/过户费留位，
+                    # 买入后 current_capital -= (buy_amount + 费用) 会扣出几毛钱负数。
+                    # 现在要求「买入金额 + 佣金 + 过户费 ≤ 可用资金」，不足则按手数回退。
+                    from utils.stock_utils import get_min_trade_unit
+                    _min_unit = get_min_trade_unit(stock_code)
+                    while quantity >= _min_unit:
+                        buy_amount = quantity * buy_price
+                        _cost = _be.calculate_backtest_cost(stock_code, buy_price, quantity, is_buy=True)
+                        _need = buy_amount + _cost['commission'] + _cost['transfer_fee']
+                        if _need <= current_capital:
+                            break
+                        # 通常只差"费用"这一小截：按差额退手（至少退一手）后复验
+                        _deficit = _need - current_capital
+                        quantity -= max(1, int(_deficit / (buy_price * _min_unit)) + 1) * _min_unit
+                    if quantity < _min_unit:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 可用资金不足以覆盖含费买入（当前{current_capital:.2f}元，价格{buy_price:.2f}），跳过执行")
                         remaining_candidates.append(candidate)
                         continue
+                    buy_amount = quantity * buy_price
 
                     trade_type = result.trade_type if result else 'new'
                     buy_record = self._execute_buy(stock_code, stock['stock_name'], added_date,

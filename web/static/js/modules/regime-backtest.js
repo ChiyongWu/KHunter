@@ -203,20 +203,36 @@ async function _rsPollProgress() {
 }
 
 /**
- * 渲染成交明细：sell 行为已平仓（含买卖价与收益率），buy 行为持仓中
+ * 渲染成交明细（订单级）
+ *
+ * 数据表按**订单**存储：首仓(buy) / 加仓(add) / 卖出(sell) 各一行，
+ * buy/add 行本身没有 sell_date。因此不能把“无 sell_date”当成“持仓中”——
+ * 否则 226 笔首仓 + 168 笔加仓订单会被全部误标为“持仓中”。
+ *
+ * 后端 `_attach_position_status` 已为每笔订单补齐 `position_status`(已平仓/持仓中)
+ * 与配对到的 `matched_sell_*`，这里据此渲染：
+ *   - 已平仓订单：显示其所属持仓的卖出日/卖出价/收益率/盈亏
+ *   - 真正未平仓：才显示“持仓中”
+ *   - 类型列：首仓 / 加仓 / 卖出原因（原先 buy/add 行被硬编码成 'buy'）
  */
 function _rsRenderTrades(trades) {
     const body = document.getElementById('regime-trades-body');
     if (!body) return;
     const list = trades || [];
-    const closedRows = list.filter(t => t.sell_date || t.trade_type === 'sell');
     const setTxt = (id, v) => {
         const el = document.getElementById(id);
         if (el) el.textContent = v;
     };
+    const kindOf = t => t.order_kind || t.trade_type || '';
+    const buys = list.filter(t => kindOf(t) === 'buy');
+    const adds = list.filter(t => kindOf(t) === 'add');
+    const sells = list.filter(t => kindOf(t) === 'sell');
+    const opened = list.filter(t => kindOf(t) !== 'sell' && (t.position_status || '持仓中') === '持仓中');
     setTxt('regime-trades-count', list.length);
-    setTxt('regime-trades-closed', closedRows.length);
-    setTxt('regime-trades-open', list.length - closedRows.length);
+    setTxt('regime-trades-buy', buys.length);
+    setTxt('regime-trades-add', adds.length);
+    setTxt('regime-trades-closed', sells.length);
+    setTxt('regime-trades-open', opened.length);
 
     const cell = 'padding:6px;border:1px solid #e0e0e0;';
     if (!list.length) {
@@ -226,20 +242,27 @@ function _rsRenderTrades(trades) {
     const fmt = v => (v === undefined || v === null || v === '') ? '-' : v;
     const num = v => (v === undefined || v === null || v === '') ? '-' : Number(v).toFixed(2);
     body.innerHTML = list.map(t => {
-        const closed = !!(t.sell_date || t.trade_type === 'sell');
-        const rr = Number(t.return_rate || 0);
-        const color = closed ? (rr >= 0 ? '#cf1322' : '#3f8600') : '#888';
+        const k = kindOf(t);
+        const isSell = (k === 'sell');
+        const closed = isSell || t.position_status === '已平仓';
+        // 已平仓的 buy/add 行：用配对卖出信息；卖出行：用自身字段
+        const sd = isSell ? t.sell_date : (t.matched_sell_date || '');
+        const sp = isSell ? t.sell_price : t.matched_sell_price;
+        const rr = Number((isSell ? t.return_rate : t.matched_return_rate) || 0);
+        const pl = isSell ? t.profit_loss : t.matched_profit_loss;
+        const color = rr >= 0 ? '#cf1322' : '#3f8600';
+        const typeLabel = k === 'buy' ? '首仓' : (k === 'add' ? '加仓' : (t.sell_type || '卖出'));
         return `<tr>
             <td style="${cell}">${fmt(t.stock_code)}</td>
             <td style="${cell}">${fmt(t.stock_name)}</td>
             <td style="${cell}">${fmt(t.buy_date)}</td>
             <td style="${cell}">${num(t.buy_price)}</td>
-            <td style="${cell}">${closed ? fmt(t.sell_date) : '持仓中'}</td>
-            <td style="${cell}">${closed ? num(t.sell_price) : '-'}</td>
+            <td style="${cell}">${closed ? fmt(sd) : '持仓中'}</td>
+            <td style="${cell}">${closed ? num(sp) : '-'}</td>
             <td style="${cell}">${fmt(t.quantity)}</td>
-            <td style="${cell}color:${color};">${closed ? rr.toFixed(2) + '%' : '-'}</td>
-            <td style="${cell}color:${color};">${closed ? num(t.profit_loss) : '-'}</td>
-            <td style="${cell}">${closed ? fmt(t.sell_type) : 'buy'}</td>
+            <td style="${cell}color:${closed ? color : '#888'};">${closed ? rr.toFixed(2) + '%' : '-'}</td>
+            <td style="${cell}color:${closed ? color : '#888'};">${closed ? num(pl) : '-'}</td>
+            <td style="${cell}">${typeLabel}</td>
         </tr>`;
     }).join('');
 }

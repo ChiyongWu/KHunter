@@ -35,12 +35,12 @@ strategies:
 
   ResistanceBreakoutStrategy:
     win_rate: 0.3
-    profit_loss_ratio: 3.4
+    profit_loss_ratio: 3.5
     description: 阻力突破策略
 
   MainUptrendDipBuyStrategy:
-    win_rate: 0.45
-    profit_loss_ratio: 2.2
+    win_rate: 0.3
+    profit_loss_ratio: 3.5
     description: 主升低吸策略
 
   StrongWashWeakToStrongStrategy:
@@ -65,7 +65,7 @@ strategies:
 
   Strategy2560Selection:
     win_rate: 0.3
-    profit_loss_ratio: 3.5
+    profit_loss_ratio: 3
     description: 2560战法选股策略
 
   TrendStartStrategy:

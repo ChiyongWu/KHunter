@@ -17,11 +17,11 @@ regime_router:
       buy_execution: open
     萌芽:
       selector: 主升低吸策略
-      timing: uptrend_pullback
+      timing: turtle
       position: 0.5
       buy_execution: open
     震荡:
       selector: 主升低吸策略
-      timing: turtle
+      timing: uptrend_pullback
       position: 0
       buy_execution: open

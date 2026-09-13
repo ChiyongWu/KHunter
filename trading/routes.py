@@ -26,6 +26,112 @@ db_manager = get_global_db()
 akshare_fetcher = AKShareFetcher("data")
 
 
+def _load_turtle_params(timing_strategy: str) -> dict:
+    """加载海龟 / 低位海龟策略参数（各入口统一口径，避免回测参数漂移）
+
+    取值来源：`config/strategy_params.yaml` 中对应策略的 `params`。
+
+    背景（2026-09-13）：`/backtest/run`、`/api/strategy/run-batch`、定时流水线都会把
+    该参数注入回测 config，唯独 `/backtest/regime/run` 未注入，导致自适应回测的择时
+    策略回退到代码内默认预设 `short`（10/5）—— 唐奇安下线周期与配置（12/6）、普通
+    回测、实盘都不一致。
+
+    Args:
+        timing_strategy: 择时策略名（'turtle' / 'low_turtle' / 其它）
+
+    Returns:
+        dict: 海龟参数键值（非海龟类策略返回空字典）
+    """
+    if timing_strategy == 'turtle':
+        try:
+            config_manager = StrategyConfigManager()
+            turtle_config = config_manager.get_strategy_config('TurtleStrategy')
+            turtle_params = turtle_config.get('params', {})
+            logger.info(f"从配置文件读取海龟策略参数: n_entry={turtle_params.get('n_entry')}, "
+                        f"n_exit={turtle_params.get('n_exit')}, atr_period={turtle_params.get('atr_period')}")
+            return turtle_params
+        except Exception as e:
+            logger.warning(f"读取海龟策略配置失败，使用默认值: {str(e)}")
+            return {
+                'n_entry': 20, 'n_exit': 10, 'atr_period': 20,
+                'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
+            }
+    if timing_strategy == 'low_turtle':
+        # 低位海龟默认参数：1/6/12（无MA20过滤）
+        logger.info("低位海龟策略参数: n_entry=1, n_exit=6, atr_period=12（去除MA20过滤）")
+        return {
+            'n_entry': 1, 'n_exit': 6, 'atr_period': 12,
+            'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
+        }
+    return {}
+
+
+def _attach_position_status(trades: list) -> list:
+    """给“订单级”交易记录补上【所属持仓的结局】（2026-09-13）
+
+    背景：`backtest_trade` 按**订单**存储 —— 首仓(buy) / 加仓(add) / 卖出(sell)
+    各占一行，买入与加仓行天然没有 `sell_date`。前端若把“无 sell_date”当作
+    “持仓中”，就会把 226 笔首仓 + 168 笔加仓订单全部误标为“持仓中”
+    （曾显示“620 笔：已平仓 226 / 持仓中 394”，但真正未平仓的只有期末的极少数）。
+
+    这里按【事件发生日】排序（买/加仓看 buy_date，卖出看 sell_date）后用 FIFO 把
+    sell 行按数量分摊到各笔买入订单上，为每笔订单原地补充：
+
+        order_kind            'buy' / 'add' / 'sell'
+        position_status       '已平仓' / '持仓中'（仅真正未平仓）
+        matched_sell_date / matched_sell_price / matched_sell_type
+        matched_return_rate / matched_profit_loss
+
+    说明：`matched_*` 一律取自配对到的那笔卖出行的**原始口径**（引擎按持仓均价核算），
+    不额外做订单级分摊，避免与引擎口径冲突；要看“单笔加仓自身盈亏”请用 FIFO 分摊，
+    见分析脚本口径（成本按股数分摊）。
+
+    Args:
+        trades: `BacktestDAO.get_trades_by_result()` 的返回（会被原地修改）
+
+    Returns:
+        list: 同一个列表
+    """
+    from collections import defaultdict
+
+    def _ev(t):
+        d = t.get('sell_date') if t.get('trade_type') == 'sell' else t.get('buy_date')
+        return (str(d or t.get('buy_date') or ''), int(t.get('id') or 0))
+
+    open_lots = defaultdict(list)          # stock_code -> [未结算的买入订单, ...]
+    for t in sorted(trades or [], key=_ev):
+        tt = t.get('trade_type')
+        code = t.get('stock_code')
+        if tt in ('buy', 'add'):
+            t['order_kind'] = tt
+            t['position_status'] = '持仓中'     # 待下面被卖出结算时改写
+            open_lots[code].append({
+                'row': t, 'remain': int(t.get('quantity') or 0)})
+            continue
+        if tt != 'sell':
+            continue
+        t['order_kind'] = 'sell'
+        t['position_status'] = '已平仓'
+        remain = int(t.get('quantity') or 0)
+        queue = open_lots.get(code) or []
+        while remain > 0 and queue:
+            lot = queue[0]
+            take = min(remain, lot['remain'])
+            row = lot['row']
+            row['position_status'] = '已平仓'
+            row['matched_sell_date'] = t.get('sell_date')
+            row['matched_sell_price'] = t.get('sell_price')
+            row['matched_sell_type'] = t.get('sell_type')
+            row['matched_return_rate'] = t.get('return_rate')
+            row['matched_profit_loss'] = t.get('profit_loss')
+            row['matched_quantity'] = take
+            lot['remain'] -= take
+            remain -= take
+            if lot['remain'] <= 0:
+                queue.pop(0)
+    return trades
+
+
 @trading_bp.route('/backtest/configs', methods=['GET'])
 def get_backtest_configs():
     """
@@ -801,28 +907,8 @@ def run_backtest():
         enable_temp_limit = data.get('enable_temp_limit', 1)
         temp_limit_mode = data.get('temp_limit_mode', 'both')
         
-        # 从配置文件读取海龟/低位海龟策略参数
-        turtle_params = {}
-        if timing_strategy == 'turtle':
-            try:
-                config_manager = StrategyConfigManager()
-                turtle_config = config_manager.get_strategy_config('TurtleStrategy')
-                turtle_params = turtle_config.get('params', {})
-                logger.info(f"从配置文件读取海龟策略参数: n_entry={turtle_params.get('n_entry')}, "
-                           f"n_exit={turtle_params.get('n_exit')}, atr_period={turtle_params.get('atr_period')}")
-            except Exception as e:
-                logger.warning(f"读取海龟策略配置失败，使用默认值: {str(e)}")
-                turtle_params = {
-                    'n_entry': 20, 'n_exit': 10, 'atr_period': 20,
-                    'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
-                }
-        elif timing_strategy == 'low_turtle':
-            # 低位海龟默认参数：1/6/12（无MA20过滤）
-            turtle_params = {
-                'n_entry': 1, 'n_exit': 6, 'atr_period': 12,
-                'entry_atr': 0.02, 'add_atr': 0.5, 'exit_atr': 2.0, 'base_position_amount': 20000
-            }
-            logger.info(f"低位海龟策略参数: n_entry=1, n_exit=6, atr_period=12（去除MA20过滤）")
+        # 从配置文件读取海龟/低位海龟策略参数（与 /backtest/regime/run 共用 _load_turtle_params）
+        turtle_params = _load_turtle_params(timing_strategy)
         
         # 验证参数
         if not strategy_name or not start_date or not end_date:
@@ -1194,6 +1280,9 @@ def get_backtest_result(result_id):
                 trade['buy_date'] = str(trade['buy_date'])
             if trade.get('sell_date'):
                 trade['sell_date'] = str(trade['sell_date'])
+
+        # 补充每笔订单“所属持仓的结局”（否则买入/加仓订单会被误判为“持仓中”）
+        _attach_position_status(trades)
         
         # 处理结果中的Infinity值，将其转换为null
         def handle_infinity(value):
@@ -1296,7 +1385,10 @@ def get_backtest_trades(result_id):
     try:
         # 调用DAO获取交易记录
         trades = backtest_dao.get_trades_by_result_id(result_id)
-        
+
+        # 补充每笔订单“所属持仓的结局”（buy/add 行本身没有 sell_date）
+        _attach_position_status(trades)
+
         return jsonify({
             'success': True,
             'message': '获取回测交易记录成功',
@@ -2921,6 +3013,12 @@ def run_regime_backtest():
         if data.get('confirm_days'):
             router_cfg['confirm_days'] = int(data['confirm_days'])
 
+        # 入口择时（兜底用）+ 海龟参数（从配置文件读取，与 /backtest/run 同一实现）
+        # 顶层键会被 RegimeBacktestEngine._switch_timing 逐日 merge，因此所有切到 turtle
+        # 的档位都用同一套参数，不会再各自回退到代码内默认预设（short = 10/5）
+        timing_strategy = data.get('timing_strategy', 'turtle')
+        turtle_params = _load_turtle_params(timing_strategy)
+
         config = {
             'config_name': '自适应回测',
             'score_threshold': score_threshold,
@@ -2931,12 +3029,20 @@ def run_regime_backtest():
             'buy_amount': buy_amount,
             'max_daily_buys': max_daily_buys,
             # 入口择时仅作兜底（每日由 regime 决定）
-            'timing_strategy': data.get('timing_strategy', 'turtle'),
+            'timing_strategy': timing_strategy,
             'timing_params': data.get('timing_params', {}) or {},
             'support_level_method': data.get('support_level_method', 'ma20'),
             'start_date': start_date,
             'end_date': end_date,
             'regime_router': router_cfg,
+            # 海龟策略参数（从 config/strategy_params.yaml 读取）
+            'n_entry': turtle_params.get('n_entry'),
+            'n_exit': turtle_params.get('n_exit'),
+            'atr_period': turtle_params.get('atr_period'),
+            'entry_atr': turtle_params.get('entry_atr'),
+            'add_atr': turtle_params.get('add_atr'),
+            'exit_atr': turtle_params.get('exit_atr'),
+            'base_position_amount': turtle_params.get('base_position_amount'),
         }
 
         logger.info(f"[自适应回测] {start_date} ~ {end_date}, 参数: "

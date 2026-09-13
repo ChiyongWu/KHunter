@@ -631,6 +631,19 @@ class BacktestEngine:
                         logger.info(f"【加仓数量】{current_date} {stock_code} {stock['stock_name']}: "
                                     f"策略信号={signal_qty}股, 1/2凯利金额={kelly_amount / 2:.2f}元"
                                     f"→{half_kelly_qty}股, 取大者={quantity}股")
+
+                        # 数量不足一手时不得下单（2026-09-13）：
+                        # 此前缺该守卫，当"取大者"结果为 0（如高价股 + 金额兜底折算为 0 手）
+                        # 会落库一笔 0 股 / 0 元的加仓订单，并误增 add_count、刷新
+                        # last_add_price，干扰海龟后续加仓节奏
+                        from utils.stock_utils import get_min_trade_unit
+                        _min_unit = get_min_trade_unit(stock_code)
+                        if quantity < _min_unit:
+                            logger.info(f"【未加仓】{current_date} {stock_code} {stock['stock_name']}: "
+                                        f"数量不足{_min_unit}股（策略信号={signal_qty}股，"
+                                        f"半凯利={half_kelly_qty}股），跳过加仓")
+                            remaining_candidates.append(candidate)
+                            continue
                     else:
                         # 首次建仓：使用凯利公式计算（获取完整参数）
                         # 确定最终可用金额
@@ -671,10 +684,27 @@ class BacktestEngine:
                         logger.info(f"【未执行买入】{stock_code} {stock['stock_name']}: 可用资金不足2000元（当前{current_capital:.2f}元），跳过执行")
                         remaining_candidates.append(candidate)
                         continue
-                    if buy_amount > current_capital:
-                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 资金不足（需要{buy_amount:.2f}，可用{current_capital:.2f}）")
+
+                    # 含交易费用校验（2026-09-13）：
+                    # 原逻辑仅比较 buy_amount 与可用资金，未给佣金/过户费留位，
+                    # 买入后 current_capital -= (buy_amount + 费用) 会扣出几毛钱负数。
+                    # 现在要求「买入金额 + 佣金 + 过户费 ≤ 可用资金」，不足则按手数回退。
+                    from utils.stock_utils import get_min_trade_unit
+                    _min_unit = get_min_trade_unit(stock_code)
+                    while quantity >= _min_unit:
+                        buy_amount = quantity * buy_price
+                        _cost = calculate_backtest_cost(stock_code, buy_price, quantity, is_buy=True)
+                        _need = buy_amount + _cost['commission'] + _cost['transfer_fee']
+                        if _need <= current_capital:
+                            break
+                        # 通常只差"费用"这一小截：按差额退手（至少退一手）后复验
+                        _deficit = _need - current_capital
+                        quantity -= max(1, int(_deficit / (buy_price * _min_unit)) + 1) * _min_unit
+                    if quantity < _min_unit:
+                        logger.info(f"【未买入】{stock_code} {stock['stock_name']}: 可用资金不足以覆盖含费买入（当前{current_capital:.2f}元，价格{buy_price:.2f}），跳过执行")
                         remaining_candidates.append(candidate)
                         continue
+                    buy_amount = quantity * buy_price
                     
                     # 执行买入
                     trade_type = result.trade_type if result else 'new'
@@ -1050,13 +1080,37 @@ class BacktestEngine:
                         dates_cache.append(d_str)
                 logger.info(f"从缓存加载回测范围交易日: {len(dates_cache)} 日 "
                             f"(缓存总计 {len(all_dates)} 日)")
-        
-        # 3. 如果缓存也没有，报错终止（不再降级到仅过滤周末）
+
+        # 2.5 【2026-09-13 新增】覆盖不足时用 akshare 兜底（无需 token，节假日准确）
+        #     本地缓存只积累"查询过的日期"，新部署/换机器可能只有几天，
+        #     此前会静默用 1 个交易日跑完整个区间 → 结果完全错误。
+        if self._calendar_coverage_insufficient(dates_cache, extended_start_dt, end_date):
+            before = len(dates_cache)
+            try:
+                import akshare as ak
+                df = ak.tool_trade_date_hist_sina()
+                raw = [str(x) for x in df['trade_date'].tolist()]
+                ak_dates = sorted({x if '-' in x else f"{x[:4]}-{x[4:6]}-{x[6:8]}"
+                                   for x in raw})
+                _d0 = extended_start_dt.date()
+                _d1 = datetime.strptime(end_date, '%Y-%m-%d').date()
+                dates_cache = [d for d in ak_dates
+                               if _d0 <= datetime.strptime(d, '%Y-%m-%d').date() <= _d1]
+                # 合并写回本地缓存，供后续离线运行使用（全量真实日历，含节假日）
+                merged = sorted(set(self._load_cache_dates(cache_file)) | set(ak_dates))
+                self._save_cache_dates(cache_file, merged)
+                logger.warning(
+                    f"本地缓存覆盖不足（区间仅 {before} 日）→ 已改用 akshare 交易日历"
+                    f"（无需 token）：获取 {len(dates_cache)} 日，缓存已更新至 {len(merged)} 日")
+            except Exception as e:
+                logger.warning(f"本地缓存覆盖不足（{before} 日）且 akshare 兜底失败: {e}")
+
+        # 3. 如果缓存/兜底都没有，报错终止（不再降级到仅过滤周末）
         if not dates_cache:
             raise RuntimeError(
-                f"交易日历加载失败：Tushare API 不可用且本地缓存文件不存在。\n"
+                f"交易日历加载失败：Tushare API 不可用、本地缓存无覆盖、akshare 兜底也失败。\n"
                 f"预期缓存路径: {cache_file.absolute()}\n"
-                f"请在网络正常时先运行一次回测以生成缓存文件。"
+                f"请在网络正常时先运行一次回测以生成/补全缓存文件。"
             )
         
         # 通知 trade_date_utils 刷新模块级缓存（Flask 长驻进程场景必需）
@@ -1112,7 +1166,41 @@ class BacktestEngine:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump({"dates": dates}, f, ensure_ascii=False, indent=2)
-    
+
+    @staticmethod
+    def _calendar_coverage_insufficient(dates: list, start_dt, end_date: str) -> bool:
+        """交易日历覆盖是否明显不足（2026-09-13 新增）
+
+        背景：本地缓存 `data/trading_calendar_cache.json` 只积累"曾经查询过的日期"，
+        新部署/换机器时可能只有几天 —— 此前会**静默**用 1 个交易日跑完整个回测区间，
+        得到完全错误的结果。
+
+        判据：区间内"工作日数"作为上界，实际取得不足其 80% 即视为覆盖不足
+        （扣除春节等长假约 5%~8% 的折损后仍留有安全余量）。
+
+        Args:
+            dates: 当前取得的交易日列表
+            start_dt: 区间起始（date 或 datetime）
+            end_date: 区间结束（YYYY-MM-DD）
+
+        Returns:
+            bool: True = 覆盖不足，需要兜底补齐
+        """
+        from datetime import timedelta
+        try:
+            d0 = start_dt.date() if hasattr(start_dt, 'date') else start_dt
+            d1 = datetime.strptime(end_date, '%Y-%m-%d').date()
+            if d1 < d0:
+                return False
+            expected_weekdays = sum(
+                1 for i in range((d1 - d0).days + 1)
+                if (d0 + timedelta(days=i)).weekday() < 5)
+            if expected_weekdays <= 2:      # 极短区间不做覆盖判定
+                return False
+            return len(dates) < expected_weekdays * 0.8
+        except Exception:
+            return False
+
     def _is_trading_day(self, date: date) -> bool:
         """判断是否为交易日（必须基于交易日历缓存，不使用周末降级）
         
