@@ -591,11 +591,15 @@ class EventScorer:
             def _remote():
                 pro = self._get_pro()
                 # 调用 repurchase 接口（全量历史，本地按 ann_date 过滤）
-                return self._call_tushare_with_retry(
+                df = self._call_tushare_with_retry(
                     pro.repurchase,
                     ts_code=ts_code,
                     fields="ts_code,ann_date,proc,amount,exp_date",
                 )
+                # 防御：部分数据源忽略 ts_code 参数返回全市场数据，本地二次过滤
+                if df is not None and not df.empty and "ts_code" in df.columns:
+                    df = df[df["ts_code"] == ts_code]
+                return df
 
             # 本地落地缓存优先（快照型），否则直接远程
             if self.data_cache is not None:

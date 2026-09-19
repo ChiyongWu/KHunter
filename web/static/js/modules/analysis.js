@@ -346,15 +346,15 @@ export function renderDimensionCard(dimKey, dimData, isModal = false) {
             desc = '🚫 ' + (detail.veto_reason || dimData.veto_reason);
         } else {
             const events = [];
-            if (pos.length > 0) events.push('利好: ' + pos.map(e => e.type).join('、'));
-            if (neg.length > 0) events.push('利空: ' + neg.map(e => e.type).join('、'));
+            if (pos.length > 0) events.push('利好: ' + aggregateEventTypes(pos));
+            if (neg.length > 0) events.push('利空: ' + aggregateEventTypes(neg));
             desc = events.join(' | ');
         }
         setText(`${prefix}${dimKey}-desc`, desc || '无');
-        
+
         // 更新详细指标
-        setText(`${prefix}${dimKey}-positive`, pos.length > 0 ? pos.map(e => e.type).join('、') : '--');
-        setText(`${prefix}${dimKey}-negative`, neg.length > 0 ? neg.map(e => e.type).join('、') : '--');
+        setText(`${prefix}${dimKey}-positive`, pos.length > 0 ? aggregateEventTypes(pos) : '--');
+        setText(`${prefix}${dimKey}-negative`, neg.length > 0 ? aggregateEventTypes(neg) : '--');
         setText(`${prefix}${dimKey}-veto`, evtVeto ? '是' : '否');
     }
 }
@@ -503,6 +503,22 @@ export function formatMoney(val) {
 export function formatNorthFund(status) {
     const map = { 'increase': '增持', 'decrease': '减持', 'hold': '持平', 'none': '无持股' };
     return map[status] || status || '--';
+}
+
+/**
+ * 聚合事件类型（同类事件合并计数，避免逐条平铺重复）
+ * @param {Array} events - 事件数组 [{type, score, date}]
+ * @returns {string} 如 "股东增持×3、股票回购×2"；单条时不带计数
+ */
+function aggregateEventTypes(events) {
+    const counts = {};
+    events.forEach(e => {
+        const t = (e && e.type) || '未知事件';
+        counts[t] = (counts[t] || 0) + 1;
+    });
+    return Object.entries(counts)
+        .map(([type, n]) => n > 1 ? `${type}×${n}` : type)
+        .join('、');
 }
 
 /**
