@@ -5,10 +5,13 @@ A股数据采集协调器 - 统一管理所有数据采集
 import logging
 from pathlib import Path
 from typing import Optional, Dict
+from datetime import datetime, timedelta
 
 # 导入各个模块
 from utils.stock_data_fetcher import StockDataFetcher
 from utils.kline_fetcher import KlineFetcher
+from utils.kline_updater import KlineUpdater
+from utils.trading_time_validator import TradingTimeValidator
 from utils.fund_flow_fetcher import FundFlowFetcher
 from utils.data_initializer import DataInitializer
 from utils.collector_manager import CollectorManager
@@ -298,6 +301,115 @@ class AKShareFetcher:
             incremental=incremental, stock_dict=stock_dict,
             stock_codes=stock_codes
         )
+
+    # ==================== 每日增量更新 ====================
+
+    def daily_update(self, max_stocks: Optional[int] = None, batch_size: int = 100) -> dict:
+        """
+        每日增量更新K线数据
+
+        流程：
+        1. 校验交易时间并确定目标更新日期（非交易日自动回退最近交易日）
+        2. 查询上次更新日期，数据已最新则幂等跳过
+        3. 从数据库获取股票列表
+        4. 分批增量更新K线数据（数据源降级链 + 除权检测重建）
+        5. 记录更新完成日志（保证后续幂等判断生效）
+
+        参数：
+            max_stocks: 限制更新的股票数量（用于快速测试），None 表示全部
+            batch_size: 每批处理的股票数
+
+        返回：
+            {
+                'success': bool,      # 是否成功（含幂等跳过）
+                'skipped': bool,      # 是否因数据已最新而跳过
+                'added': int,         # 新增K线条数
+                'updated': int,       # 更新K线条数
+                'failed': int,        # 失败股票数
+                'rebuilt': int,       # 除权重建股票数
+                'message': str,       # 结果说明
+                'total_time': float   # 总耗时（秒）
+            }
+        """
+        start_time = datetime.now()
+
+        # 第1步：校验交易时间，确定目标更新日期
+        validator = TradingTimeValidator()
+        is_valid, error_msg, target_date = validator.validate_update_time()
+        if not is_valid:
+            logger.warning(f"daily_update 被拒绝: {error_msg}")
+            return {
+                'success': False, 'skipped': False,
+                'added': 0, 'updated': 0, 'failed': 0, 'rebuilt': 0,
+                'message': error_msg,
+                'total_time': (datetime.now() - start_time).total_seconds()
+            }
+
+        logger.info(f"每日增量更新目标日期: {target_date}")
+
+        # 第2步：查询上次更新日期（无记录默认3天前，视为需要更新）
+        last_update_date = validator.get_last_update_date()
+        if not last_update_date:
+            last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+        logger.info(f"上次更新日期: {last_update_date}")
+
+        # 幂等保护：数据已最新则跳过
+        if last_update_date >= target_date:
+            logger.info(f"数据已是最新（{last_update_date} >= {target_date}），跳过更新")
+            return {
+                'success': True, 'skipped': True,
+                'added': 0, 'updated': 0, 'failed': 0, 'rebuilt': 0,
+                'message': f'数据已是最新（上次更新: {last_update_date}），跳过更新',
+                'total_time': (datetime.now() - start_time).total_seconds()
+            }
+
+        # 第3步：获取股票列表
+        sql = "SELECT DISTINCT code FROM stock_basic ORDER BY code"
+        result = self.db_manager.query(sql)
+        stock_codes = [row['code'] for row in result] if result else []
+        if not stock_codes:
+            msg = "股票列表为空，请先初始化基础数据"
+            logger.warning(msg)
+            return {
+                'success': False, 'skipped': False,
+                'added': 0, 'updated': 0, 'failed': 0, 'rebuilt': 0,
+                'message': msg,
+                'total_time': (datetime.now() - start_time).total_seconds()
+            }
+
+        if max_stocks:
+            stock_codes = stock_codes[:max_stocks]
+
+        logger.info(f"待更新股票数量: {len(stock_codes)}")
+
+        # 第4步：分批增量更新K线数据
+        kline_updater = KlineUpdater(self.db_manager, self.stock_data_fetcher)
+        kline_result = kline_updater.update_kline_data(
+            stock_codes=stock_codes,
+            last_update_date=last_update_date,
+            target_date=target_date,
+            batch_size=batch_size
+        )
+
+        # 第5步：成功后记录更新完成日志（保证下次幂等判断生效）
+        # 数据源尚未就绪时未实际更新数据，不记录完成，避免下次幂等误判
+        source_not_ready = '数据源尚未就绪' in kline_result.get('message', '')
+        if kline_result.get('success') and not source_not_ready:
+            validator.record_update_complete(target_date, {
+                'kline_added': kline_result.get('added', 0),
+                'kline_updated': kline_result.get('updated', 0),
+            })
+
+        return {
+            'success': kline_result.get('success', False),
+            'skipped': source_not_ready,
+            'added': kline_result.get('added', 0),
+            'updated': kline_result.get('updated', 0),
+            'failed': kline_result.get('failed', 0),
+            'rebuilt': kline_result.get('rebuilt', 0),
+            'message': kline_result.get('message', ''),
+            'total_time': (datetime.now() - start_time).total_seconds()
+        }
     
     # ==================== 采集器管理 ====================
     
