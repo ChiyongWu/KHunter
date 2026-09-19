@@ -319,6 +319,11 @@ class DataCollectionService:
                 self.init_status['paused'] = False
                 self.init_status['status'] = 'running'
                 self.init_status['progress'] = 0
+                # 重置上次任务残留的计数与统计，否则上次失败的 failed
+                # 会累积到本次完成页（get_tables_stats 读取 failed 字段）
+                self.init_status['success'] = 0
+                self.init_status['failed'] = 0
+                self.init_status['statistics'] = {}
                 self.init_status['start_time'] = datetime.now().isoformat()
                 self.init_status['logs'] = []
                 self.init_status['tasks'] = []
@@ -364,13 +369,15 @@ class DataCollectionService:
                 self._add_init_log("✓ 全量初始化完成")
                 self._update_progress(100)
                 
+                # 必须先填 statistics 再置 status='completed'：前端每秒轮询，
+                # 一旦看到 completed 就立即渲染完成页并停止轮询。若顺序颠倒，
+                # 轮询会在两者之间的窗口拿到 completed + 空 statistics，
+                # 界面永久显示成功/失败/总数全 0。
+                self.init_status['statistics'] = self.get_tables_stats()
                 self.init_status['status'] = 'completed'
                 self.init_status['end_time'] = datetime.now().isoformat()
                 self.init_status['success'] = 1
                 self._add_init_log("✓ 重新初始化全部完成")
-                # 填充统计信息（stock_basic 行数等），前端完成页据此展示
-                # 成功/失败/总数量；不填则 statistics 为空 dict，界面显示全 0
-                self.init_status['statistics'] = self.get_tables_stats()
 
             except Exception as e:
                 self.init_status['status'] = 'failed'
@@ -539,16 +546,15 @@ class DataCollectionService:
                     except ImportError:
                         pass
                 
-                # 完成
+                # 完成（先填 statistics 再置 completed，避免前端轮询竞态，
+                # 说明见 _run_reinit 同位置注释）
                 self.init_status['progress'] = 100
+                self.init_status['statistics'] = self.get_tables_stats()
                 self.init_status['end_time'] = datetime.now().isoformat()
                 self.init_status['message'] = '初始化完成'
                 self.init_status['status'] = 'completed'
                 self.init_status['success'] = 1
                 self._add_init_log("✓ 初始化任务完成")
-
-                # 更新统计信息
-                self.init_status['statistics'] = self.get_tables_stats()
                 
                 # 尝试导入并调用WebSocket推送函数
                 try:
