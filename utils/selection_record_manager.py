@@ -197,6 +197,9 @@ class SelectionRecordManager:
                     # 从stock_basic表获取行业信息
                     industry = self._get_stock_industry(stock_code)
                     
+                    # 获取板块信息（评分板块 -> 板块映射 -> 行业兜底）
+                    sector = self._get_stock_sector(stock_code)
+                    
                     # 获取选入价格（使用信号中的价格或从CSV获取）
                     selection_price = signal.get('price', 0.0)
                     if selection_price == 0.0:
@@ -214,6 +217,7 @@ class SelectionRecordManager:
                             'stock_name': signal.get('name', '未知'),
                             'strategy_name': strategy_name,
                             'industry': industry,
+                            'sector': sector,
                             'selection_price': selection_price,
                             'key_dates': key_dates,
                             'strategy_count': strategy_count
@@ -230,6 +234,7 @@ class SelectionRecordManager:
                         stock_name = stock_info['stock_name']
                         strategy_name = stock_info['strategy_name']
                         industry = stock_info['industry']
+                        sector = stock_info.get('sector', '')
                         selection_price = stock_info['selection_price']
                         key_dates = stock_info['key_dates']
                         
@@ -241,7 +246,7 @@ class SelectionRecordManager:
                                 # 删除旧记录，保存新记录
                                 self.delete_old_record(stock_code, selection_date)
                                 self._insert_record(strategy_name, stock_code, stock_name,
-                                                  industry, selection_date, selection_time,
+                                                  industry, sector, selection_date, selection_time,
                                                   selection_price, key_dates, stock_info.get('strategy_count', 1))
                                 stats['updated'] += 1
                             else:
@@ -250,7 +255,7 @@ class SelectionRecordManager:
                         else:
                             # 新股票，直接保存
                             self._insert_record(strategy_name, stock_code, stock_name,
-                                              industry, selection_date, selection_time,
+                                              industry, sector, selection_date, selection_time,
                                               selection_price, key_dates, stock_info.get('strategy_count', 1))
                             stats['saved'] += 1
                     except Exception as e:
@@ -276,7 +281,7 @@ class SelectionRecordManager:
             }
     
     def _insert_record(self, strategy_name: str, stock_code: str, stock_name: str,
-                      industry: str, selection_date, selection_time: datetime,
+                      industry: str, sector: str, selection_date, selection_time: datetime,
                       selection_price: float, key_dates: str = None, strategy_count: int = 1):
         """
         插入选股记录
@@ -286,6 +291,7 @@ class SelectionRecordManager:
             stock_code: 股票代码
             stock_name: 股票名称
             industry: 行业
+            sector: 板块
             selection_date: 选入日期
             selection_time: 选入时间
             selection_price: 选入价格
@@ -294,14 +300,14 @@ class SelectionRecordManager:
         """
         insert_sql = """
         INSERT INTO stock_selection_record 
-        (strategy_name, stock_code, stock_name, industry, 
+        (strategy_name, stock_code, stock_name, industry, sector, 
          selection_date, selection_time, selection_price, key_dates, created_at, updated_at, is_active, strategy_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         """
         
         now = datetime.now()
         self.db_manager.execute_with_retry(insert_sql, (
-            strategy_name, stock_code, stock_name, industry,
+            strategy_name, stock_code, stock_name, industry, sector,
             selection_date, selection_time, selection_price, key_dates, now, now, strategy_count
         ))
         
@@ -458,19 +464,15 @@ class SelectionRecordManager:
         """
         try:
             # 从stock_score_detail表获取最新的板块详情
-            sector_details = None
-            def callback(row):
-                nonlocal sector_details
-                if row and row[0]:
-                    sector_details = row[0]
-            
-            self.db_manager.execute_with_retry("""
+            cursor = self.db_manager.execute_with_retry("""
                 SELECT sector_details 
                 FROM stock_score_detail 
                 WHERE stock_code = ? 
                 ORDER BY score_date DESC 
                 LIMIT 1
-            """, (stock_code,), callback=callback)
+            """, (stock_code,))
+            row = cursor.fetchone()
+            sector_details = row[0] if row and row[0] else None
             
             if sector_details:
                 try:
@@ -499,49 +501,32 @@ class SelectionRecordManager:
             # 如果没有评分数据，尝试从stock_sector_mapping表获取最新的板块信息
             try:
                 # 先获取最新的板块代码
-                sector_code = None
-                def sector_code_callback(row):
-                    nonlocal sector_code
-                    if row and row[0]:
-                        sector_code = row[0]
-                
-                self.db_manager.execute_with_retry("""
+                cursor = self.db_manager.execute_with_retry("""
                     SELECT sector_code 
                     FROM stock_sector_mapping 
                     WHERE stock_code = ? 
                     ORDER BY mapping_date DESC 
                     LIMIT 1
-                """, (stock_code,), callback=sector_code_callback)
+                """, (stock_code,))
+                row = cursor.fetchone()
+                sector_code = row[0] if row and row[0] else None
                 
                 if sector_code:
                     # 再从stock_sector表获取板块名称
-                    sector_name = None
-                    def sector_name_callback(row):
-                        nonlocal sector_name
-                        if row and row[0]:
-                            sector_name = row[0]
-                    
-                    self.db_manager.execute_with_retry("SELECT sector_name FROM stock_sector WHERE sector_code = ?", 
-                                                     (sector_code,), callback=sector_name_callback)
-                    if sector_name:
-                        return sector_name
+                    cursor = self.db_manager.execute_with_retry(
+                        "SELECT sector_name FROM stock_sector WHERE sector_code = ?", 
+                        (sector_code,))
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        return row[0]
             except Exception as e:
                 logger.debug(f"从stock_sector_mapping表获取板块信息失败: {str(e)}")
             
-            # 如果没有板块映射，尝试从stock_basic表获取行业信息作为板块（因为stock_basic表没有sector字段）
+            # 如果没有板块映射，回退复用 _get_stock_industry（含 industry_fetcher 远程拉取兜底）
             try:
-                industry = None
-                def industry_callback(row):
-                    nonlocal industry
-                    if row and row[0]:
-                        industry = row[0]
-                
-                self.db_manager.execute_with_retry("SELECT industry FROM stock_basic WHERE code = ?", 
-                                                 (stock_code,), callback=industry_callback)
-                if industry:
-                    return industry
+                return self._get_stock_industry(stock_code) or ''
             except Exception as e:
-                logger.debug(f"从stock_basic表获取行业信息失败: {str(e)}")
+                logger.debug(f"回退获取行业信息失败: {str(e)}")
             
             return ''
         except Exception as e:
