@@ -407,12 +407,21 @@ def get_hot_sectors():
         except (TypeError, ValueError):
             page_size = 10
 
+        # 排序字段与方向（白名单校验后拼接，防注入）
+        sort_by = request.args.get('sort_by', 'pct_chg')
+        if sort_by not in ('pct_chg', 'ytd_pct_chg'):
+            sort_by = 'pct_chg'
+        sort_order = request.args.get('sort_order', 'desc')
+        if sort_order not in ('asc', 'desc'):
+            sort_order = 'desc'
+
         # 最近有数据的交易日（表无数据时返回空列表）
         row = db_manager.query_one("SELECT MAX(trade_date) AS max_date FROM sector_hot_rank")
         if not row or not row['max_date']:
             return jsonify({'success': True, 'date': '', 'type': sector_type,
-                            'page': page, 'page_size': page_size, 'total': 0,
-                            'total_pages': 0, 'sectors': []})
+                            'page': page, 'page_size': page_size,
+                            'sort_by': sort_by, 'sort_order': sort_order,
+                            'total': 0, 'total_pages': 0, 'sectors': []})
         trade_date = row['max_date']
 
         count_row = db_manager.query_one("""
@@ -423,11 +432,11 @@ def get_hot_sectors():
         total = count_row['total'] if count_row else 0
         total_pages = (total + page_size - 1) // page_size
 
-        rows = db_manager.query("""
+        rows = db_manager.query(f"""
             SELECT sector_code, sector_name, pct_chg, ytd_pct_chg
             FROM sector_hot_rank
             WHERE trade_date = ? AND sector_type = ?
-            ORDER BY pct_chg DESC
+            ORDER BY {sort_by} {sort_order}
             LIMIT ? OFFSET ?
         """, (trade_date, sector_type, page_size, (page - 1) * page_size))
 
@@ -447,6 +456,8 @@ def get_hot_sectors():
             'type': sector_type,
             'page': page,
             'page_size': page_size,
+            'sort_by': sort_by,
+            'sort_order': sort_order,
             'total': total,
             'total_pages': total_pages,
             'sectors': sectors

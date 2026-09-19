@@ -107,6 +107,12 @@ let hotSectorType = 'concept';
 let hotSectorPage = 1;
 
 /**
+ * 热门板块排序状态：排序字段与方向（后端 SQL 排序，支持点击表头切换）
+ */
+let hotSectorSortBy = 'pct_chg';
+let hotSectorSortOrder = 'desc';
+
+/**
  * 格式化涨跌幅：保留2位小数，红涨绿跌（A股配色）
  * @param {number} pct - 涨跌幅 %
  */
@@ -144,6 +150,14 @@ function renderHotSectors(result) {
     // 前三名排名角标颜色（同花顺样式：红/橙/黄）
     const rankColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#f1c40f' };
 
+    // 排序表头样式与箭头：当前排序列红色高亮并显示方向箭头
+    const sortArrow = (col) => hotSectorSortBy === col
+        ? (hotSectorSortOrder === 'desc' ? ' ▼' : ' ▲')
+        : '';
+    const headerStyle = (col) => hotSectorSortBy === col
+        ? 'text-align: right; color: #e74c3c; cursor: pointer; user-select: none;'
+        : 'text-align: right; cursor: pointer; user-select: none;';
+
     let html = tabs + `
         <div class="table-responsive">
             <table class="table" style="margin-bottom: 5px;">
@@ -151,8 +165,8 @@ function renderHotSectors(result) {
                     <tr>
                         <th style="width: 50px;">排名</th>
                         <th>板块名称</th>
-                        <th style="text-align: right;">涨幅</th>
-                        <th style="text-align: right;">年内涨幅</th>
+                        <th style="${headerStyle('pct_chg')}" onclick="sortHotSectors('pct_chg')">涨幅${sortArrow('pct_chg')}</th>
+                        <th style="${headerStyle('ytd_pct_chg')}" onclick="sortHotSectors('ytd_pct_chg')">年内涨幅${sortArrow('ytd_pct_chg')}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -206,7 +220,7 @@ function renderHotSectors(result) {
 }
 
 /**
- * 加载热门板块数据（最近交易日，按涨幅倒序，分页）
+ * 加载热门板块数据（最近交易日，按指定字段排序，分页）
  * @param {string} type - 板块类型：concept 概念 / industry 行业
  * @param {number} page - 页码（从 1 开始）
  */
@@ -222,7 +236,7 @@ export async function loadHotSectors(type = hotSectorType, page = 1) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
 
-        const response = await fetch(`/api/dashboard/hot-sectors?type=${type}&page=${page}`, { signal: controller.signal });
+        const response = await fetch(`/api/dashboard/hot-sectors?type=${type}&page=${page}&sort_by=${hotSectorSortBy}&sort_order=${hotSectorSortOrder}`, { signal: controller.signal });
         clearTimeout(timeoutId);
 
         if (!response.ok) {
@@ -231,13 +245,33 @@ export async function loadHotSectors(type = hotSectorType, page = 1) {
 
         const result = await response.json();
 
-        // 过期响应，丢弃（类型或页码已变化的旧请求）
-        if ((result.type && result.type !== hotSectorType) || (result.page && result.page !== hotSectorPage)) return;
+        // 过期响应，丢弃（类型、页码或排序已变化的旧请求）
+        if ((result.type && result.type !== hotSectorType)
+                || (result.page && result.page !== hotSectorPage)
+                || (result.sort_by && result.sort_by !== hotSectorSortBy)
+                || (result.sort_order && result.sort_order !== hotSectorSortOrder)) return;
         container.innerHTML = renderHotSectors(result);
     } catch (error) {
         console.error('加载热门板块失败:', error);
         container.innerHTML = renderHotSectors(null);
     }
+}
+
+/**
+ * 切换热门板块排序（点击表头触发）：同列翻转升降序，异列则该列降序，并回到第 1 页
+ * @param {string} col - 排序字段：pct_chg 当日涨幅 / ytd_pct_chg 年内涨幅
+ */
+export function sortHotSectors(col) {
+    if (col !== 'pct_chg' && col !== 'ytd_pct_chg') {
+        return;
+    }
+    if (hotSectorSortBy === col) {
+        hotSectorSortOrder = hotSectorSortOrder === 'desc' ? 'asc' : 'desc';
+    } else {
+        hotSectorSortBy = col;
+        hotSectorSortOrder = 'desc';
+    }
+    loadHotSectors(hotSectorType, 1);
 }
 
 /**
