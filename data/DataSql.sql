@@ -979,13 +979,15 @@ CREATE TABLE IF NOT EXISTS sector_hot_rank (
     trade_date DATE NOT NULL,
     -- trade_date: 交易日，格式YYYY-MM-DD
     sector_code VARCHAR(20) NOT NULL,
-    -- sector_code: 同花顺板块代码，例如885823.TI
+    -- sector_code: 通达信板块代码，例如880728.TDX
     sector_name VARCHAR(50) NOT NULL,
     -- sector_name: 板块名称，例如创新药
     sector_type VARCHAR(10) NOT NULL,
     -- sector_type: 板块类型，concept概念/industry行业
     pct_chg REAL,
     -- pct_chg: 板块涨跌幅，百分比，例如1.27
+    ytd_pct_chg REAL,
+    -- ytd_pct_chg: 年初至今涨跌幅%，例如30.5表示涨30.5%、-41.2表示跌41.2%
     main_net_flow REAL,
     -- main_net_flow: 主力净流入额，单位元，例如208000000
     created_date DATETIME,

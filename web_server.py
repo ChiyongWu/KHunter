@@ -424,7 +424,7 @@ def get_hot_sectors():
         total_pages = (total + page_size - 1) // page_size
 
         rows = db_manager.query("""
-            SELECT sector_code, sector_name, pct_chg
+            SELECT sector_code, sector_name, pct_chg, ytd_pct_chg
             FROM sector_hot_rank
             WHERE trade_date = ? AND sector_type = ?
             ORDER BY pct_chg DESC
@@ -437,7 +437,8 @@ def get_hot_sectors():
                 'rank': idx,
                 'sector_code': r['sector_code'],
                 'sector_name': r['sector_name'],
-                'pct_chg': r['pct_chg']
+                'pct_chg': r['pct_chg'],
+                'ytd_pct_chg': r['ytd_pct_chg']
             })
 
         return jsonify({

@@ -152,6 +152,7 @@ function renderHotSectors(result) {
                         <th style="width: 50px;">排名</th>
                         <th>板块名称</th>
                         <th style="text-align: right;">涨幅</th>
+                        <th style="text-align: right;">年内涨幅</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -161,7 +162,7 @@ function renderHotSectors(result) {
         const rankBadge = rankColors[sector.rank]
             ? `<span style="display:inline-block;min-width:20px;text-align:center;border-radius:4px;color:#fff;font-weight:bold;padding:1px 4px;background:${rankColors[sector.rank]};">${sector.rank}</span>`
             : `<span class="text-muted" style="display:inline-block;min-width:20px;text-align:center;">${sector.rank}</span>`;
-        const code = (sector.sector_code || '').replace('.TI', '');
+        const code = (sector.sector_code || '').replace('.TDX', '');
         html += `
             <tr>
                 <td>${rankBadge}</td>
@@ -170,6 +171,7 @@ function renderHotSectors(result) {
                     <div class="text-muted" style="font-size: 12px;">${code}</div>
                 </td>
                 <td style="text-align: right;">${formatPctChg(sector.pct_chg)}</td>
+                <td style="text-align: right;">${formatPctChg(sector.ytd_pct_chg)}</td>
             </tr>
         `;
     });

@@ -191,6 +191,56 @@ class DatabaseMigrationHelper:
             logger.error(f"检查/添加 buy_range 列失败: {str(e)}")
             return False
     
+    def check_and_migrate_sector_hot_rank_ytd(self) -> bool:
+        """
+        迁移 sector_hot_rank 表：
+        1. 添加 ytd_pct_chg 列（年初至今涨跌幅，通达信数据源）
+        2. 清理旧的同花顺 .TI 板块数据（数据源已切换为通达信 .TDX）
+
+        Returns:
+            bool: 如果迁移成功或无需迁移则返回 True
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # 检查 sector_hot_rank 表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sector_hot_rank'")
+            if not cursor.fetchone():
+                logger.warning("sector_hot_rank 表不存在，跳过 ytd_pct_chg 列检查")
+                conn.close()
+                return False
+
+            # 获取现有列
+            cursor.execute("PRAGMA table_info(sector_hot_rank)")
+            cols = cursor.fetchall()
+            col_names = [col[1] for col in cols]
+
+            # 添加 ytd_pct_chg 列
+            if 'ytd_pct_chg' not in col_names:
+                logger.info("正在为 sector_hot_rank 表添加 ytd_pct_chg 列...")
+                cursor.execute("ALTER TABLE sector_hot_rank ADD COLUMN ytd_pct_chg REAL")
+                conn.commit()
+                logger.info("✓ ytd_pct_chg 列已成功添加到 sector_hot_rank 表")
+            else:
+                logger.info("✓ sector_hot_rank 表已有 ytd_pct_chg 列")
+
+            # 清理旧的同花顺 .TI 数据（数据源已切换为通达信 .TDX）
+            cursor.execute("SELECT COUNT(*) FROM sector_hot_rank WHERE sector_code LIKE '%.TI'")
+            old_count = cursor.fetchone()[0]
+            if old_count > 0:
+                logger.info(f"正在清理旧同花顺 .TI 板块数据（{old_count} 条）...")
+                cursor.execute("DELETE FROM sector_hot_rank WHERE sector_code LIKE '%.TI'")
+                conn.commit()
+                logger.info(f"✓ 已清理旧同花顺 .TI 数据 {old_count} 条")
+
+            conn.close()
+            return True
+
+        except Exception as e:
+            logger.error(f"迁移 sector_hot_rank 表失败: {str(e)}")
+            return False
+
     def check_all_required_columns(self) -> dict:
         """
         检查所有必需的列
@@ -287,6 +337,9 @@ def ensure_database_schema(db_path: str = 'data/stock_selection.db') -> bool:
 
     # 检查并添加 buy_range 列
     success = helper.check_and_add_khunter_buy_range_column() and success
+
+    # 迁移 sector_hot_rank 表（ytd_pct_chg 列 + 清理 .TI 旧数据）
+    success = helper.check_and_migrate_sector_hot_rank_ytd() and success
     
     # 打印迁移状态
     helper.print_migration_status()
