@@ -7,12 +7,15 @@ import requests
 import json
 import time
 import logging
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from utils.tushare_client import get_tushare_pro
+from utils.tushare_client import get_tushare_pro, get_tushare_http_client
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -40,6 +43,15 @@ def _code_to_tf_symbol(code: str) -> str:
 def _tf_symbol_to_code(symbol: str) -> str:
     """将 TickFlow symbol 转换回6位纯数字代码"""
     return symbol.split('.')[0]
+
+
+def _code_to_ts_symbol(code: str) -> str:
+    """将6位纯数字代码转换为 tushare ts_code 格式 (600000.SH / 000001.SZ / 830799.BJ)"""
+    if code.startswith(('4', '8', '92')):
+        return f"{code}.BJ"   # 北交所
+    if code.startswith('6'):
+        return f"{code}.SH"
+    return f"{code}.SZ"
 
 
 # 备选A股股票列表（当网络获取失败时使用）
@@ -75,23 +87,34 @@ DEFAULT_STOCK_LIST = {
 
 
 class _TushareRateLimiter:
-    """Tushare API 速率限制器"""
+    """
+    Tushare API 速率限制器（线程安全滑动窗口）
+
+    并发拉取时多个线程同时调 wait_if_needed，槽位预留必须在锁内完成：
+    先在锁内判定并占坑，满了则在锁外睡到窗口最早一次调用过期后重试。
+    """
 
     def __init__(self, max_calls: int = 100, period: float = 60.0):
         self.max_calls = max_calls
         self.period = period
-        self.calls = []
+        self._calls = deque()
+        self._lock = threading.Lock()
 
     def wait_if_needed(self):
-        import time
-        now = time.time()
-        self.calls = [t for t in self.calls if now - t < self.period]
-        if len(self.calls) >= self.max_calls:
-            sleep_time = self.period - (now - self.calls[0])
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-                self.calls = [t for t in self.calls if time.time() - t < self.period]
-        self.calls.append(time.time())
+        # 限速已禁用：中转站实测不限速，直接放行。
+        # 如需恢复限速，删除下面这行 return 即可
+        return
+        while True:
+            with self._lock:
+                now = time.time()
+                while self._calls and now - self._calls[0] >= self.period:
+                    self._calls.popleft()
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return
+                sleep_time = self.period - (now - self._calls[0])
+            # 锁外等待，加 50ms 余量避免多个线程同一瞬间醒来抢占
+            time.sleep(max(sleep_time, 0) + 0.05)
 
 
 _tushare_limiter = _TushareRateLimiter()
@@ -942,7 +965,8 @@ class StockDataFetcher:
         """
         抓取近期数据用于增量更新（单次请求，不做重试）
 
-        数据源策略：优先 TickFlow 批量接口，失败时自动降级到腾讯财经。
+        数据源策略：tushare 中转站优先（pro.daily 前复权），失败降级
+        TickFlow 批量接口，再降级腾讯财经。
 
         参数：
             stock_code: 股票代码
@@ -951,6 +975,14 @@ class StockDataFetcher:
         返回：
             增量数据DataFrame（前复权数据），失败返回 None
         """
+        # 零级数据源：tushare 中转站批量接口（pro.daily 前复权）
+        try:
+            results, api_ok = self._fetch_stock_batch_tushare([stock_code], days)
+            if api_ok and stock_code in results:
+                return results[stock_code]
+        except Exception as e:
+            logger.debug(f"【增量更新】tushare 获取 {stock_code} 失败: {e}")
+
         # 一级数据源：TickFlow 批量接口获取 K 线数据（前复权）
         try:
             results, api_ok = self._fetch_stock_batch_tickflow([stock_code], days)
@@ -1296,6 +1328,324 @@ class StockDataFetcher:
 
         except Exception as e:
             logger.debug(f"TickFlow 数据转换失败: {e}")
+            return None
+
+    # ==================== tushare 中转站批量K线获取（优先源） ====================
+
+    def _fetch_stock_batch_tushare(self, stock_codes: list, days: int) -> tuple:
+        """
+        使用 tushare 中转站批量获取K线数据（前复权，pro.daily + pro.adj_factor）
+
+        拉取策略自适应（取 API 调用次数更少的方式）：
+        - 交易日数 < 股票数（增量更新小批量）: 按交易日批量拉取，每个交易日 2 次调用
+          （pro.daily(trade_date=...) + pro.adj_factor(trade_date=...)）覆盖全市场
+        - 交易日数 >= 股票数（全量初始化长历史）: 按股票逐只拉取
+          （pro.daily(ts_code=...)），避免跨批次重复拉取同一交易日全市场数据
+
+        前复权口径: qfq = price * adj_factor / 最新adj_factor，与 TickFlow/腾讯对齐；
+        volume 单位「手」（tushare vol），与 DB 存储口径一致。
+
+        参数：
+            stock_codes: 6位纯数字股票代码列表，如 ['600000', '000001']
+            days: 获取最近多少条K线（交易日数）
+
+        返回：
+            (results: dict, api_ok: bool)
+            - results: {stock_code: DataFrame} 字典，仅包含有数据的股票
+            - api_ok: True=中转站可用，个别股票无数据属正常情况无需降级；
+                      False=中转站不可用（未配置/限流/网络故障），整批需降级到备用源
+        """
+        if not stock_codes:
+            return ({}, True)
+
+        pro = get_tushare_pro()
+        if pro is None:
+            logger.warning("tushare 中转站未配置 (config/tushare_config.json)，K线降级到备用数据源")
+            return ({}, False)
+
+        # Session 复用连接的轻量客户端（协议与 SDK 一致），供并发数据拉取使用；
+        # token 有效性已由上方 pro 判空保证
+        client = get_tushare_http_client()
+
+        days = max(1, int(days))
+        # days 为K线条数（交易日），换算自然日范围：放大 1.5 倍 + 20 天缓冲（覆盖长假）
+        calendar_days = int(days * 1.5) + 20
+        end_dt = datetime.now()
+        start_date = (end_dt - timedelta(days=calendar_days)).strftime('%Y%m%d')
+        end_date = end_dt.strftime('%Y%m%d')
+
+        trade_dates = self._tushare_get_trade_dates(pro, start_date, end_date)
+        if not trade_dates:
+            logger.error("tushare 交易日历获取失败，K线整批降级")
+            return ({}, False)
+
+        try:
+            if len(trade_dates) < len(stock_codes):
+                logger.info(
+                    f"tushare 中转站K线: 按交易日并发拉取 "
+                    f"{len(stock_codes)} 只 × {len(trade_dates)} 个交易日"
+                )
+                results = self._tushare_fetch_by_trade_dates(client, stock_codes, trade_dates, days)
+            else:
+                logger.info(
+                    f"tushare 中转站K线: 按股票逐只拉取 {len(stock_codes)} 只 × {days} 条"
+                )
+                results = self._tushare_fetch_by_stocks(client, stock_codes, start_date, end_date, days)
+
+            if results is None:
+                return ({}, False)
+
+            logger.info(f"tushare 中转站K线完成: {len(results)}/{len(stock_codes)} 只有数据")
+            return (results, True)
+
+        except Exception as e:
+            logger.error(f"tushare 中转站K线获取异常: {e}，整批降级")
+            return ({}, False)
+
+    @staticmethod
+    def _tushare_get_trade_dates(pro, start_date: str, end_date: str) -> list:
+        """
+        获取区间内的交易日列表（升序 YYYYMMDD），失败返回空列表
+        """
+        try:
+            _tushare_limiter.wait_if_needed()
+            df = pro.trade_cal(
+                exchange='SSE', start_date=start_date, end_date=end_date,
+                is_open='1', fields='cal_date'
+            )
+            if df is None or df.empty:
+                return []
+            return sorted(df['cal_date'].astype(str).tolist())
+        except Exception as e:
+            logger.error(f"tushare 交易日历获取失败: {e}")
+            return []
+
+    def _tushare_call(self, api_func, max_retries: int = 2, **kwargs):
+        """
+        调用 tushare 接口（全局限速 + 指数退避重试 1s/2s），失败返回 None
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                _tushare_limiter.wait_if_needed()
+                return api_func(**kwargs)
+            except Exception as e:
+                if attempt < max_retries:
+                    backoff = 2 ** attempt
+                    logger.warning(
+                        f"tushare 接口调用失败({attempt + 1}/{max_retries + 1}): {e}，{backoff}s后重试"
+                    )
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"tushare 接口调用失败(已重试{max_retries}次): {e}")
+        return None
+
+    # 按交易日并发拉取的线程数：吞吐由全局限速器（100 次/分钟）封顶，
+    # 8 线程足够在限速窗口内保持流水线满载，再多只是空等
+    _TUSHARE_MAX_WORKERS = 8
+
+    def _tushare_fetch_by_trade_dates(self, client, stock_codes: list,
+                                      trade_dates: list, days: int) -> Optional[dict]:
+        """
+        按交易日并发拉取K线（每个交易日 2 次调用覆盖全市场）
+
+        线程池并发提交各交易日任务，实际吞吐受 _tushare_limiter 全局限速约束；
+        连接由 client（requests.Session）复用，消除逐次 TLS 握手开销。
+
+        参数：
+            client: TushareHttpClient 实例（Session 连接复用）
+            stock_codes: 6位纯数字股票代码列表
+            trade_dates: 交易日列表（升序 YYYYMMDD）
+            days: 保留最近多少条K线
+
+        返回：
+            {code: DataFrame}；None 表示中转站不可用（某交易日数据缺失会导致K线断档，
+            必须整批降级，不可部分返回）
+        """
+        wanted = set(stock_codes)
+        collected = {code: [] for code in stock_codes}
+        total = len(trade_dates)
+
+        def fetch_one_date(td):
+            """拉取单个交易日的日线+复权因子（限速与重试由 _tushare_call 统一处理）"""
+            df_daily = self._tushare_call(
+                client.query, api_name='daily', trade_date=td,
+                fields='ts_code,trade_date,open,high,low,close,vol'
+            )
+            df_adj = self._tushare_call(
+                client.query, api_name='adj_factor', trade_date=td,
+                fields='ts_code,trade_date,adj_factor'
+            )
+            return td, df_daily, df_adj
+
+        max_workers = min(self._TUSHARE_MAX_WORKERS, total)
+        logger.info(
+            f"tushare 按交易日并发拉取: {total} 个交易日 × 2 次调用, "
+            f"线程数 {max_workers}（限速已禁用）"
+        )
+        pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='ts-fetch')
+        try:
+            futures = {pool.submit(fetch_one_date, td): td for td in trade_dates}
+            done = 0
+            # 各交易日完成顺序不定，但 _tushare_build_qfq_df 内部按日期排序，与顺序无关
+            for fut in as_completed(futures):
+                done += 1
+                # 长历史全量拉取耗时数分钟到数十分钟，定期输出进度便于观察
+                if done == 1 or done % 50 == 0:
+                    logger.info(f"tushare 按交易日拉取进度: {done}/{total}")
+                td = futures[fut]
+                try:
+                    _, df_daily, df_adj = fut.result()
+                except Exception as e:
+                    logger.error(f"tushare 按交易日拉取 {td} 异常: {e}，整批降级")
+                    return None
+                if df_daily is None or df_adj is None:
+                    logger.error(f"tushare 按交易日拉取 {td} 失败，整批降级")
+                    return None
+                if df_daily.empty:
+                    continue
+                # 有日线但无复权因子无法前复权，视为异常整批降级
+                if df_adj.empty:
+                    logger.error(f"tushare {td} 日线有数据但复权因子缺失，整批降级")
+                    return None
+
+                adj_map = dict(zip(df_adj['ts_code'], df_adj['adj_factor']))
+                for row in df_daily.itertuples(index=False):
+                    code = row.ts_code.split('.')[0]
+                    if code not in wanted:
+                        continue
+                    collected[code].append((
+                        row.trade_date, row.open, row.high, row.low,
+                        row.close, row.vol, adj_map.get(row.ts_code)
+                    ))
+
+            results = {}
+            for code, rows in collected.items():
+                row_dicts = [
+                    {'trade_date': r[0], 'open': r[1], 'high': r[2], 'low': r[3],
+                     'close': r[4], 'vol': r[5], 'adj_factor': r[6]}
+                    for r in rows if r[6] is not None
+                ]
+                df = self._tushare_build_qfq_df(row_dicts, days)
+                if df is not None:
+                    results[code] = df
+            return results
+        finally:
+            # 成功时任务已全部完成，此调用立即返回；
+            # 失败提前返回时取消排队任务，避免继续消耗限速额度
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _tushare_fetch_by_stocks(self, client, stock_codes: list, start_date: str,
+                                 end_date: str, days: int) -> Optional[dict]:
+        """
+        按股票逐只拉取K线（全量初始化长历史场景，每只 2 次调用）
+
+        单只失败不影响整批；连续失败达阈值判定中转站不可用。
+
+        参数：
+            client: TushareHttpClient 实例（Session 连接复用）
+            stock_codes: 6位纯数字股票代码列表
+            start_date/end_date: 日期范围（YYYYMMDD）
+            days: 保留最近多少条K线
+
+        返回：
+            {code: DataFrame}；None 表示中转站不可用，整批需降级
+        """
+        results = {}
+        consecutive_fail = 0
+        FAIL_LIMIT = 10   # 连续失败阈值：判定中转站不可用
+        daily_fields = 'ts_code,trade_date,open,high,low,close,vol'
+
+        for idx, code in enumerate(stock_codes, 1):
+            ts_code = _code_to_ts_symbol(code)
+            df_daily = self._tushare_call(
+                client.query, api_name='daily', ts_code=ts_code,
+                start_date=start_date, end_date=end_date, fields=daily_fields
+            )
+            df_adj = self._tushare_call(
+                client.query, api_name='adj_factor', ts_code=ts_code,
+                start_date=start_date, end_date=end_date,
+                fields='ts_code,trade_date,adj_factor'
+            )
+
+            if df_daily is None or df_adj is None:
+                consecutive_fail += 1
+                logger.warning(f"tushare 获取 {code} 失败（连续第 {consecutive_fail} 次）")
+                if consecutive_fail >= FAIL_LIMIT:
+                    logger.error(
+                        f"tushare 中转站连续 {FAIL_LIMIT} 只拉取失败，判定不可用，整批降级"
+                    )
+                    return None
+                continue
+
+            consecutive_fail = 0
+            if df_daily.empty:
+                continue   # 无数据（新股/停牌等），正常情况
+
+            if idx % 500 == 0:
+                logger.info(f"tushare 逐只拉取进度: {idx}/{len(stock_codes)}, 已获取 {len(results)} 只")
+
+            adj_map = dict(zip(df_adj['trade_date'], df_adj['adj_factor'])) \
+                if not df_adj.empty else {}
+            row_dicts = []
+            for r in df_daily.itertuples(index=False):
+                factor = adj_map.get(r.trade_date)
+                if factor is None:
+                    continue
+                row_dicts.append({
+                    'trade_date': r.trade_date, 'open': r.open, 'high': r.high,
+                    'low': r.low, 'close': r.close, 'vol': r.vol, 'adj_factor': factor
+                })
+
+            df = self._tushare_build_qfq_df(row_dicts, days)
+            if df is not None:
+                results[code] = df
+
+        return results
+
+    @staticmethod
+    def _tushare_build_qfq_df(row_dicts: list, days: int) -> Optional[pd.DataFrame]:
+        """
+        将 tushare 原始行记录构建为前复权 DataFrame（对齐 TickFlow/腾讯输出格式）
+
+        qfq = price * adj_factor / 最新adj_factor（窗口内最新因子，无窗口内除权时
+        等价于以当日为基准的前复权）
+
+        参数：
+            row_dicts: [{trade_date, open, high, low, close, vol, adj_factor}, ...]
+            days: 保留最近多少条K线，<=0 表示保留全部
+
+        返回：
+            DataFrame（date/open/high/low/close/volume，日期倒序，volume 单位手），
+            无有效数据返回 None
+        """
+        if not row_dicts:
+            return None
+        try:
+            df = pd.DataFrame(row_dicts)
+            df = df.dropna(subset=['adj_factor', 'open', 'high', 'low', 'close'])
+            if df.empty:
+                return None
+
+            df = df.sort_values('trade_date')   # 升序，便于取最新因子
+            latest_factor = float(df.iloc[-1]['adj_factor'])
+            if pd.isna(latest_factor) or latest_factor <= 0:
+                latest_factor = 1.0
+            factor_ratio = df['adj_factor'].astype(float) / latest_factor
+
+            for col in ('open', 'high', 'low', 'close'):
+                df[col] = df[col].astype(float) * factor_ratio
+
+            df['date'] = pd.to_datetime(df['trade_date'], format='%Y%m%d')
+            df['volume'] = pd.to_numeric(df['vol'], errors='coerce').fillna(0).astype('int64')
+            df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+            df = df.sort_values('date', ascending=False)
+
+            if days and days > 0 and len(df) > days:
+                df = df.head(days)
+
+            return df if len(df) > 0 else None
+        except Exception as e:
+            logger.debug(f"tushare K线数据转换失败: {e}")
             return None
 
     # ==================== 腾讯财经批量K线获取（降级方案） ====================

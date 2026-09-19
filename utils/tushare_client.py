@@ -20,6 +20,9 @@ import json
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,9 @@ _HTTP_URL_ATTR = '_DataApi__http_url'
 
 _lock = threading.Lock()
 _pro_cache = {}
+
+# tushare SDK（1.4.29 dataapi 变体）默认 API 地址，base_url 未配置时使用
+_DEFAULT_HTTP_URL = 'http://api.waditu.com/dataapi'
 
 
 def load_tushare_config() -> dict:
@@ -83,3 +89,71 @@ def get_tushare_pro(token: str = None):
                 logger.info(f"Tushare 使用自定义 API 地址: {base_url}")
             _pro_cache[cache_key] = pro
     return pro
+
+
+class TushareHttpClient:
+    """
+    tushare 轻量 HTTP 客户端（requests.Session 连接复用）
+
+    与 tushare SDK 的 DataApi.query 线上协议完全一致（POST {base_url}/{api_name}），
+    但复用底层 TLS 连接。SDK 每次调用用裸 requests.post 重建连接，
+    单次多花 1~2 秒握手；本客户端供并发拉取场景使用。
+
+    线程安全性：requests.Session 的连接池（urllib3）本身线程安全，
+    并发调用 query 属预期用法。
+    """
+
+    def __init__(self, token: str, base_url: str):
+        self.token = token
+        self.base_url = (base_url or _DEFAULT_HTTP_URL).rstrip('/')
+        self.session = requests.Session()
+        # 连接池按并发线程数预留，避免高并发下连接频繁重建
+        adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
+
+    def query(self, api_name: str, fields: str = '', **kwargs):
+        """
+        调用 tushare 接口，返回 DataFrame。请求/响应格式与 SDK DataApi.query 一致，
+        失败抛异常（由调用方的限速重试逻辑处理）。
+        """
+        # 与 SDK 保持一致：params 中附带 ts_type_name（中转站以此识别来源）
+        kwargs.setdefault('ts_type_name', self.base_url)
+        req_params = {
+            'api_name': api_name,
+            'token': self.token,
+            'params': kwargs,
+            'fields': fields,
+        }
+        res = self.session.post(f"{self.base_url}/{api_name}", json=req_params, timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"HTTP {res.status_code}: {res.text[:120]}")
+        result = res.json()
+        if result.get('code') != 0:
+            raise RuntimeError(str(result.get('msg')))
+        data = result['data']
+        import pandas as pd
+        return pd.DataFrame(data['items'], columns=data['fields'])
+
+
+_http_client_cache = {}
+
+
+def get_tushare_http_client(token: str = None) -> Optional[TushareHttpClient]:
+    """
+    获取共享的 TushareHttpClient 实例（同 token + base_url 缓存复用）。
+
+    Returns:
+        TushareHttpClient 实例；未配置 token 时返回 None（由调用方决定降级逻辑）
+    """
+    cfg = load_tushare_config()
+    token = str(token or cfg['token']).strip()
+    if not token:
+        return None
+    cache_key = (token, cfg['base_url'])
+    with _lock:
+        client = _http_client_cache.get(cache_key)
+        if client is None:
+            client = TushareHttpClient(token, cfg['base_url'])
+            _http_client_cache[cache_key] = client
+    return client
