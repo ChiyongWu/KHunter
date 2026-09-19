@@ -73,7 +73,8 @@ class LeaderStrategy(BaseStrategy):
             }
         return None
 
-    def execute_selection(self, df, stock_code='', stock_name='', selection_date=None):
+    def execute_selection(self, df, stock_code='', stock_name='', selection_date=None,
+                          precomputed_indicators=False):
         """记录当前股票代码后，走基类标准选股流程。
 
         背景：本策略靠“股票代码 + 选股日”命中涨停池，而基类 execute_selection 并不会
@@ -82,9 +83,13 @@ class LeaderStrategy(BaseStrategy):
         select_stocks 会拿到空的 _current_code 而永远命中不到涨停池，
         表现为“回测/策略运行器选股结果恒为 0”（web_server 走 analyze_stock 则不受影响）。
         此处补齐代码记录，再交由基类完成数据校验、停牌判断与指标计算流程。
+
+        :param precomputed_indicators: 指标是否已预计算（回测优化路径），须透传给基类，
+            否则回测引擎传参时会抛 TypeError，被选股循环静默吞掉导致选股恒为 0。
         """
         self._current_code = stock_code
-        return super().execute_selection(df, stock_code, stock_name, selection_date=selection_date)
+        return super().execute_selection(df, stock_code, stock_name, selection_date=selection_date,
+                                         precomputed_indicators=precomputed_indicators)
 
     def calculate_indicators(self, df):
         # 涨停判定由数据层保证，无需计算技术指标
