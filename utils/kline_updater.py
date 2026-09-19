@@ -88,7 +88,7 @@ class KlineUpdater:
             logger.info("=" * 60)
             logger.info("K线数据更新任务启动")
             logger.info("=" * 60)
-            logger.info(f"数据源策略: TickFlow 免费 API (前复权批量)")
+            logger.info(f"数据源策略: tushare 中转站优先 (pro.daily 前复权批量) → TickFlow 免费 API → 腾讯财经降级")
             logger.info(f"待更新股票数量: {len(stock_codes)}")
             logger.info(f"上次更新日期: {last_update_date}")
             logger.info(f"目标更新日期: {target_date}")
@@ -114,7 +114,7 @@ class KlineUpdater:
             # 第0步：检查数据源是否已准备好目标日期数据
             logger.info("第0步: 检查数据源数据就绪状态...")
             if not self._is_data_source_ready(stock_codes, target_date):
-                logger.warning(f"数据源 (TickFlow) 尚未返回 {target_date} 的数据，跳过本次更新")
+                logger.warning(f"数据源尚未返回 {target_date} 的数据，跳过本次更新")
                 return {
                     'success': True,
                     'added': 0,
@@ -142,8 +142,8 @@ class KlineUpdater:
             
             logger.info(f"需要获取 {days_to_fetch} 个交易日的K线数据")
             
-            # 第2步：分批批量处理（TickFlow API）
-            logger.info(f"第2步: TickFlow 批量处理 {len(stock_codes)} 只股票 (批次大小: {batch_size})...")
+            # 第2步：分批批量处理（tushare → TickFlow → 腾讯 降级链）
+            logger.info(f"第2步: 批量处理 {len(stock_codes)} 只股票 (批次大小: {batch_size})...")
             self.progress['total'] = len(stock_codes)
             
             for batch_idx in range(0, len(stock_codes), batch_size):
@@ -156,7 +156,7 @@ class KlineUpdater:
                 self.progress['current'] = min(batch_idx + batch_size, len(stock_codes))
                 self.progress['percentage'] = int((self.progress['current'] / self.progress['total']) * 100)
                 
-                logger.info(f"批次 {batch_num}/{total_batches}: TickFlow 处理 {len(batch_codes)} 只股票 [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
+                logger.info(f"批次 {batch_num}/{total_batches}: 处理 {len(batch_codes)} 只股票 [{self.progress['current']}/{self.progress['total']}] {self.progress['percentage']}%")
                 
                 try:
                     batch_start_time = time.time()
@@ -191,7 +191,7 @@ class KlineUpdater:
                         time.sleep(sleep_time)
 
                 except Exception as e:
-                    logger.warning(f"批次 {batch_num} TickFlow 处理失败: {str(e)}")
+                    logger.warning(f"批次 {batch_num} 处理失败: {str(e)}")
                     self.stats['failed'] += len(batch_codes)
             
             # 第3步：检测除权并重建历史数据
@@ -248,9 +248,10 @@ class KlineUpdater:
     
     def _is_data_source_ready(self, stock_codes: List[str], target_date: str) -> bool:
         """
-        检查数据源 (TickFlow) 是否已准备好目标日期的数据
+        检查数据源是否已准备好目标日期的数据
 
-        取样少量股票，拉取 TickFlow 最新 K 线，
+        取样少量股票，优先用 tushare 中转站拉取最新 K 线探测，
+        tushare 不可用时降级用 TickFlow 探测，
         检查返回数据中是否包含 target_date。
 
         参数：
@@ -268,17 +269,25 @@ class KlineUpdater:
         try:
             logger.info(f"取样 {len(sample_codes)} 只股票探测数据源就绪状态: {sample_codes}")
 
-            # 用 TickFlow 拉取最近 3 天数据
-            kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
+            # 零级探测源：tushare 中转站拉取最近 3 天数据
+            source_name = "tushare 中转站"
+            kline_data, api_ok = self.stock_data_fetcher._fetch_stock_batch_tushare(
                 sample_codes, days=3
             )
 
+            # 一级探测源：tushare 不可用时降级 TickFlow
             if not api_ok:
-                logger.warning("数据源就绪检查: TickFlow API 调用失败，认为数据未就绪")
+                source_name = "TickFlow"
+                kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
+                    sample_codes, days=3
+                )
+
+            if not api_ok:
+                logger.warning(f"数据源就绪检查: {source_name} API 调用失败，认为数据未就绪")
                 return False
 
             if not kline_data:
-                logger.warning("数据源就绪检查: TickFlow 返回空数据，认为数据未就绪")
+                logger.warning(f"数据源就绪检查: {source_name} 返回空数据，认为数据未就绪")
                 return False
 
             # 统计有 target_date 数据的股票数，至少 2 只才视为就绪
@@ -405,10 +414,12 @@ class KlineUpdater:
     
     def _fetch_and_save_batch_concurrent(self, batch_codes: List[str], days: int) -> Dict:
         """
-        【TickFlow 版】使用 TickFlow 批量 API 一次获取一批股票的K线数据并批量保存
+        批量获取一批股票的K线数据并批量保存
 
-        TickFlow API 成功但个别股票无数据 → 正常（不降级），仅标记为 failed
-        TickFlow API 失败（限流/网络）→ 降级到腾讯财经批量并发获取（2线程，0.3s间隔）
+        数据源降级链：tushare 中转站（pro.daily 前复权）→ TickFlow → 腾讯财经（2线程）
+
+        数据源 API 成功但个别股票无数据 → 正常（不降级），仅标记为 failed
+        数据源 API 失败（限流/网络/未配置）→ 沿降级链重试
 
         参数：
             batch_codes: 股票代码列表
@@ -422,16 +433,25 @@ class KlineUpdater:
         failed = 0
 
         try:
-            # 使用 TickFlow 批量 API 一次获取所有股票K线
-            logger.debug(f"TickFlow 批量获取 {len(batch_codes)} 只股票K线 (前复权, {days}天)...")
-            kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
+            # 零级数据源：tushare 中转站批量获取（pro.daily 前复权）
+            kline_data, api_ok = self.stock_data_fetcher._fetch_stock_batch_tushare(
                 batch_codes,
                 days=days
             )
+            source_label = "tushare中转站"
 
-            # TickFlow API 失败时，降级到腾讯财经批量并发获取
+            # 一级数据源：tushare 不可用时降级 TickFlow 批量 API
             if not api_ok:
-                logger.warning(f"TickFlow API 失败，降级到腾讯财经批量获取 {len(batch_codes)} 只...")
+                source_label = "TickFlow"
+                logger.debug("tushare 中转站不可用，降级 TickFlow 批量获取...")
+                kline_data, api_ok = self.kline_fetcher._fetch_kline_tickflow_batch(
+                    batch_codes,
+                    days=days
+                )
+
+            # 二级数据源：仍失败时，降级到腾讯财经批量并发获取
+            if not api_ok:
+                logger.warning(f"tushare/TickFlow 均失败，降级到腾讯财经批量获取 {len(batch_codes)} 只...")
                 # 仅获取 kline_data 中没有的股票
                 missing_codes = [c for c in batch_codes if c not in kline_data]
                 if missing_codes:
@@ -448,6 +468,8 @@ class KlineUpdater:
 
             # 批量保存到数据库
             if kline_data:
+                if api_ok:
+                    logger.info(f"{source_label} 批量获取成功: {len(kline_data)}/{len(batch_codes)} 只有数据")
                 logger.debug(f"批量保存 {len(kline_data)} 只股票的K线数据...")
                 with self.db_manager.transaction():
                     for stock_code, df_kline in kline_data.items():
@@ -464,7 +486,7 @@ class KlineUpdater:
                         else:
                             failed += 1
 
-                # 统计最终无数据的股票（TickFlow无数据 + 降级也无数据）
+                # 统计最终无数据的股票（数据源无数据 + 降级也无数据）
                 final_missing = len([c for c in batch_codes if c not in kline_data])
                 failed += final_missing
 
@@ -483,7 +505,7 @@ class KlineUpdater:
             }
 
         except Exception as e:
-            logger.error(f"TickFlow 批次处理失败: {str(e)}")
+            logger.error(f"K线批次处理失败: {str(e)}")
             return {
                 'added': added,
                 'updated': updated,
@@ -713,11 +735,12 @@ class KlineUpdater:
 
     def _rebuild_stock_history(self, stock_code: str, years: int = 6) -> bool:
         """
-        重建单只股票完整历史数据（使用 TickFlow 免费 API）
+        重建单只股票完整历史数据（tushare 中转站优先，降级 TickFlow）
 
         流程：
         1. 删除该股票现有历史数据
-        2. 通过 TickFlow 重新获取多年历史数据（前复权）
+        2. 优先通过 tushare 中转站重新获取多年历史数据（前复权），
+           失败时降级 TickFlow
         3. 保存新数据到数据库
 
         参数：
@@ -736,11 +759,25 @@ class KlineUpdater:
             conn.close()
             logger.info(f"【历史重建】{stock_code} 删除 {cursor.rowcount} 条旧数据")
 
-            logger.info(f"【历史重建】{stock_code} 通过 TickFlow 重新获取 {years} 年历史数据...")
-            df_history = self.stock_data_fetcher._fetch_stock_history_tickflow(stock_code, years=years)
+            # 零级数据源：tushare 中转站（pro.daily 前复权，按股票逐只拉取）
+            df_history = None
+            try:
+                tushare_data, tushare_ok = self.stock_data_fetcher._fetch_stock_batch_tushare(
+                    [stock_code], days=years * 250
+                )
+                if tushare_ok and stock_code in tushare_data:
+                    df_history = tushare_data[stock_code]
+                    logger.info(f"【历史重建】{stock_code} tushare 中转站获取 {years} 年历史数据成功")
+            except Exception as e:
+                logger.debug(f"【历史重建】{stock_code} tushare 获取历史数据失败: {e}")
 
-            if df_history is None or df_history.empty:
-                logger.info(f"【历史重建】{stock_code} TickFlow 获取历史数据失败")
+            # 一级数据源：TickFlow 降级
+            if df_history is None or (hasattr(df_history, 'empty') and df_history.empty):
+                logger.info(f"【历史重建】{stock_code} 通过 TickFlow 重新获取 {years} 年历史数据...")
+                df_history = self.stock_data_fetcher._fetch_stock_history_tickflow(stock_code, years=years)
+
+            if df_history is None or (hasattr(df_history, 'empty') and df_history.empty):
+                logger.info(f"【历史重建】{stock_code} tushare/TickFlow 获取历史数据均失败")
                 return False
 
             added, updated = self._save_kline_records_batch(stock_code, df_history)
