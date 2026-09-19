@@ -1302,6 +1302,33 @@
     color: #ffffff;
 }
 
+/* 还原按钮：跟随缩放/框选进入自定义视图后启用 */
+.kline-reset-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid #e5e7eb;
+    background: #ffffff;
+    color: #4b5563;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.kline-reset-btn:hover:not(:disabled) {
+    border-color: #3b82f6;
+    color: #3b82f6;
+}
+
+.kline-reset-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* 框选拖拽进行中：光标提示缩放语义 */
+.kline-overlay-canvas.kline-dragging {
+    cursor: zoom-in;
+}
+
 /* 区间统计（起止日期 + 区间涨跌幅） */
 .kline-stats {
     display: flex;

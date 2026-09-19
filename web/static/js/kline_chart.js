@@ -1,6 +1,7 @@
 /**
  * K线图表模块 - 使用Canvas绘制
  * 功能：全量K线数据展示、时间范围切换（近1月/近3月/近6月/近1年/全部）、
+ *       拖拽框选放大、滚轮以光标为锚点缩放、双击/按钮还原、
  *       十字光标悬停提示、区间涨跌统计、MA均线、成交量
  *
  * 数据契约：后端 /api/stock/<code> 返回全量K线（升序），
@@ -83,6 +84,8 @@ function initKlineChart(containerId, rawData) {
                         `<button type="button" data-range="${r.key}"${r.key === 'all' ? ' class="active"' : ''}>${r.label}</button>`
                     ).join('')}
                 </div>
+                <button type="button" class="kline-reset-btn" disabled
+                        title="还原到当前选定的标准范围（也可双击图表）">⤾ 还原</button>
                 <div class="kline-stats" id="kline-range-stats"></div>
             </div>
             <div class="kline-chart-area">
@@ -97,6 +100,7 @@ function initKlineChart(containerId, rawData) {
         const tooltipEl = container.querySelector('.kline-tooltip');
         const chartArea = container.querySelector('.kline-chart-area');
         const statsEl = document.getElementById('kline-range-stats');
+        const resetBtn = container.querySelector('.kline-reset-btn');
 
         const ctx = mainCanvas.getContext('2d', { alpha: false });
         const overlayCtx = overlayCanvas.getContext('2d');
@@ -171,6 +175,7 @@ function initKlineChart(containerId, rawData) {
             rangeGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             applyRange(btn.dataset.range);
+            resetBtn.disabled = true;   // 回到标准范围后还原按钮失效
             updateStats();
             drawView();
             clearCrosshair();
@@ -182,12 +187,191 @@ function initKlineChart(containerId, rawData) {
             tooltipEl.style.display = 'none';
         };
 
+        // ---- 拖拽框选放大 / 滚轮缩放 / 还原 ----
+        const MIN_BARS = 10;    // 视图最少保留的K线根数
+        const clampNum = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+        // 框选拖拽状态（像素坐标，绘图区内）
+        const dragState = { active: false, x0: 0, x1: 0 };
+
+        // 应用自定义视图窗口并刷新（缩放/框选统一入口）
+        const setView = (s, e) => {
+            const total = state.formatted.candleData.length;
+            s = clampNum(Math.round(s), 0, total - 1);
+            e = clampNum(Math.round(e), s + 1, total);
+            if (e - s < MIN_BARS) {         // 最小根数保护：以中心扩展
+                const mid = Math.floor((s + e) / 2);
+                s = clampNum(mid - Math.floor(MIN_BARS / 2), 0, total - MIN_BARS);
+                e = s + MIN_BARS;
+            }
+            state.viewStart = s;
+            state.viewEnd = e;
+            updateStats();
+            drawView();
+            clearCrosshair();
+        };
+
+        // 进入自定义视图：取消预设按钮高亮，启用还原按钮
+        const markCustom = () => {
+            if (state.range !== 'custom') {
+                state.range = 'custom';
+                rangeGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            }
+            resetBtn.disabled = false;
+        };
+
+        // 滚轮缩放：以光标所在的K线为锚点，放大/缩小视图窗口
+        const zoomAt = (anchorViewIdx, factor) => {
+            const total = state.formatted.candleData.length;
+            const n = state.viewEnd - state.viewStart;
+            const n2 = clampNum(Math.round(n * factor), MIN_BARS, total);
+            const anchor = state.viewStart + anchorViewIdx + 0.5;   // 锚点全局位置（K线中心）
+            const t = (anchorViewIdx + 0.5) / n;                    // 锚点在视图中的相对位置
+            let s = anchor - t * n2;
+            let e = s + n2;
+            if (s < 0) { s = 0; e = n2; }
+            if (e > total) { e = total; s = total - n2; }
+            markCustom();
+            setView(s, e);
+        };
+
+        // 还原到当前激活的标准范围（自定义状态下还原到"全部"）
+        const resetToPreset = () => {
+            const rangeKey = KLINE_RANGES.some(r => r.key === state.range) ? state.range : 'all';
+            const btn = rangeGroup.querySelector(`button[data-range="${rangeKey}"]`);
+            if (btn) btn.click();
+        };
+
+        // 像素 x -> 视图内K线索引（clamp 到有效范围）
+        const xToIdx = (x) => {
+            const layout = state.layout;
+            if (!layout) return 0;
+            const raw = Math.floor((x - layout.padding) / layout.candleSpacing);
+            return clampNum(raw, 0, layout.count - 1);
+        };
+
+        // 绘制框选矩形：半透明蓝色区域 + 虚线边框 + 选区信息提示
+        const drawSelection = () => {
+            const layout = state.layout;
+            if (!layout) return;
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+            const left = Math.min(dragState.x0, dragState.x1);
+            const right = Math.max(dragState.x0, dragState.x1);
+            const i0 = xToIdx(left);
+            const i1 = xToIdx(right);
+            const px0 = layout.padding + i0 * layout.candleSpacing;
+            const px1 = layout.padding + (i1 + 1) * layout.candleSpacing;
+            const top = layout.padding;
+            const bottom = layout.volumeStartY + layout.volumeHeight;
+
+            overlayCtx.save();
+            overlayCtx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+            overlayCtx.fillRect(px0, top, px1 - px0, bottom - top);
+            overlayCtx.strokeStyle = 'rgba(37, 99, 235, 0.8)';
+            overlayCtx.lineWidth = 1;
+            overlayCtx.setLineDash([4, 3]);
+            overlayCtx.strokeRect(px0, top, px1 - px0, bottom - top);
+            overlayCtx.restore();
+
+            // 选区信息提示：日期范围 + 交易日数
+            const cd = state.formatted.candleData;
+            const d0 = fmtDate(cd[state.viewStart + i0].time);
+            const d1 = fmtDate(cd[state.viewStart + i1].time);
+            const text = `${d0} ~ ${d1}（${i1 - i0 + 1}个交易日）松开放大`;
+            overlayCtx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+            const tw = overlayCtx.measureText(text).width;
+            const bx = clampNum((px0 + px1) / 2 - tw / 2 - 8, 4, overlayCanvas.clientWidth - tw - 20);
+            const by = top + 8;
+
+            overlayCtx.save();
+            overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+            overlayCtx.strokeStyle = 'rgba(37, 99, 235, 0.5)';
+            overlayCtx.lineWidth = 1;
+            const bw = tw + 16, bh = 24, r = 6;
+            overlayCtx.beginPath();
+            overlayCtx.moveTo(bx + r, by);
+            overlayCtx.arcTo(bx + bw, by, bx + bw, by + bh, r);
+            overlayCtx.arcTo(bx + bw, by + bh, bx, by + bh, r);
+            overlayCtx.arcTo(bx, by + bh, bx, by, r);
+            overlayCtx.arcTo(bx, by, bx + bw, by, r);
+            overlayCtx.closePath();
+            overlayCtx.fill();
+            overlayCtx.stroke();
+            overlayCtx.fillStyle = '#1d4ed8';
+            overlayCtx.textAlign = 'left';
+            overlayCtx.fillText(text, bx + 8, by + 16);
+            overlayCtx.restore();
+        };
+
+        // 左键按下：开始框选
+        overlayCanvas.addEventListener('mousedown', (ev) => {
+            if (ev.button !== 0) return;
+            const rect = overlayCanvas.getBoundingClientRect();
+            const x = ev.clientX - rect.left;
+            const layout = state.layout;
+            if (!layout || x < layout.padding || x > rect.width - layout.padding) return;
+            dragState.active = true;
+            dragState.x0 = x;
+            dragState.x1 = x;
+            overlayCanvas.classList.add('kline-dragging');
+            tooltipEl.style.display = 'none';
+            ev.preventDefault();
+        });
+
+        // 左键松开：应用框选范围（位移过小视为误操作，忽略）
+        overlayCanvas.addEventListener('mouseup', (ev) => {
+            if (!dragState.active) return;
+            dragState.active = false;
+            overlayCanvas.classList.remove('kline-dragging');
+            const moved = Math.abs(dragState.x1 - dragState.x0);
+            if (moved < 5) { clearCrosshair(); return; }
+            const i0 = xToIdx(Math.min(dragState.x0, dragState.x1));
+            const i1 = xToIdx(Math.max(dragState.x0, dragState.x1));
+            // 全局窗口 + 左右各留2根边距，保证选中K线不贴边
+            const total = state.formatted.candleData.length;
+            let gs = clampNum(state.viewStart + i0 - 2, 0, total);
+            let ge = clampNum(state.viewStart + i1 + 3, gs + 1, total);
+            if (ge - gs < 5) {      // 选区过窄：以选区中心扩展到5根
+                const mid = Math.floor((gs + ge) / 2);
+                gs = clampNum(mid - 2, 0, Math.max(0, total - 5));
+                ge = gs + Math.min(5, total);
+            }
+            markCustom();
+            setView(gs, ge);
+        });
+
+        // 滚轮缩放：上滚放大（显示更少），下滚缩小（显示更多）
+        overlayCanvas.addEventListener('wheel', (ev) => {
+            ev.preventDefault();
+            const layout = state.layout;
+            if (!layout) return;
+            const rect = overlayCanvas.getBoundingClientRect();
+            const x = ev.clientX - rect.left;
+            if (x < layout.padding || x > rect.width - layout.padding) return;
+            const idx = xToIdx(x);
+            zoomAt(idx, ev.deltaY > 0 ? 1.2 : 1 / 1.2);
+        }, { passive: false });
+
+        // 双击还原到标准范围
+        overlayCanvas.addEventListener('dblclick', resetToPreset);
+
+        // 还原按钮
+        resetBtn.addEventListener('click', resetToPreset);
+
         overlayCanvas.addEventListener('mousemove', (ev) => {
             const layout = state.layout;
             if (!layout) return;
             const rect = overlayCanvas.getBoundingClientRect();
             const x = ev.clientX - rect.left;
             const y = ev.clientY - rect.top;
+
+            // 拖拽框选中：更新选区并绘制，不处理十字光标
+            if (dragState.active) {
+                dragState.x1 = clampNum(x, layout.padding, rect.width - layout.padding);
+                drawSelection();
+                return;
+            }
 
             const { padding, chartWidth, candleSpacing, count, klineHeight, volumeStartY, adjustedMin, adjustedRange, prices, closes } = layout;
             let idx = Math.floor((x - padding) / candleSpacing);
@@ -268,7 +452,12 @@ function initKlineChart(containerId, rawData) {
         };
         let tooltipIndexCache = 0;
 
-        overlayCanvas.addEventListener('mouseleave', clearCrosshair);
+        // 鼠标移出：取消未完成的框选并清除光标
+        overlayCanvas.addEventListener('mouseleave', () => {
+            dragState.active = false;
+            overlayCanvas.classList.remove('kline-dragging');
+            clearCrosshair();
+        });
 
         // 窗口尺寸变化时重绘（画布已移除DOM时自动解除监听）
         const resizeHandler = () => {
