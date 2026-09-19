@@ -489,6 +489,13 @@
                     <div class="card">
                         <div class="card-header">
                             <input type="text" id="stock-search" placeholder="搜索股票代码或名称..." class="search-input">
+                            <select id="stocks-per-page" class="search-input" style="width: auto; margin-left: 10px;">
+                                <option value="20" selected>20 条/页</option>
+                                <option value="50">50 条/页</option>
+                                <option value="100">100 条/页</option>
+                                <option value="200">200 条/页</option>
+                                <option value="500">500 条/页</option>
+                            </select>
                         </div>
                         <div class="table-container">
                             <table class="data-table" id="stocks-table">
@@ -508,6 +515,7 @@
                                 </tbody>
                             </table>
                         </div>
+                        <div id="stocks-pagination" class="pagination" style="margin-top: 15px;"></div>
                     </div>
                 </div>
 

@@ -233,63 +233,79 @@ def index():
 
 @app.route('/api/stocks')
 def get_stocks():
-    """获取股票列表 - 从 stock_basic 表获取基础数据"""
+    """获取股票列表 - 从 stock_basic 表获取基础数据（服务端分页 + 关键字搜索）"""
     try:
-        # 获取分页参数
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 500))  # 默认每页500只
-        
-        # 计算分页偏移
+        # 获取分页与搜索参数
+        page = max(1, int(request.args.get('page', 1)))
+        per_page = min(1000, max(10, int(request.args.get('per_page', 20))))
+        keyword = (request.args.get('keyword') or '').strip()
+
+        # 关键字过滤（股票代码/名称模糊匹配）
+        where = ''
+        where_params = []
+        if keyword:
+            where = 'WHERE code LIKE ? OR name LIKE ?'
+            where_params = [f'%{keyword}%', f'%{keyword}%']
+
         offset = (page - 1) * per_page
-        
-        # 从 stock_basic 表获取总数
-        total_result = db_manager.query('SELECT COUNT(*) as count FROM stock_basic')
+
+        # 符合条件的总数
+        total_result = db_manager.query(
+            f'SELECT COUNT(*) as count FROM stock_basic {where}', where_params)
         total = total_result[0]['count'] if total_result else 0
-        
-        # 从 stock_basic 表获取分页数据
+
+        # 本页基础数据
         query = '''
             SELECT code, name, industry, area, market, list_date, market_cap
             FROM stock_basic
+            {where}
             ORDER BY code
             LIMIT ? OFFSET ?
         '''
-        basic_stocks = db_manager.query(query, (per_page, offset))
-        
+        basic_stocks = db_manager.query(query.format(where=where),
+                                        where_params + [per_page, offset])
+
+        # 一次聚合查询获取本页股票的最新价/最新日期/数据条数，
+        # 替代原来每只股票 2 次 kline 查询（每页最多可减少 1000+ 次查询）
+        kline_map = {}
+        codes = [s['code'] for s in basic_stocks]
+        if codes:
+            placeholders = ','.join('?' * len(codes))
+            kline_rows = db_manager.query(
+                f'''
+                SELECT k.code, k.close, k.date, c.cnt
+                FROM stock_kline k
+                JOIN (
+                    SELECT code, MAX(date) AS md FROM stock_kline
+                    WHERE code IN ({placeholders}) GROUP BY code
+                ) m ON k.code = m.code AND k.date = m.md
+                LEFT JOIN (
+                    SELECT code, COUNT(*) AS cnt FROM stock_kline
+                    WHERE code IN ({placeholders}) GROUP BY code
+                ) c ON c.code = k.code
+                ''',
+                codes + codes
+            )
+            kline_map = {row['code']: row for row in kline_rows}
+
         stock_list = []
         for stock in basic_stocks:
             # 处理 market_cap 为 None 或 NaN 的情况
             market_cap = stock.get('market_cap', 0)
             if market_cap is None or (isinstance(market_cap, float) and market_cap != market_cap):
                 market_cap = 0
-            
+
             # 单位转换：如果市值 > 10000，说明是万元单位，需要转换为亿元
             # 否则已经是亿元单位
             if market_cap > 10000:
                 # 万元转亿元：除以 10000
                 market_cap = market_cap / 10000
-            
-            # 从 stock_kline 表获取最新价格和日期
-            kline_query = '''
-                SELECT close, date FROM stock_kline
-                WHERE code = ?
-                ORDER BY date DESC
-                LIMIT 1
-            '''
-            kline_result = db_manager.query(kline_query, (stock['code'],))
-            
-            latest_price = 0
-            latest_date = ''
-            data_count = 0
-            
-            if kline_result:
-                latest_price = round(kline_result[0]['close'], 2)
-                latest_date = kline_result[0]['date']
-                
-                # 获取该股票的数据条数
-                count_query = 'SELECT COUNT(*) as count FROM stock_kline WHERE code = ?'
-                count_result = db_manager.query(count_query, (stock['code'],))
-                data_count = count_result[0]['count'] if count_result else 0
-            
+
+            kline = kline_map.get(stock['code'], {})
+            latest_price = round(kline['close'], 2) if kline.get('close') is not None else 0
+            latest_date = kline.get('date', '') or ''
+            data_count = kline.get('cnt', 0) or 0
+
             stock_list.append({
                 'code': stock['code'],
                 'name': stock['name'],
@@ -298,10 +314,10 @@ def get_stocks():
                 'market_cap': round(market_cap, 2),  # 总市值，单位：亿
                 'data_count': data_count
             })
-        
+
         return jsonify({
-            'success': True, 
-            'data': stock_list, 
+            'success': True,
+            'data': stock_list,
             'total': total,
             'page': page,
             'per_page': per_page,

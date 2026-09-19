@@ -245,50 +245,87 @@ export async function loadHotAreas() {
 }
 
 /**
- * 加载股票列表 - 支持分页获取所有股票
+ * 股票列表分页状态
  */
-export async function loadStocks() {
+let stocksPageState = {
+    page: 1,
+    perPage: 20,
+    totalPages: 1,
+    total: 0,
+    keyword: '',
+    searchTimer: null,
+};
+
+/**
+ * 股票页事件绑定守卫（避免每次渲染重复绑定监听器）
+ */
+let stocksEventsBound = false;
+
+/**
+ * 绑定搜索与每页条数事件（仅绑定一次）
+ */
+function bindStocksEvents() {
+    if (stocksEventsBound) return;
+    stocksEventsBound = true;
+
+    // 搜索：防抖后重置到第 1 页，服务端过滤（股票代码/名称）
+    const searchInput = document.getElementById('stock-search');
+    searchInput.addEventListener('input', (e) => {
+        clearTimeout(stocksPageState.searchTimer);
+        stocksPageState.searchTimer = setTimeout(() => {
+            stocksPageState.keyword = e.target.value.trim();
+            loadStocks(1);
+        }, 300);
+    });
+
+    // 每页条数切换
+    const perPageSelect = document.getElementById('stocks-per-page');
+    perPageSelect.addEventListener('change', (e) => {
+        stocksPageState.perPage = parseInt(e.target.value, 10) || 20;
+        loadStocks(1);
+    });
+}
+
+/**
+ * 加载股票列表（服务端分页，每次仅请求当前页）
+ */
+export async function loadStocks(page = 1) {
+    bindStocksEvents();
+
     const tbody = document.getElementById('stocks-tbody');
+    stocksPageState.page = page;
     tbody.innerHTML = '<tr><td colspan="7" class="loading">正在加载股票列表...</td></tr>';
-    
+
     try {
-        let allStocks = [];
-        let page = 1;
-        let totalPages = 1;
-        
-        // 分页获取所有股票
-        do {
-            const response = await fetch(`/api/stocks?page=${page}&per_page=500`);
-            const result = await response.json();
-            
-            if (result.success) {
-                allStocks = allStocks.concat(result.data);
-                totalPages = result.total_pages;
-                tbody.innerHTML = `<tr><td colspan="7" class="loading">已加载 ${allStocks.length} / ${result.total} 只股票...</td></tr>`;
-                page++;
-            } else {
-                break;
-            }
-        } while (page <= totalPages);
-        
-        renderStocks(allStocks);
+        const keyword = encodeURIComponent(stocksPageState.keyword || '');
+        const response = await fetch(`/api/stocks?page=${page}&per_page=${stocksPageState.perPage}&keyword=${keyword}`);
+        const result = await response.json();
+
+        if (result.success) {
+            stocksPageState.total = result.total;
+            stocksPageState.totalPages = result.total_pages;
+            renderStocks(result.data);
+            renderStocksPagination();
+        } else {
+            tbody.innerHTML = `<tr><td colspan="7" class="loading">加载失败: ${result.error || '未知错误'}</td></tr>`;
+        }
     } catch (error) {
         tbody.innerHTML = `<tr><td colspan="7" class="loading">加载失败: ${error.message}</td></tr>`;
     }
 }
 
 /**
- * 渲染股票列表
+ * 渲染股票列表（当前页数据）
  * @param {Array} stocks - 股票列表数据
  */
 export function renderStocks(stocks) {
     const tbody = document.getElementById('stocks-tbody');
-    
+
     if (stocks.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" class="loading">暂无数据</td></tr>';
         return;
     }
-    
+
     tbody.innerHTML = stocks.map(stock => `
         <tr>
             <td><strong>${stock.code}</strong></td>
@@ -304,14 +341,64 @@ export function renderStocks(stocks) {
             </td>
         </tr>
     `).join('');
-    
-    // 搜索功能
-    document.getElementById('stock-search').addEventListener('input', (e) => {
-        const keyword = e.target.value.toLowerCase();
-        const rows = tbody.querySelectorAll('tr');
-        rows.forEach(row => {
-            const text = row.textContent.toLowerCase();
-            row.style.display = text.includes(keyword) ? '' : 'none';
+}
+
+/**
+ * 渲染股票列表分页控件（页码窗口 ±2 + 首末页/省略号 + 页信息）
+ */
+function renderStocksPagination() {
+    const container = document.getElementById('stocks-pagination');
+    if (!container) return;
+
+    const { page, perPage, totalPages, total } = stocksPageState;
+
+    if (totalPages <= 1) {
+        container.style.display = 'none';
+        return;
+    }
+    container.style.display = 'flex';
+
+    const start = (page - 1) * perPage + 1;
+    const end = Math.min(page * perPage, total);
+
+    const btn = (label, target, opts = {}) => {
+        const disabled = opts.disabled ? 'disabled' : '';
+        const active = opts.active ? ' class="active"' : '';
+        return `<button${active}${disabled} data-page="${target}">${label}</button>`;
+    };
+
+    let html = `<span id="stocks-page-info">第 ${start}-${end} 条，共 ${total} 只</span>`;
+
+    // 上一页
+    html += btn('← 上一页', page - 1, { disabled: page <= 1 });
+
+    // 页码窗口（当前页 ±2，含首页/末页与省略号）
+    const startPage = Math.max(1, page - 2);
+    const endPage = Math.min(totalPages, page + 2);
+    if (startPage > 1) {
+        html += btn('1', 1);
+        if (startPage > 2) html += btn('...', 0, { disabled: true });
+    }
+    for (let i = startPage; i <= endPage; i++) {
+        html += btn(String(i), i, { active: i === page });
+    }
+    if (endPage < totalPages) {
+        if (endPage < totalPages - 1) html += btn('...', 0, { disabled: true });
+        html += btn(String(totalPages), totalPages);
+    }
+
+    // 下一页
+    html += btn('下一页 →', page + 1, { disabled: page >= totalPages });
+
+    container.innerHTML = html;
+
+    // 绑定页码点击
+    container.querySelectorAll('button[data-page]').forEach(b => {
+        b.addEventListener('click', () => {
+            const target = parseInt(b.dataset.page, 10);
+            if (target >= 1 && target <= stocksPageState.totalPages) {
+                loadStocks(target);
+            }
         });
     });
 }

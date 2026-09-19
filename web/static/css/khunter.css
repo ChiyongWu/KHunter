@@ -152,7 +152,40 @@
     gap: 12px;
 }
 
-#page-info {
+.pagination button {
+    padding: 6px 12px;
+    border: 1px solid #d1d5db;
+    background: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #374151;
+    transition: all 0.2s;
+}
+
+.pagination button:hover:not(:disabled) {
+    border-color: #E74C3C;
+    color: #E74C3C;
+}
+
+.pagination button.active {
+    background: #E74C3C;
+    border-color: #E74C3C;
+    color: #fff;
+    cursor: default;
+}
+
+.pagination button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.pagination span {
+    font-size: 13px;
+    color: #6b7280;
+}
+
+#page-info, #stocks-page-info {
     font-size: 14px;
     color: #6b7280;
     min-width: 100px;
