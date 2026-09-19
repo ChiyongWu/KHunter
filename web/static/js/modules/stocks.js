@@ -97,150 +97,133 @@ export async function loadMyGoldenStocks() {
 }
 
 /**
- * 加载最热行业数据
+ * 热门板块当前选中类型：concept 概念 / industry 行业
  */
-export async function loadHotIndustries() {
-    const container = document.getElementById('hot-industries-content');
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
-        
-        const response = await fetch('/api/dashboard/hot-industries', { signal: controller.signal });
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-        
-        const result = await response.json();
-        
-        // 检查result是否为空或没有success字段
-        if (!result || (result.success === false)) {
-            container.innerHTML = '<p class="text-muted">暂无行业数据</p>';
-            return;
-        }
-        
-        // 如果success为true或result中有industries数据
-        if (result.industries && result.industries.length > 0) {
-            let html = `
-                <div class="table-responsive">
-                    <table class="table table-striped">
-                        <thead>
-                            <tr>
-                                <th>排名</th>
-                                <th>行业</th>
-                                <th>股票数量</th>
-                                <th>占比</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-            `;
-            
-            // 只显示前5个行业
-            const top5Industries = result.industries.slice(0, 5);
-            top5Industries.forEach((industry, index) => {
-                html += `
-                    <tr>
-                        <td>${index + 1}</td>
-                        <td>${industry.industry}</td>
-                        <td><a href="javascript:void(0)" onclick="showIndustryStocks('${industry.industry}', ${industry.count})" class="stock-link">${industry.count}</a></td>
-                        <td>${industry.percentage}%</td>
-                    </tr>
-                `;
-            });
-            
-            html += `
-                        </tbody>
-                    </table>
-                </div>
-                <p class="text-muted" style="margin-top: 10px; font-size: 12px;">数据日期: ${result.date}</p>
-            `;
-            
-            container.innerHTML = html;
-        } else {
-            container.innerHTML = '<p class="text-muted">暂无行业数据</p>';
-        }
-    } catch (error) {
-        console.error('加载最热行业失败:', error);
-        if (error.name === 'AbortError') {
-            container.innerHTML = '<p class="text-muted">暂无行业数据</p>';
-        } else {
-            container.innerHTML = '<p class="text-muted">暂无行业数据</p>';
-        }
+let hotSectorType = 'concept';
+
+/**
+ * 格式化主力净流入热度：≥1亿 显示 X.XX亿，否则 XXXX万（负值同样格式化）
+ * @param {number} value - 主力净流入额（元）
+ */
+function formatHotValue(value) {
+    if (value === null || value === undefined || isNaN(value)) {
+        return '-';
     }
+    const abs = Math.abs(value);
+    if (abs >= 1e8) {
+        return (value / 1e8).toFixed(2) + '亿';
+    }
+    return (value / 1e4).toFixed(0) + '万';
 }
 
 /**
- * 加载最热板块数据
+ * 格式化涨跌幅：保留2位小数，红涨绿跌（A股配色）
+ * @param {number} pct - 涨跌幅 %
  */
-export async function loadHotAreas() {
-    const container = document.getElementById('hot-areas-content');
+function formatPctChg(pct) {
+    if (pct === null || pct === undefined || isNaN(pct)) {
+        return '<span class="text-muted">-</span>';
+    }
+    const colorClass = pct > 0 ? 'text-danger' : (pct < 0 ? 'text-success' : 'text-muted');
+    return `<span class="${colorClass}">${pct.toFixed(2)}%</span>`;
+}
+
+/**
+ * 渲染热门板块卡片内容（tab + 榜单表格 + 数据日期）
+ * @param {Object|null} result - 接口返回数据，null 表示加载失败
+ */
+function renderHotSectors(result) {
+    const activeStyle = 'padding: 4px 12px; margin-right: 8px; font-size: 13px; border-radius: 4px; border: 1px solid #e74c3c; background: #fdecec; color: #e74c3c; font-weight: bold; cursor: pointer;';
+    const normalStyle = 'padding: 4px 12px; margin-right: 8px; font-size: 13px; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; color: #666; cursor: pointer;';
+    const tabs = `
+        <div style="margin-bottom: 8px;">
+            <button type="button" style="${hotSectorType === 'concept' ? activeStyle : normalStyle}" onclick="loadHotSectors('concept')">概念板块</button>
+            <button type="button" style="${hotSectorType === 'industry' ? activeStyle : normalStyle}" onclick="loadHotSectors('industry')">行业板块</button>
+        </div>
+    `;
+
+    if (!result || result.success === false) {
+        return tabs + '<p class="text-muted">暂无板块数据</p>';
+    }
+
+    const sectors = result.sectors || [];
+    if (sectors.length === 0) {
+        return tabs + '<p class="text-muted">暂无板块数据</p>';
+    }
+
+    // 前三名排名角标颜色（同花顺样式：红/橙/黄）
+    const rankColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#f1c40f' };
+
+    let html = tabs + `
+        <div class="table-responsive">
+            <table class="table" style="margin-bottom: 5px;">
+                <thead>
+                    <tr>
+                        <th style="width: 50px;">排名</th>
+                        <th>板块名称</th>
+                        <th style="text-align: right;">涨幅</th>
+                        <th style="text-align: right;">热度</th>
+                    </tr>
+                </thead>
+                <tbody>
+    `;
+
+    sectors.forEach(sector => {
+        const rankBadge = rankColors[sector.rank]
+            ? `<span style="display:inline-block;min-width:20px;text-align:center;border-radius:4px;color:#fff;font-weight:bold;padding:1px 4px;background:${rankColors[sector.rank]};">${sector.rank}</span>`
+            : `<span class="text-muted" style="display:inline-block;min-width:20px;text-align:center;">${sector.rank}</span>`;
+        const code = (sector.sector_code || '').replace('.TI', '');
+        html += `
+            <tr>
+                <td>${rankBadge}</td>
+                <td>
+                    <div>${sector.sector_name}</div>
+                    <div class="text-muted" style="font-size: 12px;">${code}</div>
+                </td>
+                <td style="text-align: right;">${formatPctChg(sector.pct_chg)}</td>
+                <td style="text-align: right;">${formatHotValue(sector.main_net_flow)}</td>
+            </tr>
+        `;
+    });
+
+    html += `
+                </tbody>
+            </table>
+        </div>
+        <p class="text-muted" style="font-size: 12px;">数据日期: ${result.date || '-'}</p>
+    `;
+
+    return html;
+}
+
+/**
+ * 加载热门板块数据（最近交易日，按主力净流入排名，前5条）
+ * @param {string} type - 板块类型：concept 概念 / industry 行业
+ */
+export async function loadHotSectors(type = hotSectorType) {
+    hotSectorType = type;
+    const container = document.getElementById('hot-sectors-content');
+    if (!container) {
+        return;
+    }
+    container.innerHTML = '<p class="text-muted">加载中...</p>';
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
-        
-        const response = await fetch('/api/dashboard/hot-areas', { signal: controller.signal });
+
+        const response = await fetch(`/api/dashboard/hot-sectors?type=${type}`, { signal: controller.signal });
         clearTimeout(timeoutId);
-        
+
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
-        
+
         const result = await response.json();
-        
-        // 检查result是否为空或没有success字段
-        if (!result || (result.success === false)) {
-            container.innerHTML = '<p class="text-muted">暂无板块数据</p>';
-            return;
-        }
-        
-        // 如果success为true或result中有areas数据
-        if (result.areas && result.areas.length > 0) {
-            let html = `
-                <div class="table-responsive">
-                    <table class="table table-striped">
-                        <thead>
-                            <tr>
-                                <th>排名</th>
-                                <th>板块</th>
-                                <th>股票数量</th>
-                                <th>占比</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-            `;
-            
-            // 只显示前5个板块
-            const top5Areas = result.areas.slice(0, 5);
-            top5Areas.forEach((area, index) => {
-                html += `
-                    <tr>
-                        <td>${index + 1}</td>
-                        <td>${area.area}</td>
-                        <td><a href="javascript:void(0)" onclick="showAreaStocks('${area.area}', ${area.count})" class="stock-link">${area.count}</a></td>
-                        <td>${area.percentage}%</td>
-                    </tr>
-                `;
-            });
-            
-            html += `
-                        </tbody>
-                    </table>
-                </div>
-                <p class="text-muted" style="margin-top: 10px; font-size: 12px;">数据日期: ${result.date}</p>
-            `;
-            
-            container.innerHTML = html;
-        } else {
-            container.innerHTML = '<p class="text-muted">暂无板块数据</p>';
-        }
+
+        container.innerHTML = renderHotSectors(result);
     } catch (error) {
-        console.error('加载最热板块失败:', error);
-        if (error.name === 'AbortError') {
-            container.innerHTML = '<p class="text-muted">暂无板块数据</p>';
-        } else {
-            container.innerHTML = '<p class="text-muted">暂无板块数据</p>';
-        }
+        console.error('加载热门板块失败:', error);
+        container.innerHTML = renderHotSectors(null);
     }
 }
 
@@ -561,46 +544,6 @@ export async function loadHistoryStrategyOptions() {
         }
     } catch (error) {
         console.error('加载策略列表失败:', error);
-    }
-}
-
-/**
- * 显示行业股票列表
- * @param {string} industry - 行业名称
- * @param {number} limit - 显示数量
- */
-export async function showIndustryStocks(industry, limit = 50) {
-    try {
-        const response = await fetch(`/api/dashboard/industry-stocks?industry=${encodeURIComponent(industry)}&limit=${limit}`);
-        const result = await response.json();
-        
-        if (result.success) {
-            showStocksModal(`${industry}行业股票列表`, result.stocks, result.date || '');
-        } else {
-            alert('加载行业股票失败: ' + result.error);
-        }
-    } catch (error) {
-        alert('加载行业股票失败: ' + error.message);
-    }
-}
-
-/**
- * 显示板块股票列表
- * @param {string} area - 板块名称
- * @param {number} limit - 显示数量
- */
-export async function showAreaStocks(area, limit = 50) {
-    try {
-        const response = await fetch(`/api/dashboard/area-stocks?area=${encodeURIComponent(area)}&limit=${limit}`);
-        const result = await response.json();
-        
-        if (result.success) {
-            showStocksModal(`${area}板块股票列表`, result.stocks, result.date || '');
-        } else {
-            alert('加载板块股票失败: ' + result.error);
-        }
-    } catch (error) {
-        alert('加载板块股票失败: ' + error.message);
     }
 }
 
