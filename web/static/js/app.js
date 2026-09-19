@@ -49,7 +49,7 @@ async function loadModules() {
         // 加载各个模块
         const websocketModule = await import('./modules/websocket.js');
         const navigationModule = await import('./modules/navigation.js');
-        const stocksModule = await import('./modules/stocks.js');
+        const stocksModule = await import('./modules/stocks.js?v=2');
         const selectionModule = await import('./modules/selection.js?v=2');
         const analysisModule = await import('./modules/analysis.js?v=2');
         const strategiesModule = await import('./modules/strategies.js');
@@ -108,8 +108,7 @@ async function initializeApp() {
     
     modules.stocks.loadStats();
     modules.stocks.loadMyGoldenStocks();
-    modules.stocks.loadHotIndustries();
-    modules.stocks.loadHotAreas();
+    modules.stocks.loadHotSectors();
     modules.analysis.setupStockAnalysis();
     modules.ranking.setupRankingEvents();
     
@@ -147,8 +146,7 @@ async function initializeApp() {
     window.trackRanking = modules.ranking.trackRanking;
     window.showScoreDetail = modules.analysis.showScoreDetail;
     window.closeScoreDetailModal = modules.analysis.closeScoreDetailModal;
-    window.showIndustryStocks = modules.stocks.showIndustryStocks;
-    window.showAreaStocks = modules.stocks.showAreaStocks;
+    window.loadHotSectors = modules.stocks.loadHotSectors;
     
     // 暴露批量回测相关函数（供HTML调用）
     window.removeBacktestTask = modules.backtestBatch.removeBacktestTask;
