@@ -109,12 +109,15 @@ class FundamentalScorer:
     支持一票否决机制。
     """
 
-    def __init__(self, tushare_token: str = None):
+    def __init__(self, tushare_token: str = None, data_cache=None):
         """
         初始化基本面评分器
 
         参数:
             tushare_token: Tushare API token，为 None 时从配置文件读取
+            data_cache: 评分数据本地落地缓存（BacktestDataCache）。提供时财务指标
+                        本地优先读取（快照型，全量历史一次落地），回测场景注入
+                        以消除评分阶段远程请求；None 时保持纯远程模式
         """
         # 初始化 Tushare token
         self._token = tushare_token or self._load_tushare_token()
@@ -122,6 +125,8 @@ class FundamentalScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
+        # 本地落地缓存（可选）
+        self.data_cache = data_cache
         # 记录初始化日志
         logger.info("基本面评分器初始化完成")
 
@@ -237,16 +242,24 @@ class FundamentalScorer:
         ts_code = self._convert_ts_code(stock_code)
 
         try:
-            pro = self._get_pro()
-            # 调用 fina_indicator 接口获取评分日期之前的财务指标
-            # end_date 参数过滤报告期截止日 <= 评分日期的数据
-            # 注意：Tushare 实际字段名为 netprofit_yoy（非 net_profit_yoy）
-            df = self._call_tushare_with_retry(
-                pro.fina_indicator,
-                ts_code=ts_code,
-                end_date=score_date.replace("-", "") if score_date else "",
-                fields="ts_code,ann_date,end_date,roe,netprofit_yoy,ocfps,eps,ocf_to_opincome",
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 fina_indicator 接口（快照型：全量历史一次落地）
+                # 注意：不传 end_date（服务端报告期过滤），落库全量历史；
+                # 报告期 <= 评分日期 的过滤由 _extract_latest_indicators 在本地完成，
+                # 与原逻辑结果一致且缓存对任意历史评分日通用
+                # 注意：Tushare 实际字段名为 netprofit_yoy（非 net_profit_yoy）
+                return self._call_tushare_with_retry(
+                    pro.fina_indicator,
+                    ts_code=ts_code,
+                    fields="ts_code,ann_date,end_date,roe,netprofit_yoy,ocfps,eps,ocf_to_opincome",
+                )
+
+            # 本地落地缓存优先（快照型：评分日 <= 落地日即命中），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("fina_indicator", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据是否有效
             if df is not None and not df.empty:
                 logger.debug(

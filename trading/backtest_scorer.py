@@ -72,13 +72,15 @@ class BacktestScoreCalculator:
     5. 使用与StockScoreCalculator相同的评分器，确保评分逻辑一致
     """
 
-    def __init__(self, db_manager=None, tushare_token=None):
+    def __init__(self, db_manager=None, tushare_token=None, data_cache=None):
         """
         初始化回测评分器
-        
+
         参数:
             db_manager: 数据库管理器实例
             tushare_token: Tushare API token，为 None 时从配置文件读取
+            data_cache: 评分数据本地落地缓存（BacktestDataCache），为 None 时自建。
+                        注入各评分器后评分数据本地优先读取，回测评分阶段零远程请求
         """
         self.db = db_manager
         # 日期级缓存：{date: {stock_code: scores_dict}}
@@ -86,25 +88,29 @@ class BacktestScoreCalculator:
         # 简化模式（只判否决）日期级缓存：{date: {stock_code: VetoResult}}
         # 与 date_cache 相互独立，避免"简化模式写入 0 分"污染标准评分缓存
         self.veto_cache: Dict[str, Dict[str, VetoResult]] = {}
-        
+
         # 如果未传入 token，从配置文件加载
         if tushare_token is None:
             tushare_token = self._load_tushare_token()
-        
-        # 初始化评分器（与StockScoreCalculator保持完全一致）
+
+        # 评分数据本地落地缓存（SQLite；快照/覆盖/精确键三类新鲜度管理）
+        from trading.backtest_data_cache import BacktestDataCache
+        self.data_cache = data_cache or BacktestDataCache(db_manager=db_manager)
+
+        # 初始化评分器（与StockScoreCalculator保持完全一致），注入本地落地缓存
         from trading.technical_scorer import TechnicalScorer
         from trading.moneyflow_scorer import MoneyflowScorer
         from trading.fundamental_scorer import FundamentalScorer
         from trading.sector_scorer import SectorScorer
         from trading.event_scorer import EventScorer
-        
+
         self.technical_scorer = TechnicalScorer(db_manager=db_manager)
-        self.moneyflow_scorer = MoneyflowScorer(db_manager=db_manager, tushare_token=tushare_token)
-        self.fundamental_scorer = FundamentalScorer(tushare_token=tushare_token)
-        self.sector_scorer = SectorScorer(tushare_token=tushare_token, db_manager=db_manager)
-        self.event_scorer = EventScorer(tushare_token=tushare_token)
-        
-        logger.info("回测评分器初始化完成")
+        self.moneyflow_scorer = MoneyflowScorer(db_manager=db_manager, tushare_token=tushare_token, data_cache=self.data_cache)
+        self.fundamental_scorer = FundamentalScorer(tushare_token=tushare_token, data_cache=self.data_cache)
+        self.sector_scorer = SectorScorer(tushare_token=tushare_token, db_manager=db_manager, data_cache=self.data_cache)
+        self.event_scorer = EventScorer(tushare_token=tushare_token, data_cache=self.data_cache)
+
+        logger.info("回测评分器初始化完成（评分数据本地落地缓存已启用）")
     
     @staticmethod
     def _load_tushare_token() -> str:

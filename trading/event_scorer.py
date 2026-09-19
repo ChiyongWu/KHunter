@@ -184,12 +184,15 @@ class EventScorer:
     支持7种事件类型，包含正面加分、负面减分和一票否决机制。
     """
 
-    def __init__(self, tushare_token: str = None):
+    def __init__(self, tushare_token: str = None, data_cache=None):
         """
         初始化事件驱动评分器
 
         参数:
             tushare_token: Tushare API token，为 None 时从配置文件读取
+            data_cache: 评分数据本地落地缓存（BacktestDataCache）。提供时各事件
+                        查询本地优先（缺失/过期才回退远程并落库），回测场景注入
+                        以消除评分阶段远程请求；None 时保持纯远程模式
         """
         # 初始化 Tushare token
         self._token = tushare_token or self._load_tushare_token()
@@ -197,6 +200,8 @@ class EventScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
+        # 本地落地缓存（可选）
+        self.data_cache = data_cache
         # 记录初始化日志
         logger.info("事件驱动评分器初始化完成")
 
@@ -366,13 +371,20 @@ class EventScorer:
         events = []
 
         try:
-            pro = self._get_pro()
-            # 调用 forecast 接口获取业绩预告
-            df = self._call_tushare_with_retry(
-                pro.forecast,
-                ts_code=ts_code,
-                fields="ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max",
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 forecast 接口获取业绩预告（全量历史，本地按 ann_date 过滤）
+                return self._call_tushare_with_retry(
+                    pro.forecast,
+                    ts_code=ts_code,
+                    fields="ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max",
+                )
+
+            # 本地落地缓存优先（快照型：评分日 <= 落地日即命中），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("forecast", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据
             if df is None or df.empty:
                 logger.debug(f"无业绩预告数据: {stock_code}")
@@ -478,13 +490,20 @@ class EventScorer:
         events = []
 
         try:
-            pro = self._get_pro()
-            # 调用 stk_holdertrade 接口
-            df = self._call_tushare_with_retry(
-                pro.stk_holdertrade,
-                ts_code=ts_code,
-                fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,after_share",
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 stk_holdertrade 接口（全量历史，本地按 ann_date 过滤）
+                return self._call_tushare_with_retry(
+                    pro.stk_holdertrade,
+                    ts_code=ts_code,
+                    fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,after_share",
+                )
+
+            # 本地落地缓存优先（快照型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("stk_holdertrade", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据
             if df is None or df.empty:
                 logger.debug(f"无股东增减持数据: {stock_code}")
@@ -569,13 +588,20 @@ class EventScorer:
         events = []
 
         try:
-            pro = self._get_pro()
-            # 调用 repurchase 接口
-            df = self._call_tushare_with_retry(
-                pro.repurchase,
-                ts_code=ts_code,
-                fields="ts_code,ann_date,proc,amount,exp_date",
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 repurchase 接口（全量历史，本地按 ann_date 过滤）
+                return self._call_tushare_with_retry(
+                    pro.repurchase,
+                    ts_code=ts_code,
+                    fields="ts_code,ann_date,proc,amount,exp_date",
+                )
+
+            # 本地落地缓存优先（快照型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("repurchase", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据
             if df is None or df.empty:
                 logger.debug(f"无股票回购数据: {stock_code}")
@@ -623,13 +649,20 @@ class EventScorer:
         ts_code = self._convert_ts_code(stock_code)
         events = []
         try:
-            pro = self._get_pro()
-            # 调用 block_trade 接口
-            df = self._call_tushare_with_retry(
-                pro.block_trade, ts_code=ts_code,
-                start_date=start_date, end_date=score_date,
-                fields="ts_code,trade_date,price,vol,amount,buyer,seller,premium",
-            )
+            def _remote(f_start, f_end):
+                pro = self._get_pro()
+                # 调用 block_trade 接口（区间数据）
+                return self._call_tushare_with_retry(
+                    pro.block_trade, ts_code=ts_code,
+                    start_date=f_start, end_date=f_end,
+                    fields="ts_code,trade_date,price,vol,amount,buyer,seller,premium",
+                )
+
+            # 本地落地缓存优先（覆盖型：只拉缺口），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_range("block_trade", ts_code, start_date, score_date, _remote)
+            else:
+                df = _remote(start_date, score_date)
             if df is None or df.empty:
                 logger.debug(f"无大宗交易数据: {stock_code}")
                 self._cache.set(cache_key, events)
@@ -667,19 +700,28 @@ class EventScorer:
         ts_code = self._convert_ts_code(stock_code)
         events = []
         try:
-            pro = self._get_pro()
-            # top_list 接口需要 trade_date 参数，需要逐个日期查询
-            # 获取有效期内的所有交易日
-            from datetime import datetime, timedelta
+            def _remote_for(td):
+                pro = self._get_pro()
+                # top_list 接口需要 trade_date 参数（按交易日查询，历史不可变）
+                return self._call_tushare_with_retry(
+                    pro.top_list, ts_code=ts_code, trade_date=td,
+                    fields="ts_code,trade_date,name,buy,sell,net_buy",
+                )
+
+            # 获取有效期内的所有交易日（逐日历日查询）
             start_dt = datetime.strptime(start_date, "%Y%m%d")
             end_dt = datetime.strptime(score_date, "%Y%m%d")
             current_dt = start_dt
             while current_dt <= end_dt:
                 trade_date = current_dt.strftime("%Y%m%d")
-                df = self._call_tushare_with_retry(
-                    pro.top_list, ts_code=ts_code, trade_date=trade_date,
-                    fields="ts_code,trade_date,name,buy,sell,net_buy",
-                )
+                # 本地落地缓存优先（精确键型：历史日期永久缓存），否则直接远程
+                if self.data_cache is not None:
+                    df = self.data_cache.fetch_key(
+                        "top_list", f"{ts_code}_{trade_date}", trade_date,
+                        lambda td=trade_date: _remote_for(td),
+                    )
+                else:
+                    df = _remote_for(trade_date)
                 if df is not None and not df.empty:
                     # 遍历每条龙虎榜记录
                     for _, row in df.iterrows():
@@ -714,11 +756,19 @@ class EventScorer:
         ts_code = self._convert_ts_code(stock_code)
         events = []
         try:
-            pro = self._get_pro()
-            df = self._call_tushare_with_retry(
-                pro.stk_shock, ts_code=ts_code,
-                fields="ts_code,ann_date,shock_reason",
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 stk_shock 接口（全量历史，本地按 ann_date 过滤）
+                return self._call_tushare_with_retry(
+                    pro.stk_shock, ts_code=ts_code,
+                    fields="ts_code,ann_date,shock_reason",
+                )
+
+            # 本地落地缓存优先（快照型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("stk_shock", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             if df is None or df.empty:
                 logger.debug(f"无异常波动数据: {stock_code}")
                 self._cache.set(cache_key, events)
@@ -880,11 +930,18 @@ class EventScorer:
         """
         ts_code = self._convert_ts_code(stock_code)
         try:
-            pro = self._get_pro()
-            df = self._call_tushare_with_retry(
-                pro.forecast, ts_code=ts_code,
-                fields="ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min",
-            )
+            def _remote():
+                pro = self._get_pro()
+                return self._call_tushare_with_retry(
+                    pro.forecast, ts_code=ts_code,
+                    fields="ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min",
+                )
+
+            # 本地落地缓存优先（与 _check_forecast 共享同一份快照缓存行）
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof("forecast", ts_code, score_date, _remote)
+            else:
+                df = _remote()
             if df is None or df.empty:
                 return False, ""
             # 过滤有效期内的记录（20天）

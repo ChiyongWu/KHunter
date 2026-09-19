@@ -134,13 +134,16 @@ class MoneyflowScorer:
     支持一票否决机制。
     """
 
-    def __init__(self, db_manager: DBManager = None, tushare_token: str = None):
+    def __init__(self, db_manager: DBManager = None, tushare_token: str = None, data_cache=None):
         """
         初始化资金面评分器
 
         参数:
             db_manager: 数据库管理器实例，为 None 时使用默认实例
             tushare_token: Tushare API token，为 None 时从配置文件读取
+            data_cache: 评分数据本地落地缓存（BacktestDataCache）。提供时资金数据
+                        本地优先读取（区间覆盖管理，缺失只增量拉缺口），回测场景
+                        注入以消除评分阶段远程请求；None 时保持纯远程模式
         """
         # 使用传入的 db_manager 或创建默认实例
         from utils.global_db import get_global_db
@@ -151,6 +154,8 @@ class MoneyflowScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
+        # 本地落地缓存（可选）
+        self.data_cache = data_cache
         # 记录初始化日志（改为debug级别，避免频繁输出）
         logger.debug("资金面评分器初始化完成")
 
@@ -319,14 +324,21 @@ class MoneyflowScorer:
         ts_code = self._convert_ts_code(stock_code)
 
         try:
-            # 调用 Tushare moneyflow_ths 接口获取实时数据
-            pro = self._get_pro()
-            df = self._call_tushare_with_retry(
-                pro.moneyflow_ths,
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            def _remote(f_start, f_end):
+                pro = self._get_pro()
+                # 调用 Tushare moneyflow_ths 接口（区间数据）
+                return self._call_tushare_with_retry(
+                    pro.moneyflow_ths,
+                    ts_code=ts_code,
+                    start_date=f_start,
+                    end_date=f_end,
+                )
+
+            # 本地落地缓存优先（覆盖型：只拉缺口），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_range("moneyflow_ths", ts_code, start_date, end_date, _remote)
+            else:
+                df = _remote(start_date, end_date)
             # 检查返回数据是否有效
             if df is not None and not df.empty:
                 logger.debug(
@@ -373,14 +385,21 @@ class MoneyflowScorer:
         ts_code = self._convert_ts_code(stock_code)
 
         try:
-            pro = self._get_pro()
-            # 调用 Tushare moneyflow 接口获取历史数据
-            df = self._call_tushare_with_retry(
-                pro.moneyflow,
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            def _remote(f_start, f_end):
+                pro = self._get_pro()
+                # 调用 Tushare moneyflow 接口获取历史数据（区间数据）
+                return self._call_tushare_with_retry(
+                    pro.moneyflow,
+                    ts_code=ts_code,
+                    start_date=f_start,
+                    end_date=f_end,
+                )
+
+            # 本地落地缓存优先（覆盖型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_range("moneyflow", ts_code, start_date, end_date, _remote)
+            else:
+                df = _remote(start_date, end_date)
             # 检查返回数据是否有效
             if df is not None and not df.empty:
                 logger.debug(
@@ -511,20 +530,27 @@ class MoneyflowScorer:
         # 转换为 Tushare 格式代码
         ts_code = self._convert_ts_code(stock_code)
 
-        try:
-            pro = self._get_pro()
-            # 按评分日期计算查询范围：往前推 180 天
-            score_dt = datetime.strptime(score_date, "%Y%m%d")
-            end_date = score_dt.strftime("%Y%m%d")
-            start_date = (score_dt - timedelta(days=180)).strftime("%Y%m%d")
+        # 按评分日期计算查询范围：往前推 180 天
+        score_dt = datetime.strptime(score_date, "%Y%m%d")
+        end_date = score_dt.strftime("%Y%m%d")
+        start_date = (score_dt - timedelta(days=180)).strftime("%Y%m%d")
 
-            # 调用 hk_hold 接口
-            df = self._call_tushare_with_retry(
-                pro.hk_hold,
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date,
-            )
+        try:
+            def _remote(f_start, f_end):
+                pro = self._get_pro()
+                # 调用 hk_hold 接口（区间数据）
+                return self._call_tushare_with_retry(
+                    pro.hk_hold,
+                    ts_code=ts_code,
+                    start_date=f_start,
+                    end_date=f_end,
+                )
+
+            # 本地落地缓存优先（覆盖型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_range("hk_hold", ts_code, start_date, end_date, _remote)
+            else:
+                df = _remote(start_date, end_date)
             # 检查返回数据
             if df is not None and not df.empty:
                 logger.debug(f"获取北向资金数据成功: {stock_code}, {len(df)} 条")

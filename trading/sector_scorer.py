@@ -128,12 +128,15 @@ class SectorScorer:
     支持一票否决机制（板块得分 -100 时个股直接淘汰）。
     """
 
-    def __init__(self, tushare_token: str = None, **kwargs):
+    def __init__(self, tushare_token: str = None, data_cache=None, **kwargs):
         """
         初始化板块强度评分器
 
         参数:
             tushare_token: Tushare API token，为 None 时从配置文件读取
+            data_cache: 评分数据本地落地缓存（BacktestDataCache）。提供时板块数据
+                        本地优先读取（成分/名称映射快照型，日频行情精确键型），
+                        回测场景注入以消除评分阶段远程请求；None 时保持纯远程模式
             **kwargs: 兼容额外参数（如 db_manager）
         """
         # 初始化 Tushare token
@@ -142,6 +145,8 @@ class SectorScorer:
         self._pro = None
         # 初始化内存缓存
         self._cache = MemoryCache()
+        # 本地落地缓存（可选）
+        self.data_cache = data_cache
         # 记录初始化日志
         logger.info("板块强度评分器初始化完成")
 
@@ -308,12 +313,21 @@ class SectorScorer:
         ts_code = self._convert_ts_code(stock_code)
 
         try:
-            pro = self._get_pro()
-            # 使用 con_code 参数查询个股所属板块
-            df = self._call_tushare_with_retry(
-                pro.ths_member,
-                con_code=ts_code,
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 使用 con_code 参数查询个股所属板块（快照型：当前成分）
+                return self._call_tushare_with_retry(
+                    pro.ths_member,
+                    con_code=ts_code,
+                )
+
+            # 本地落地缓存优先（快照型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof(
+                    "ths_member", ts_code, score_date or datetime.now().strftime("%Y%m%d"), _remote
+                )
+            else:
+                df = _remote()
             # 检查返回数据是否有效
             if df is None or df.empty:
                 logger.warning(f"个股板块映射为空: {stock_code}")
@@ -371,9 +385,18 @@ class SectorScorer:
             return cached
 
         try:
-            pro = self._get_pro()
-            # 全量查询板块列表（不限 type，获取所有板块）
-            df = self._call_tushare_with_retry(pro.ths_index)
+            def _remote():
+                pro = self._get_pro()
+                # 全量查询板块列表（不限 type，获取所有板块；快照型）
+                return self._call_tushare_with_retry(pro.ths_index)
+
+            # 本地落地缓存优先（快照型），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_asof(
+                    "ths_index", "all", datetime.now().strftime("%Y%m%d"), _remote
+                )
+            else:
+                df = _remote()
             name_map = {}
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
@@ -424,12 +447,19 @@ class SectorScorer:
             return cached
 
         try:
-            pro = self._get_pro()
-            # 调用 ths_daily 接口获取当日所有板块行情
-            df = self._call_tushare_with_retry(
-                pro.ths_daily,
-                trade_date=trade_date,
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 ths_daily 接口获取当日所有板块行情（按交易日查询，历史不可变）
+                return self._call_tushare_with_retry(
+                    pro.ths_daily,
+                    trade_date=trade_date,
+                )
+
+            # 本地落地缓存优先（精确键型：历史日期永久缓存，当日不缓存），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_key("ths_daily", trade_date, trade_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据是否有效
             if df is not None and not df.empty:
                 logger.debug(
@@ -470,12 +500,19 @@ class SectorScorer:
             return cached
 
         try:
-            pro = self._get_pro()
-            # 调用 moneyflow_cnt_ths 接口获取当日概念板块资金流向
-            df = self._call_tushare_with_retry(
-                pro.moneyflow_cnt_ths,
-                trade_date=trade_date,
-            )
+            def _remote():
+                pro = self._get_pro()
+                # 调用 moneyflow_cnt_ths 接口获取当日概念板块资金流向（按交易日查询，历史不可变）
+                return self._call_tushare_with_retry(
+                    pro.moneyflow_cnt_ths,
+                    trade_date=trade_date,
+                )
+
+            # 本地落地缓存优先（精确键型：历史日期永久缓存，当日不缓存），否则直接远程
+            if self.data_cache is not None:
+                df = self.data_cache.fetch_key("moneyflow_cnt_ths", trade_date, trade_date, _remote)
+            else:
+                df = _remote()
             # 检查返回数据是否有效
             if df is not None and not df.empty:
                 logger.debug(
