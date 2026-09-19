@@ -114,6 +114,7 @@ class BacktestEngine:
         self.stock_data_cache = {}  # {code: df} 完整历史数据
         self.stock_name_cache = {}  # {code: name} 股票名称缓存
         self.stock_filtered_cache = {}  # {code: df} 已过滤ST/退市的股票
+        self.stock_indicators_cache = {}  # {code: df} 预计算指标后的完整数据（倒序）
         
         # 可买股票池
         self.buy_candidate_pool = []  # 可买股票池，每个元素包含股票信息和加入日期
@@ -242,6 +243,13 @@ class BacktestEngine:
             
             # 5. 预加载所有股票数据到内存（根据策略参数动态计算历史数据天数）
             self._preload_stock_data(start_date, end_date, strategy_name)
+
+            # 5.2 预计算所有股票的技术指标（MACD/EMA/量均线等），选股时按日期切片复用，
+            #     避免每个交易日对全市场股票重复计算 rolling 指标
+            self._precompute_indicators(strategy_name)
+
+            # 5.5 预取评分所需远程数据并落地缓存（事件/资金/财务/板块评分本地优先）
+            self._preload_score_data(end_date, date_range)
             
             # 6. 初始化回测环境
             initial_capital = config.get('initial_capital', 300000)
@@ -2030,7 +2038,107 @@ class BacktestEngine:
         logger.info(f"预加载完成: 全部加载 {loaded} 只股票, 总耗时 {total_time:.1f}s "
                     f"(步骤: SQL={step1_time:.1f}s 名称={step2_time:.1f}s 分组={step3_time:.1f}s)")
         return loaded
-    
+
+    def _preload_score_data(self, end_date: str, date_range: list) -> None:
+        """预取评分所需远程数据并落地缓存（性能优化）
+
+        评分阶段（事件/资金/财务/板块）为本地优先读取，本方法在回测启动时完成全局预热：
+        1. 区间尾端扩展：把覆盖型接口（moneyflow_ths/moneyflow/hk_hold/block_trade）
+           的缺口拉取上界延伸到回测结束日，首次落库即覆盖整个回测期，
+           消除逐日评分时评分窗口右移造成的每日增量远程调用
+        2. 全市场日频数据预取：ths_daily / moneyflow_cnt_ths（按交易日查询、
+           每日全市场一次调用），按各评分日（前一交易日）批量落地
+        3. 板块清单（ths_index，全量一次调用）预取
+        快照型/精确键型个股数据（forecast/fina_indicator/top_list 等）由评分器
+        首次评分时自动落地（每股仅一次远程），后续评分日全部命中本地缓存。
+
+        Args:
+            end_date: 回测结束日期（YYYY-MM-DD）
+            date_range: 回测交易日列表（List[date]）
+        """
+        data_cache = getattr(self.score_calculator, 'data_cache', None)
+        if data_cache is None:
+            return
+
+        from datetime import datetime as _dt
+
+        try:
+            # 1. 覆盖型接口的缺口拉取上界 = 回测结束日（YYYYMMDD）
+            data_cache.range_extend_end = _dt.strptime(end_date, '%Y-%m-%d').strftime('%Y%m%d')
+
+            stats_before = dict(data_cache.stats)
+
+            # 2. 预取板块清单（全量一次调用）
+            sector_scorer = getattr(self.score_calculator, 'sector_scorer', None)
+            if sector_scorer is None:
+                logger.info("[评分数据预取] 板块评分器未启用，跳过板块数据预取")
+                return
+            sector_scorer._get_sector_name_map()
+
+            # 3. 预取全市场日频板块数据：评分使用前一交易日，
+            #    预取日期集合 = 各回测交易日的前一交易日（历史日期才可缓存）
+            score_dates = set()
+            for d in date_range:
+                prev_d = self._get_previous_trading_day(d)
+                score_dates.add(prev_d.strftime('%Y%m%d'))
+
+            today_str = _dt.now().strftime('%Y%m%d')
+            pending = sorted(dt for dt in score_dates if dt < today_str)
+            total = len(pending)
+            if total > 0:
+                logger.info(f"[评分数据预取] 全市场日频板块数据: {total} 个交易日 "
+                            f"({pending[0]} ~ {pending[-1]})")
+                for idx, trade_date in enumerate(pending, 1):
+                    sector_scorer._fetch_sector_daily(trade_date)
+                    sector_scorer._fetch_sector_moneyflow(trade_date)
+                    if idx % 5 == 0 or idx == total:
+                        logger.info(f"[评分数据预取] 进度: {idx}/{total}")
+
+            stats = data_cache.stats
+            logger.info(f"[评分数据预取] 完成: 远程 {stats['remote'] - stats_before['remote']} 次, "
+                        f"落库 {stats['persist'] - stats_before['persist']} 行, "
+                        f"本地命中 {stats['hit'] - stats_before['hit']} 次")
+        except Exception as e:
+            logger.warning(f"评分数据预取异常（忽略，评分时自动回退远程）: {e}")
+
+    def _precompute_indicators(self, strategy_name: str) -> None:
+        """预计算所有股票的技术指标（选股性能优化）
+
+        回测中每个交易日都会对全市场股票执行选股，而 calculate_indicators
+        （MACD/EMA/成交量均线等 rolling 计算）与选股日期无关——同一只股票
+        在整个回测期内的指标序列是固定的。若每日每只重复计算，复杂度为
+        O(股票数 × 交易日数 × 数据长度)。
+
+        本方法在回测启动时对每只股票一次性计算完整指标序列并缓存（倒序），
+        选股时仅按日期切片读取，将指标计算复杂度降为 O(股票数 × 数据长度)。
+
+        缓存写入 self.stock_indicators_cache[code]，供 _execute_selection 使用。
+        """
+        from utils.strategy_name_mapper import get_english_name
+        mapped_name = get_english_name(strategy_name)
+        strategy = self.strategy_registry.get_strategy(mapped_name)
+        if not strategy:
+            strategy = self.strategy_registry.get_strategy(strategy_name)
+        if strategy is None:
+            logger.warning(f"[指标预计算] 策略 {strategy_name} 未找到，跳过指标预计算")
+            return
+
+        from datetime import datetime
+        t0 = datetime.now()
+        total = len(self.stock_filtered_cache)
+        ok = 0
+        for code, df in self.stock_filtered_cache.items():
+            try:
+                # calculate_indicators 内部会处理排序（正序计算后转回倒序），
+                # 传入正序的 stock_filtered_cache 数据即可
+                self.stock_indicators_cache[code] = strategy.calculate_indicators(df)
+                ok += 1
+            except Exception:
+                # 单只股票指标计算失败不影响整体，选股时该只走原始数据路径
+                continue
+        elapsed = (datetime.now() - t0).total_seconds()
+        logger.info(f"[指标预计算] 完成: {ok}/{total} 只股票, 耗时 {elapsed:.1f}s")
+
     def _execute_selection(self, strategy_name: str, date: date) -> List[Dict]:
         """执行选股（从缓存读取，使用日期切片）
         
@@ -2060,8 +2168,18 @@ class BacktestEngine:
             
             # 标准化返回格式
             standardized_stocks = []
-            
+
+            # 签名防御：仅当策略 execute_selection 声明了 precomputed_indicators 参数时
+            # 才启用预计算路径并传参。重写该方法但未声明新参数的策略（历史/第三方策略）
+            # 若强传会抛 TypeError，被下方单股 except 静默吞掉，表现为全市场选股恒为 0。
+            import inspect
+            supports_precomputed = 'precomputed_indicators' in inspect.signature(
+                strategy.execute_selection).parameters
+
             # 从缓存遍历全部股票，选股时做过滤
+            # 优先使用预计算指标缓存（倒序、含指标列），选股日仅切片不复算指标
+            # 不支持新参数的策略自动回退原始路径（行为与优化前一致）
+            use_precomputed = bool(self.stock_indicators_cache) and supports_precomputed
             for code, df in self.stock_filtered_cache.items():
                 try:
                     # 股票名称：供策略的 _validate_stock_name 校验（ST/退市/未知等）
@@ -2073,23 +2191,30 @@ class BacktestEngine:
 
                     # 日期切片：只取到目标日期为止的数据
                     date_str = date.strftime('%Y-%m-%d')
-                    df_to_date = df[df['date'] <= date_str].copy()
-                    
+
+                    if use_precomputed and code in self.stock_indicators_cache:
+                        # 预计算路径：指标已算好（倒序），仅按日期切片，跳过 calculate_indicators
+                        df_to_date = self.stock_indicators_cache[code]
+                        df_to_date = df_to_date[df_to_date['date'] <= date_str]
+                        precomputed = True
+                    else:
+                        # 回退路径：从原始 K 线切片并反转
+                        df_to_date = df[df['date'] <= date_str].copy()
+                        # 反转数据为倒序（最新的在前），供策略使用
+                        if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
+                            df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
+                        precomputed = False
+
                     # 过滤1：数据为空 → 跳过
                     if df_to_date.empty:
                         continue
-                    
-                    # 注意：不过滤 ST/退市股票（历史回测无法准确还原当时状态，交给策略自身的 quick_filter 处理）
-                    
-                    # 反转数据为倒序（最新的在前），供策略使用
-                    # 仅当数据为升序时才反转
-                    if len(df_to_date) > 1 and df_to_date['date'].iloc[0] < df_to_date['date'].iloc[-1]:
-                        df_to_date = df_to_date.iloc[::-1].reset_index(drop=True)
-                    
-                    # 使用标准的 execute_selection 流程，确保指标被正确计算
-                    # execute_selection 包含：数据验证 -> 快速过滤 -> 计算指标 -> 选股条件检查
-                    # selection_date 传入选股日期，确保使用正确的日期进行数据时效性检查
-                    signal_list = strategy.execute_selection(df_to_date, code, name, selection_date=date_str)
+
+                    # 使用标准的 execute_selection 流程
+                    # precomputed=True 时跳过 calculate_indicators（指标已在预计算阶段算好）
+                    signal_list = strategy.execute_selection(
+                        df_to_date, code, name, selection_date=date_str,
+                        precomputed_indicators=precomputed,
+                    )
                     
                     # 处理选股结果
                     if signal_list:

@@ -123,7 +123,8 @@ class BaseStrategy(ABC):
         """
         return []
 
-    def execute_selection(self, df, stock_code='', stock_name='', selection_date=None):
+    def execute_selection(self, df, stock_code='', stock_name='', selection_date=None,
+                          precomputed_indicators=False):
         """
         标准化的选股执行过程
 
@@ -131,13 +132,14 @@ class BaseStrategy(ABC):
             1. 数据验证（完整性、长度、必要字段）
             2. 当日K线检查（退市/停牌股票一并过滤，无Tushare API调用）
             3. 快速过滤（优先使用带lookback的版本）
-            4. 计算指标
+            4. 计算指标（precomputed_indicators=True 时跳过，由回测预计算路径传入）
             5-N. 选股条件检查
 
         :param df: 股票数据DataFrame（倒序，最新在前）
         :param stock_code: 股票代码
         :param stock_name: 股票名称
         :param selection_date: 选股日期（YYYY-MM-DD格式），如果为None则跳过当日K线检查
+        :param precomputed_indicators: 指标是否已预计算（回测优化路径），为True时跳过 calculate_indicators
         :return: 选股信号列表
         """
         # 统一规范化排序：策略内部（_is_suspended/_near_run/_check_low_env/状态机）均假设
@@ -161,10 +163,12 @@ class BaseStrategy(ABC):
         elif not self.quick_filter(df):
             return []
 
-        try:
-            df = self.calculate_indicators(df)
-        except Exception:
-            return []
+        # 计算指标（precomputed_indicators=True 时由回测预计算路径传入，跳过重复计算）
+        if not precomputed_indicators:
+            try:
+                df = self.calculate_indicators(df)
+            except Exception:
+                return []
 
         if selection_date is None:
             from datetime import datetime

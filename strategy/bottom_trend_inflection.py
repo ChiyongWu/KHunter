@@ -135,8 +135,12 @@ class BottomTrendInflectionStrategy(BaseStrategy):
         if not self._quick_check_deep_decline(df):
             return []
         
-        # 计算指标（只调用一次）
-        df_with_indicators = self.calculate_indicators(df)
+        # 计算指标：execute_selection 已调用 calculate_indicators，此处仅在 df 不含指标列时兜底
+        # （回测路径走 execute_selection，指标已预计算；直接调用 select_stocks 时才需要计算）
+        if 'DIF' not in df.columns:
+            df_with_indicators = self.calculate_indicators(df)
+        else:
+            df_with_indicators = df
         
         # 检查最新一天是否有有效交易
         latest = df_with_indicators.iloc[0]
