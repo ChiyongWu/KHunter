@@ -970,4 +970,28 @@ CREATE TABLE IF NOT EXISTS stock_favorite (
 CREATE INDEX IF NOT EXISTS idx_stock_favorite_code ON stock_favorite(stock_code);
 -- idx_stock_favorite_code: 股票代码索引，用于快速查询收藏状态
 
+-- ============================================
+-- 28. 热门板块排名表（KHunter）
+-- ============================================
+CREATE TABLE IF NOT EXISTS sector_hot_rank (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- id: 自增主键
+    trade_date DATE NOT NULL,
+    -- trade_date: 交易日，格式YYYY-MM-DD
+    sector_code VARCHAR(20) NOT NULL,
+    -- sector_code: 同花顺板块代码，例如885823.TI
+    sector_name VARCHAR(50) NOT NULL,
+    -- sector_name: 板块名称，例如创新药
+    sector_type VARCHAR(10) NOT NULL,
+    -- sector_type: 板块类型，concept概念/industry行业
+    pct_chg REAL,
+    -- pct_chg: 板块涨跌幅，百分比，例如1.27
+    main_net_flow REAL,
+    -- main_net_flow: 主力净流入额，单位元，例如208000000
+    created_date DATETIME,
+    -- created_date: 创建时间，格式YYYY-MM-DD HH:MM:SS
+    UNIQUE(trade_date, sector_code)
+    -- 交易日、板块代码组合唯一，同一交易日重跑覆盖更新
+);
+
 
