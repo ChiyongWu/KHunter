@@ -124,7 +124,13 @@ class SectorHotRankFetcher:
         for _, row in df_index.iterrows():
             code = str(row.get('ts_code', '')).strip()
             name = str(row.get('name', '')).strip()
-            sec_type = 'concept' if row.get('type') == 'N' else 'industry'
+            # 与 _fetch_sector_index 的 N/I 过滤闭环：type 异常时跳过而非误标
+            if row.get('type') == 'N':
+                sec_type = 'concept'
+            elif row.get('type') == 'I':
+                sec_type = 'industry'
+            else:
+                continue
             if code and name:
                 index_map[code] = (name, sec_type)
 
@@ -133,17 +139,25 @@ class SectorHotRankFetcher:
         for _, row in df_flow.iterrows():
             code = str(row.get('ts_code', '')).strip()
             if code and code not in flow_map:
+                net_amount = row.get('net_amount')
                 try:
-                    flow_map[code] = float(row.get('net_amount', 0) or 0) * 1e8
+                    flow_map[code] = float(net_amount) * 1e8 if pd.notna(net_amount) else 0.0
                 except (TypeError, ValueError):
                     flow_map[code] = 0.0
 
         saved_count = 0
         # 整批写入使用显式事务：execute_with_retry 不 commit，
         # 若不手动管理会导致悬挂写事务（与 fund_flow_fetcher 落库写法一致）
+        if 'pct_chg' in df_daily.columns:
+            pct_col = 'pct_chg'
+        elif 'pct_change' in df_daily.columns:
+            pct_col = 'pct_change'
+        else:
+            logger.warning(f"板块行情缺少涨跌幅列（trade_date={trade_date}），跳过本次落库")
+            return 0
+
         self.db_manager.begin_transaction()
         try:
-            pct_col = 'pct_chg' if 'pct_chg' in df_daily.columns else 'pct_change'
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             for _, row in df_daily.iterrows():
                 code = str(row.get('ts_code', '')).strip()
