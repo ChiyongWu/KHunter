@@ -357,19 +357,33 @@ class DataCollectionService:
                 
                 self.init_status['status'] = 'completed'
                 self.init_status['end_time'] = datetime.now().isoformat()
+                self.init_status['success'] = 1
                 self._add_init_log("✓ 重新初始化全部完成")
-                
+                # 填充统计信息（stock_basic 行数等），前端完成页据此展示
+                # 成功/失败/总数量；不填则 statistics 为空 dict，界面显示全 0
+                self.init_status['statistics'] = self.get_tables_stats()
+
             except Exception as e:
                 self.init_status['status'] = 'failed'
                 self.init_status['end_time'] = datetime.now().isoformat()
+                self.init_status['failed'] = self.init_status.get('failed', 0) + 1
+                self.init_status['message'] = f'重新初始化失败: {str(e)}'
                 self._add_init_log(f"✗ 重新初始化失败: {str(e)}")
                 logger.error(f"重新初始化失败: {e}")
+            finally:
+                # 必须复位，否则后续 start_initialization/start_reinit 会被
+                # "已有初始化任务正在运行" 永久挡住，只能重启服务
+                self.init_status['running'] = False
     
     def _delete_all_data(self):
         """删除所有数据表内容"""
         try:
-            self.db_manager.execute("DELETE FROM stock_kline")
-            self.db_manager.execute("DELETE FROM stock_basic")
+            # 用事务上下文确保 DELETE 真正提交：db_manager.execute 处于 sqlite3
+            # 隐式事务中，未 commit 前其他连接看不到删除效果，导致后续
+            # COUNT(*) 误判"已有K线数据"而走增量路径，全量重建失效
+            with self.db_manager.transaction():
+                self.db_manager.execute("DELETE FROM stock_kline")
+                self.db_manager.execute("DELETE FROM stock_basic")
             logger.info("已清空 stock_kline 和 stock_basic 表")
         except Exception as e:
             logger.error(f"删除数据失败: {e}")
