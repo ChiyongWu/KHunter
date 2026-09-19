@@ -390,271 +390,46 @@ def get_my_golden_stocks():
         return jsonify({'success': False, 'error': str(e)})
 
 
-@app.route('/api/dashboard/hot-industries')
-def get_hot_industries():
-    """获取最热行业 - top50股票的行业分布（考虑收盘时间）"""
+@app.route('/api/dashboard/hot-sectors')
+def get_hot_sectors():
+    """获取热门板块 - 最近有数据交易日（自动回退）的概念/行业板块按主力净流入额排名"""
     try:
-        # 获取最近交易日
-        score_date = get_latest_trading_date()
-        
-        # 获取top50股票
+        sector_type = request.args.get('type', 'concept')
+        if sector_type not in ('concept', 'industry'):
+            return jsonify({'success': False, 'error': 'type 参数必须是 concept 或 industry'}), 400
+
+        # 最近有数据的交易日（表无数据时返回空列表）
+        row = db_manager.query_one("SELECT MAX(trade_date) AS max_date FROM sector_hot_rank")
+        if not row or not row['max_date']:
+            return jsonify({'success': True, 'date': '', 'type': sector_type, 'sectors': []})
+        trade_date = row['max_date']
+
         rows = db_manager.query("""
-            SELECT industry
-            FROM stock_selection_record
-            WHERE selection_date = ?
-            ORDER BY rank_position ASC
-            LIMIT 50
-        """, (score_date,))
-        
-        # 如果没有数据，直接返回空列表
-        if not rows:
-            return jsonify({
-                'success': True,
-                'date': score_date,
-                'industries': []
+            SELECT sector_code, sector_name, pct_chg, main_net_flow
+            FROM sector_hot_rank
+            WHERE trade_date = ? AND sector_type = ?
+            ORDER BY main_net_flow DESC
+            LIMIT 5
+        """, (trade_date, sector_type))
+
+        sectors = []
+        for idx, r in enumerate(rows, start=1):
+            sectors.append({
+                'rank': idx,
+                'sector_code': r['sector_code'],
+                'sector_name': r['sector_name'],
+                'pct_chg': r['pct_chg'],
+                'main_net_flow': r['main_net_flow']
             })
-        
-        # 统计行业分布
-        industry_count = {}
-        for row in rows:
-            industry = row['industry'] or '未知'
-            if industry in industry_count:
-                industry_count[industry] += 1
-            else:
-                industry_count[industry] = 1
-        
-        # 转换为列表并排序
-        industries = []
-        total = len(rows)
-        for industry, count in industry_count.items():
-            industries.append({
-                'industry': industry,
-                'count': count,
-                'percentage': round(count / total * 100, 2)
-            })
-        
-        # 按股票数量排序
-        industries.sort(key=lambda x: x['count'], reverse=True)
-        
+
         return jsonify({
             'success': True,
-            'date': score_date,
-            'industries': industries
+            'date': trade_date,
+            'type': sector_type,
+            'sectors': sectors
         })
     except Exception as e:
-        logger.error(f"获取最热行业失败: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/dashboard/hot-areas')
-def get_hot_areas():
-    """获取最热板块 - top50股票的板块分布（考虑收盘时间）"""
-    try:
-        # 获取最近交易日
-        score_date = get_latest_trading_date()
-        
-        # 获取top50股票
-        rows = db_manager.query("""
-            SELECT sector
-            FROM stock_selection_record
-            WHERE selection_date = ?
-            ORDER BY rank_position ASC
-            LIMIT 50
-        """, (score_date,))
-        
-        # 如果没有数据，直接返回空列表
-        if not rows:
-            return jsonify({
-                'success': True,
-                'date': score_date,
-                'areas': []
-            })
-        
-        # 统计板块分布
-        area_count = {}
-        for row in rows:
-            area = row['sector'] or '未知'
-            if area in area_count:
-                area_count[area] += 1
-            else:
-                area_count[area] = 1
-        
-        # 转换为列表并排序
-        areas = []
-        total = len(rows)
-        for area, count in area_count.items():
-            areas.append({
-                'area': area,
-                'count': count,
-                'percentage': round(count / total * 100, 2)
-            })
-        
-        # 按股票数量排序
-        areas.sort(key=lambda x: x['count'], reverse=True)
-        
-        return jsonify({
-            'success': True,
-            'date': score_date,
-            'areas': areas
-        })
-    except Exception as e:
-        logger.error(f"获取最热板块失败: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/dashboard/industry-stocks')
-def get_industry_stocks():
-    """获取指定行业的股票列表 - top50"""
-    try:
-        # 获取参数
-        industry = request.args.get('industry', '')
-        limit = int(request.args.get('limit', 50))
-        
-        if not industry:
-            return jsonify({'success': False, 'error': '行业参数不能为空'})
-        
-        # 获取最近交易日（遵循收盘规则 + DB校验）
-        score_date = get_latest_trading_date()
-        
-        # 获取指定行业的股票，按评分排序
-        rows = db_manager.query("""
-            SELECT stock_code, stock_name, industry, sector, score, rank_position, selection_price
-            FROM stock_selection_record
-            WHERE selection_date = ? AND industry = ?
-            ORDER BY score DESC
-            LIMIT ?
-        """, (score_date, industry, limit))
-        
-        # 初始化AKShareFetcher获取实时价格
-        from utils.akshare_fetcher import AKShareFetcher
-        akshare_fetcher = AKShareFetcher()
-        
-        # 转换为字典列表并计算实时数据
-        stocks = []
-        for row in rows:
-            stock_code = row['stock_code']
-            stock_name = row['stock_name']
-            industry = row['industry'] or '-'
-            sector = row['sector'] or '-'
-            score = row['score'] or 0
-            rank_position = row['rank_position'] or 0
-            selection_price = row['selection_price'] or 0
-            
-            # 获取实时价格
-            current_price = akshare_fetcher.get_stock_price(stock_code)
-            
-            # 计算当前收益率
-            current_yield = 0.0
-            if current_price and selection_price:
-                current_yield = (current_price - selection_price) / selection_price * 100
-            
-            # 获取选入后最高价格
-            highest_price = ranking_manager._get_highest_price(stock_code, score_date)
-            
-            # 计算最高收益率
-            highest_yield = 0.0
-            if highest_price and selection_price:
-                highest_yield = (highest_price - selection_price) / selection_price * 100
-            
-            stocks.append({
-                'stock_code': stock_code,
-                'stock_name': stock_name,
-                'industry': industry,
-                'sector': sector,
-                'score': score,
-                'rank_position': rank_position,
-                'selection_price': selection_price,
-                'current_price': current_price or 0,
-                'current_yield': round(current_yield, 2) or 0,
-                'highest_price': highest_price or 0,
-                'highest_yield': round(highest_yield, 2) or 0
-            })
-        
-        return jsonify({
-            'success': True,
-            'date': score_date,
-            'stocks': stocks
-        })
-    except Exception as e:
-        logger.error(f"获取行业股票失败: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/dashboard/area-stocks')
-def get_area_stocks():
-    """获取指定板块的股票列表 - top50"""
-    try:
-        # 获取参数
-        area = request.args.get('area', '')
-        limit = int(request.args.get('limit', 50))
-        
-        if not area:
-            return jsonify({'success': False, 'error': '板块参数不能为空'})
-        
-        # 获取最近交易日（遵循收盘规则 + DB校验）
-        score_date = get_latest_trading_date()
-        
-        # 获取指定板块的股票，按评分排序
-        rows = db_manager.query("""
-            SELECT stock_code, stock_name, industry, sector, score, rank_position, selection_price
-            FROM stock_selection_record
-            WHERE selection_date = ? AND sector = ?
-            ORDER BY score DESC
-            LIMIT ?
-        """, (score_date, area, limit))
-        
-        # 初始化AKShareFetcher获取实时价格
-        from utils.akshare_fetcher import AKShareFetcher
-        akshare_fetcher = AKShareFetcher()
-        
-        # 转换为字典列表并计算实时数据
-        stocks = []
-        for row in rows:
-            stock_code = row['stock_code']
-            stock_name = row['stock_name']
-            industry = row['industry'] or '-'
-            sector = row['sector'] or '-'
-            score = row['score'] or 0
-            rank_position = row['rank_position'] or 0
-            selection_price = row['selection_price'] or 0
-            
-            # 获取实时价格
-            current_price = akshare_fetcher.get_stock_price(stock_code)
-            
-            # 计算当前收益率
-            current_yield = 0.0
-            if current_price and selection_price:
-                current_yield = (current_price - selection_price) / selection_price * 100
-            
-            # 获取选入后最高价格
-            highest_price = ranking_manager._get_highest_price(stock_code, score_date)
-            
-            # 计算最高收益率
-            highest_yield = 0.0
-            if highest_price and selection_price:
-                highest_yield = (highest_price - selection_price) / selection_price * 100
-            
-            stocks.append({
-                'stock_code': stock_code,
-                'stock_name': stock_name,
-                'industry': industry,
-                'sector': sector,
-                'score': score,
-                'rank_position': rank_position,
-                'selection_price': selection_price,
-                'current_price': current_price or 0,
-                'current_yield': round(current_yield, 2) or 0,
-                'highest_price': highest_price or 0,
-                'highest_yield': round(highest_yield, 2) or 0
-            })
-        
-        return jsonify({
-            'success': True,
-            'date': score_date,
-            'stocks': stocks
-        })
-    except Exception as e:
-        logger.error(f"获取板块股票失败: {str(e)}")
+        logger.error(f"获取热门板块失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
 
