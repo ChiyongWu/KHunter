@@ -220,6 +220,7 @@ export async function loadHotSectors(type = hotSectorType) {
 
         const result = await response.json();
 
+        if (result.type && result.type !== hotSectorType) return; // 过期响应，丢弃
         container.innerHTML = renderHotSectors(result);
     } catch (error) {
         console.error('加载热门板块失败:', error);
