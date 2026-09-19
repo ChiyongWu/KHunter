@@ -10,6 +10,7 @@ from utils.base_fetcher import DataFetcher, FetcherFactory
 
 # 导入速率限制器
 from utils.stock_data_fetcher import _tushare_limiter
+from utils.tushare_client import get_tushare_pro
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -51,23 +52,12 @@ class FundFlowFetcher(DataFetcher):
         all_data = []
         
         try:
-            # 如果pro为None，创建Tushare API实例
+            # 如果pro为None，创建Tushare API实例（从配置读取 api_key/base_url）
             if pro is None:
-                import tushare as ts
-                import json
-                
-                # 获取Tushare token配置
-                tushare_config_path = 'config/tushare_config.json'
-                with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                    tushare_config = json.load(f)
-                token = tushare_config.get('token') or tushare_config.get('api_key')
-                
-                if not token:
-                    logger.error("未找到Tushare token配置")
+                pro = get_tushare_pro()
+                if pro is None:
+                    logger.error("未配置Tushare api_key")
                     return None
-                
-                # 创建Tushare API实例
-                pro = ts.pro_api(token)
             
             # 将日期字符串转换为 datetime 对象
             start_dt = datetime.strptime(start_date, '%Y%m%d')
@@ -149,23 +139,12 @@ class FundFlowFetcher(DataFetcher):
         all_data = []
         
         try:
-            # 如果pro为None，创建Tushare API实例
+            # 如果pro为None，创建Tushare API实例（从配置读取 api_key/base_url）
             if pro is None:
-                import tushare as ts
-                import json
-                
-                # 获取Tushare token配置
-                tushare_config_path = 'config/tushare_config.json'
-                with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                    tushare_config = json.load(f)
-                token = tushare_config.get('token') or tushare_config.get('api_key')
-                
-                if not token:
-                    logger.error("未找到Tushare token配置")
+                pro = get_tushare_pro()
+                if pro is None:
+                    logger.error("未配置Tushare api_key")
                     return None
-                
-                # 创建Tushare API实例
-                pro = ts.pro_api(token)
             
             # 将日期字符串转换为 datetime 对象
             start_dt = datetime.strptime(start_date, '%Y%m%d')
@@ -232,23 +211,12 @@ class FundFlowFetcher(DataFetcher):
         all_data = []
         
         try:
-            # 如果pro为None，创建Tushare API实例
+            # 如果pro为None，创建Tushare API实例（从配置读取 api_key/base_url）
             if pro is None:
-                import tushare as ts
-                import json
-                
-                # 获取Tushare token配置
-                tushare_config_path = 'config/tushare_config.json'
-                with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                    tushare_config = json.load(f)
-                token = tushare_config.get('token') or tushare_config.get('api_key')
-                
-                if not token:
-                    logger.error("未找到Tushare token配置")
+                pro = get_tushare_pro()
+                if pro is None:
+                    logger.error("未配置Tushare api_key")
                     return None
-                
-                # 创建Tushare API实例
-                pro = ts.pro_api(token)
             
             # 将日期字符串转换为 datetime 对象
             start_dt = datetime.strptime(start_date, '%Y%m%d')
@@ -308,21 +276,11 @@ class FundFlowFetcher(DataFetcher):
             包含行业资金流向数据的 DataFrame，如果失败返回 None
         """
         try:
-            import tushare as ts
-            import json
-            
-            # 获取Tushare token配置
-            tushare_config_path = 'config/tushare_config.json'
-            with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                tushare_config = json.load(f)
-            token = tushare_config.get('token') or tushare_config.get('api_key')
-            
-            if not token:
-                logger.error("未找到Tushare token配置")
+            # 创建Tushare API实例（从配置读取 api_key/base_url）
+            pro = get_tushare_pro()
+            if pro is None:
+                logger.error("未配置Tushare api_key")
                 return None
-            
-            # 创建Tushare API实例
-            pro = ts.pro_api(token)
             
             # 速率限制
             _tushare_limiter.wait_if_needed()
@@ -442,21 +400,11 @@ class FundFlowFetcher(DataFetcher):
             包含板块资金流向数据的 DataFrame，如果失败返回 None
         """
         try:
-            import tushare as ts
-            import json
-            
-            # 获取Tushare token配置
-            tushare_config_path = 'config/tushare_config.json'
-            with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                tushare_config = json.load(f)
-            token = tushare_config.get('token') or tushare_config.get('api_key')
-            
-            if not token:
-                logger.error("未找到Tushare token配置")
+            # 创建Tushare API实例（从配置读取 api_key/base_url）
+            pro = get_tushare_pro()
+            if pro is None:
+                logger.error("未配置Tushare api_key")
                 return None
-            
-            # 创建Tushare API实例
-            pro = ts.pro_api(token)
             
             # 速率限制
             _tushare_limiter.wait_if_needed()

@@ -12,6 +12,7 @@ from typing import Optional, Dict
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from utils.tushare_client import get_tushare_pro
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -351,23 +352,12 @@ class StockDataFetcher:
                 logger.info(f"尝试 Tushare (第{attempt+1}/{max_retries}次)...")
                 
                 # 使用 Tushare 的 stock_basic 接口获取完整股票列表
-                import tushare as ts
-                
-                # 读取 Tushare token
-                tushare_token = None
-                try:
-                    with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                        config = json.load(f)
-                        tushare_token = config.get('token') or config.get('api_key')
-                except:
-                    pass
-                
-                if not tushare_token:
-                    logger.warning("未找到 Tushare token，跳过 Tushare 方法")
+                # 从配置文件读取 api_key/base_url 并初始化 Pro API
+                pro = get_tushare_pro()
+
+                if pro is None:
+                    logger.warning("未找到 Tushare api_key，跳过 Tushare 方法")
                 else:
-                    # 初始化 Tushare Pro API
-                    pro = ts.pro_api(tushare_token)
-                    
                     # 获取股票基本信息（包含所有上市股票）
                     df = pro.stock_basic(exchange='', list_status='L')
                     
@@ -1006,24 +996,11 @@ class StockDataFetcher:
             try:
                 logger.info(f"尝试 Tushare daily_basic 接口 (第{attempt+1}/{max_retries}次)...")
                 
-                import tushare as ts
-                import json
-                
-                # 读取 Tushare token
-                tushare_token = None
-                try:
-                    with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                        config = json.load(f)
-                        tushare_token = config.get('token') or config.get('api_key')
-                except:
-                    pass
-                
-                if not tushare_token:
-                    logger.warning("未找到 Tushare token，跳过 Tushare 方法")
+                # 从配置文件读取 api_key/base_url 并初始化 Pro API
+                pro = get_tushare_pro()
+                if pro is None:
+                    logger.warning("未找到 Tushare api_key，跳过 Tushare 方法")
                     return {}
-                
-                # 初始化 Tushare Pro API
-                pro = ts.pro_api(tushare_token)
                 
                 # 调用 daily_basic 接口获取所有股票的市值信息
                 # daily_basic 接口返回所有股票的每日基本面指标
@@ -1470,19 +1447,12 @@ class StockDataFetcher:
         """
         # 使用 Tushare 获取复权因子
         try:
-            import tushare as ts
-            import json
+            # 从配置文件读取 api_key/base_url 并初始化 Pro API
+            pro = get_tushare_pro()
 
-            tushare_config_path = 'config/tushare_config.json'
-            with open(tushare_config_path, 'r', encoding='utf-8') as f:
-                tushare_config = json.load(f)
-            token = tushare_config.get('token') or tushare_config.get('api_key')
-
-            if not token:
-                logger.warning("未配置 Tushare token，无法检测除权")
-                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '未配置 Tushare token'}
-
-            pro = ts.pro_api(token)
+            if pro is None:
+                logger.warning("未配置 Tushare api_key，无法检测除权")
+                return {'exdividend_stocks': [], 'factor_changes': {}, 'message': '未配置 Tushare api_key'}
 
             # 如果提供了start_date，则使用它；否则使用前一交易日
             if start_date:

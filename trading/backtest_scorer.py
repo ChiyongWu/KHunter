@@ -27,6 +27,7 @@ from trading.technical_scorer import (
     STRATEGY_WEIGHTS, VETO_STRATEGIES as TECH_VETO_STRATEGIES,
     VETO_ENABLED as TECH_VETO_ENABLED
 )
+from utils.tushare_client import load_tushare_config
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -114,10 +115,8 @@ class BacktestScoreCalculator:
             str: Tushare API token，加载失败返回空字符串
         """
         try:
-            import json
-            with open("config/tushare_config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-            token = config.get("token") or config.get("api_key", "")
+            # 优先使用 token 字段，兼容 api_key 字段
+            token = load_tushare_config()['token']
             logger.debug("回测评分器: Tushare token 加载成功")
             return token
         except Exception as e:

@@ -17,6 +17,7 @@ from typing import List, Dict, Tuple
 
 from utils.db_manager import DBManager
 from utils.akshare_fetcher import AKShareFetcher
+from utils.tushare_client import get_tushare_pro
 from strategy.strategy_registry import StrategyRegistry
 from trading.stock_score_api import calculate_stock_score
 from trading.backtest_scorer import BacktestScoreCalculator
@@ -1015,21 +1016,12 @@ class BacktestEngine:
         
         # 1. 尝试从 Tushare 加载交易日历
         try:
-            import tushare as ts
-            
-            # 读取Tushare token
-            tushare_token = None
-            try:
-                with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                    cfg = json.load(f)
-                    tushare_token = cfg.get('token') or cfg.get('api_key')
-            except Exception:
-                pass
-            
-            if tushare_token:
+            # 从配置文件读取 api_key/base_url 并创建pro实例
+            pro = get_tushare_pro()
+
+            if pro is not None:
                 logger.info(f"从 Tushare 加载交易日历范围: {extended_start} ~ {end_date_str}")
-                
-                pro = ts.pro_api(tushare_token)
+
                 df = pro.trade_cal(
                     exchange='SSE',
                     start_date=extended_start,
@@ -2520,20 +2512,10 @@ class BacktestEngine:
             
             # 2. 备选：从tushare获取
             try:
-                import tushare as ts
-                
-                # 读取Tushare token
-                tushare_token = None
-                try:
-                    import json
-                    with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                        config = json.load(f)
-                        tushare_token = config.get('token') or config.get('api_key')
-                except:
-                    pass
-                
-                if tushare_token:
-                    pro = ts.pro_api(tushare_token)
+                # 从配置文件读取 api_key/base_url 并创建pro实例
+                pro = get_tushare_pro()
+
+                if pro is not None:
                     df = pro.daily(
                         ts_code=f"{stock_code}.SH" if stock_code.startswith('6') else f"{stock_code}.SZ",
                         start_date=date_str,

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import List, Optional
 
+from utils.tushare_client import get_tushare_pro
+
 # 配置日志记录器
 logger = logging.getLogger(__name__)
 
@@ -127,15 +129,8 @@ def is_trading_day(date_str: str) -> bool:
 
     # 2. 缓存未命中且非周末（缓存为空、工作日或节假日），回退到 Tushare 查询
     try:
-        import tushare as ts
-        import json
-        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                tushare_config = json.load(f)
-            if 'api_key' in tushare_config:
-                ts.set_token(tushare_config['api_key'])
-        pro = ts.pro_api()
+        # 从配置文件读取 api_key/base_url 并创建pro实例
+        pro = get_tushare_pro()
         df = pro.trade_cal(
             start_date=date_str_fmt,
             end_date=date_str_fmt,
@@ -169,16 +164,8 @@ def _update_cache_from_tushare(start_str: str, end_str: str):
     """
     global _trading_calendar_cache
     try:
-        import tushare as ts
-        import json
-        from pathlib import Path
-        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                tushare_config = json.load(f)
-            if 'api_key' in tushare_config:
-                ts.set_token(tushare_config['api_key'])
-        pro = ts.pro_api()
+        # 从配置文件读取 api_key/base_url 并创建pro实例
+        pro = get_tushare_pro()
         df = pro.trade_cal(
             exchange='SSE',
             start_date=start_str,
@@ -240,18 +227,8 @@ def get_trading_days(start_date: str, end_date: str) -> List[str]:
     # 1. 先尝试从 Tushare 批量获取并更新缓存
     tushare_ok = False
     try:
-        import tushare as ts
-        from pathlib import Path
-        import json
-
-        config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                tushare_config = json.load(f)
-            if 'api_key' in tushare_config:
-                ts.set_token(tushare_config['api_key'])
-
-        pro = ts.pro_api()
+        # 从配置文件读取 api_key/base_url 并创建pro实例
+        pro = get_tushare_pro()
         df = pro.trade_cal(
             start_date=start_str,
             end_date=end_str,

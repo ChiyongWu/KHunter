@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import logging
 
+from utils.tushare_client import get_tushare_pro
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,9 +19,8 @@ class MoneyFlowDAO:
     def __init__(self):
         """初始化资金流向DAO"""
         try:
-            import tushare as ts
-            self.tushare = ts
-            self.pro = ts.pro_api()
+            # 从配置文件读取 api_key/base_url 并创建pro实例
+            self.pro = get_tushare_pro()
         except Exception as e:
             logger.error(f"Tushare初始化失败: {e}")
             self.pro = None

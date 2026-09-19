@@ -10,7 +10,7 @@
 import logging
 from typing import Optional
 from pathlib import Path
-import json
+from utils.tushare_client import get_tushare_pro
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -177,24 +177,9 @@ class ExdividendUtils:
             Tushare pro API实例，配置失败返回None
         """
         try:
-            import tushare as ts
-            
-            # 读取 Tushare 配置
-            config_path = Path(__file__).parent.parent / "config" / "tushare_config.json"
-            if not config_path.exists():
-                logger.debug("Tushare配置文件不存在")
-                return None
-            
-            with open(config_path, 'r', encoding='utf-8') as f:
-                tushare_config = json.load(f)
-            
-            token = tushare_config.get('token') or tushare_config.get('api_key')
-            if not token:
-                logger.debug("Tushare token未配置")
-                return None
-            
-            return ts.pro_api(token)
-            
+            # 从配置文件读取 api_key/base_url 并创建pro实例
+            return get_tushare_pro()
+
         except Exception as e:
             logger.debug(f"初始化Tushare API失败: {e}")
             return None

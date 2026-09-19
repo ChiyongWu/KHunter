@@ -17,14 +17,14 @@
 """
 import sys
 import os
-import json
 import argparse
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import tushare as ts
 import pandas as pd
+
+from utils.tushare_client import get_tushare_pro
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,16 +40,11 @@ FIELDS = ('ts_code,trade_date,name,close,pct_chg,turnover_ratio,float_mv,'
 
 
 def get_pro():
-    """从项目配置读取 tushare token 并初始化 Pro API。"""
-    cfg_path = os.path.join('config', 'tushare_config.json')
-    if not os.path.exists(cfg_path):
-        raise FileNotFoundError(f'未找到 tushare 配置: {cfg_path}')
-    with open(cfg_path, 'r', encoding='utf-8') as f:
-        cfg = json.load(f)
-    token = cfg.get('token') or cfg.get('api_key')
-    if not token:
+    """从 config/tushare_config.json 读取 base_url 与 api_key 并初始化 Pro API。"""
+    pro = get_tushare_pro()
+    if pro is None:
         raise ValueError('tushare_config.json 中未配置 token/api_key')
-    return ts.pro_api(token)
+    return pro
 
 
 def _to_float(v):

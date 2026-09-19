@@ -16,6 +16,7 @@ from typing import Optional, Dict
 from datetime import datetime
 
 from utils.base_fetcher import DataFetcher, HTTPDataSource, CacheDataSource, FetcherFactory, DataSource
+from utils.tushare_client import get_tushare_pro
 
 logger = logging.getLogger(__name__)
 
@@ -43,24 +44,8 @@ class TushareIndustrySource(DataSource):
             return self._pro
         
         try:
-            import tushare as ts
-            import json
-            
-            # 读取Tushare配置
-            try:
-                with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                token = config.get('token') or config.get('api_key')
-            except Exception as e:
-                logger.debug(f"读取Tushare配置失败: {e}")
-                token = None
-            
-            # 创建pro实例
-            if token:
-                self._pro = ts.pro_api(token)
-            else:
-                self._pro = ts.pro_api()
-            
+            # 从配置文件读取 api_key/base_url 并创建pro实例
+            self._pro = get_tushare_pro()
             return self._pro
         except Exception as e:
             logger.debug(f"创建Tushare pro实例失败: {e}")

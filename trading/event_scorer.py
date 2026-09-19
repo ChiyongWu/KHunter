@@ -52,6 +52,7 @@ import pandas as pd
 
 # 导入事件驱动详情模型
 from trading.stock_score_models import EventDetail
+from utils.tushare_client import get_tushare_pro, load_tushare_config
 # 减持计划数据源解耦：关键词常量与数据层统一来自 trading.reduce_plan_cache
 from trading import reduce_plan_cache as rpc
 from trading.reduce_plan_cache import (
@@ -207,11 +208,8 @@ class EventScorer:
             str: Tushare API token
         """
         try:
-            # 读取 tushare 配置文件
-            with open("config/tushare_config.json", "r") as f:
-                config = json.load(f)
             # 优先使用 token 字段，兼容 api_key 字段
-            token = config.get("token") or config.get("api_key", "")
+            token = load_tushare_config()['token']
             logger.debug("Tushare token 加载成功")
             return token
         except Exception as e:
@@ -228,9 +226,10 @@ class EventScorer:
         """
         if self._pro is None:
             try:
-                import tushare as ts
-                # 使用 token 初始化 pro API
-                self._pro = ts.pro_api(self._token)
+                # 从配置读取 api_key/base_url 初始化 pro API（base_url 非空时走中转站）
+                self._pro = get_tushare_pro(self._token)
+                if self._pro is None:
+                    raise ValueError("Tushare api_key 未配置")
                 logger.debug("Tushare pro API 初始化成功")
             except Exception as e:
                 logger.error(f"Tushare pro API 初始化失败: {e}")

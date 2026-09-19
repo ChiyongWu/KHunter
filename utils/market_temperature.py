@@ -14,6 +14,7 @@
 
 import logging
 from datetime import datetime, timedelta
+from utils.tushare_client import get_tushare_pro
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 
@@ -58,8 +59,8 @@ class MarketTemperature:
         self.tushare_pro = tushare_pro
         if tushare_pro is None:
             try:
-                import tushare as ts
-                self.tushare_pro = ts.pro_api()
+                # 从配置文件读取 api_key/base_url 并创建pro实例
+                self.tushare_pro = get_tushare_pro()
             except Exception as e:
                 logger.warning(f"初始化Tushare失败: {e}")
     

@@ -33,6 +33,7 @@ import pandas as pd
 
 # 导入板块强度详情模型
 from trading.stock_score_models import SectorDetail
+from utils.tushare_client import get_tushare_pro, load_tushare_config
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
@@ -152,11 +153,8 @@ class SectorScorer:
             str: Tushare API token
         """
         try:
-            # 读取 tushare 配置文件
-            with open("config/tushare_config.json", "r") as f:
-                config = json.load(f)
             # 优先使用 token 字段，兼容 api_key 字段
-            token = config.get("token") or config.get("api_key", "")
+            token = load_tushare_config()['token']
             logger.debug("Tushare token 加载成功")
             return token
         except Exception as e:
@@ -173,9 +171,10 @@ class SectorScorer:
         """
         if self._pro is None:
             try:
-                import tushare as ts
-                # 使用 token 初始化 pro API
-                self._pro = ts.pro_api(self._token)
+                # 从配置读取 api_key/base_url 初始化 pro API（base_url 非空时走中转站）
+                self._pro = get_tushare_pro(self._token)
+                if self._pro is None:
+                    raise ValueError("Tushare api_key 未配置")
                 logger.debug("Tushare pro API 初始化成功")
             except Exception as e:
                 logger.error(f"Tushare pro API 初始化失败: {e}")
