@@ -49,7 +49,7 @@ async function loadModules() {
         // 加载各个模块
         const websocketModule = await import('./modules/websocket.js');
         const navigationModule = await import('./modules/navigation.js');
-        const stocksModule = await import('./modules/stocks.js?v=2');
+        const stocksModule = await import('./modules/stocks.js?v=3');
         const selectionModule = await import('./modules/selection.js?v=2');
         const analysisModule = await import('./modules/analysis.js?v=2');
         const strategiesModule = await import('./modules/strategies.js');

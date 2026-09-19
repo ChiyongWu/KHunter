@@ -392,40 +392,62 @@ def get_my_golden_stocks():
 
 @app.route('/api/dashboard/hot-sectors')
 def get_hot_sectors():
-    """获取热门板块 - 最近有数据交易日（自动回退）的概念/行业板块按主力净流入额排名"""
+    """获取热门板块 - 最近有数据交易日（自动回退）的概念/行业板块按涨幅排名，支持分页"""
     try:
         sector_type = request.args.get('type', 'concept')
         if sector_type not in ('concept', 'industry'):
             return jsonify({'success': False, 'error': 'type 参数必须是 concept 或 industry'}), 400
 
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = min(50, max(1, int(request.args.get('page_size', 10))))
+        except (TypeError, ValueError):
+            page_size = 10
+
         # 最近有数据的交易日（表无数据时返回空列表）
         row = db_manager.query_one("SELECT MAX(trade_date) AS max_date FROM sector_hot_rank")
         if not row or not row['max_date']:
-            return jsonify({'success': True, 'date': '', 'type': sector_type, 'sectors': []})
+            return jsonify({'success': True, 'date': '', 'type': sector_type,
+                            'page': page, 'page_size': page_size, 'total': 0,
+                            'total_pages': 0, 'sectors': []})
         trade_date = row['max_date']
 
-        rows = db_manager.query("""
-            SELECT sector_code, sector_name, pct_chg, main_net_flow
+        count_row = db_manager.query_one("""
+            SELECT COUNT(*) AS total
             FROM sector_hot_rank
             WHERE trade_date = ? AND sector_type = ?
-            ORDER BY main_net_flow DESC
-            LIMIT 5
         """, (trade_date, sector_type))
+        total = count_row['total'] if count_row else 0
+        total_pages = (total + page_size - 1) // page_size
+
+        rows = db_manager.query("""
+            SELECT sector_code, sector_name, pct_chg
+            FROM sector_hot_rank
+            WHERE trade_date = ? AND sector_type = ?
+            ORDER BY pct_chg DESC
+            LIMIT ? OFFSET ?
+        """, (trade_date, sector_type, page_size, (page - 1) * page_size))
 
         sectors = []
-        for idx, r in enumerate(rows, start=1):
+        for idx, r in enumerate(rows, start=(page - 1) * page_size + 1):
             sectors.append({
                 'rank': idx,
                 'sector_code': r['sector_code'],
                 'sector_name': r['sector_name'],
-                'pct_chg': r['pct_chg'],
-                'main_net_flow': r['main_net_flow']
+                'pct_chg': r['pct_chg']
             })
 
         return jsonify({
             'success': True,
             'date': trade_date,
             'type': sector_type,
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'total_pages': total_pages,
             'sectors': sectors
         })
     except Exception as e:

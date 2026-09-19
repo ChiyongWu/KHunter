@@ -102,19 +102,9 @@ export async function loadMyGoldenStocks() {
 let hotSectorType = 'concept';
 
 /**
- * 格式化主力净流入热度：≥1亿 显示 X.XX亿，否则 XXXX万（负值同样格式化）
- * @param {number} value - 主力净流入额（元）
+ * 热门板块当前页码（从 1 开始）
  */
-function formatHotValue(value) {
-    if (value === null || value === undefined || isNaN(value)) {
-        return '-';
-    }
-    const abs = Math.abs(value);
-    if (abs >= 1e8) {
-        return (value / 1e8).toFixed(2) + '亿';
-    }
-    return (value / 1e4).toFixed(0) + '万';
-}
+let hotSectorPage = 1;
 
 /**
  * 格式化涨跌幅：保留2位小数，红涨绿跌（A股配色）
@@ -162,7 +152,6 @@ function renderHotSectors(result) {
                         <th style="width: 50px;">排名</th>
                         <th>板块名称</th>
                         <th style="text-align: right;">涨幅</th>
-                        <th style="text-align: right;">热度</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -181,14 +170,32 @@ function renderHotSectors(result) {
                     <div class="text-muted" style="font-size: 12px;">${code}</div>
                 </td>
                 <td style="text-align: right;">${formatPctChg(sector.pct_chg)}</td>
-                <td style="text-align: right;">${formatHotValue(sector.main_net_flow)}</td>
             </tr>
         `;
     });
 
+    // 分页控件（上一页/下一页 + 页码信息）
+    const curPage = result.page || 1;
+    const totalPages = result.total_pages || 1;
+    const total = result.total || sectors.length;
+    const btnBase = 'padding: 2px 10px; margin: 0 4px; font-size: 12px; border-radius: 4px; border: 1px solid #ddd; background: #f5f5f5; color: #666; cursor: pointer;';
+    const btnDisabled = 'padding: 2px 10px; margin: 0 4px; font-size: 12px; border-radius: 4px; border: 1px solid #eee; background: #fafafa; color: #ccc; cursor: not-allowed;';
+    const pageType = result.type || hotSectorType;
+    const prevBtn = curPage > 1
+        ? `<button type="button" style="${btnBase}" onclick="loadHotSectors('${pageType}', ${curPage - 1})">上一页</button>`
+        : `<button type="button" style="${btnDisabled}" disabled>上一页</button>`;
+    const nextBtn = curPage < totalPages
+        ? `<button type="button" style="${btnBase}" onclick="loadHotSectors('${pageType}', ${curPage + 1})">下一页</button>`
+        : `<button type="button" style="${btnDisabled}" disabled>下一页</button>`;
+
     html += `
                 </tbody>
             </table>
+        </div>
+        <div style="text-align: center; margin: 4px 0;">
+            ${prevBtn}
+            <span class="text-muted" style="font-size: 12px;">第 ${curPage} / ${totalPages} 页 · 共 ${total} 个</span>
+            ${nextBtn}
         </div>
         <p class="text-muted" style="font-size: 12px;">数据日期: ${result.date || '-'}</p>
     `;
@@ -197,11 +204,13 @@ function renderHotSectors(result) {
 }
 
 /**
- * 加载热门板块数据（最近交易日，按主力净流入排名，前5条）
+ * 加载热门板块数据（最近交易日，按涨幅倒序，分页）
  * @param {string} type - 板块类型：concept 概念 / industry 行业
+ * @param {number} page - 页码（从 1 开始）
  */
-export async function loadHotSectors(type = hotSectorType) {
+export async function loadHotSectors(type = hotSectorType, page = 1) {
     hotSectorType = type;
+    hotSectorPage = page;
     const container = document.getElementById('hot-sectors-content');
     if (!container) {
         return;
@@ -211,7 +220,7 @@ export async function loadHotSectors(type = hotSectorType) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
 
-        const response = await fetch(`/api/dashboard/hot-sectors?type=${type}`, { signal: controller.signal });
+        const response = await fetch(`/api/dashboard/hot-sectors?type=${type}&page=${page}`, { signal: controller.signal });
         clearTimeout(timeoutId);
 
         if (!response.ok) {
@@ -220,7 +229,8 @@ export async function loadHotSectors(type = hotSectorType) {
 
         const result = await response.json();
 
-        if (result.type && result.type !== hotSectorType) return; // 过期响应，丢弃
+        // 过期响应，丢弃（类型或页码已变化的旧请求）
+        if ((result.type && result.type !== hotSectorType) || (result.page && result.page !== hotSectorPage)) return;
         container.innerHTML = renderHotSectors(result);
     } catch (error) {
         console.error('加载热门板块失败:', error);
