@@ -164,7 +164,8 @@ class SectorHotRankFetcher:
                 if code not in index_map:
                     continue
                 name, sec_type = index_map[code]
-                pct_chg = row.get(pct_col)
+                pct_val = row.get(pct_col)
+                pct_chg = float(pct_val) if pd.notna(pct_val) else 0.0
                 main_net_flow = flow_map.get(code, 0.0)
 
                 # 同一交易日重跑按 UNIQUE(trade_date, sector_code) 覆盖更新
