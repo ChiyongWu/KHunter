@@ -793,12 +793,11 @@ def get_stock_detail(code):
         # 计算KDJ指标
         from utils.technical import KDJ
         kdj_df = KDJ(df, n=9, m1=3, m2=3)
-        
-        # 转换为列表格式，返回最近100条数据
+
+        # 返回全量K线数据（KDJ等指标基于全量计算，保证均线/指标连续性；
+        # 展示范围由前端时间范围切换控件控制）
         data = []
-        # 取最后100条（最新的数据）
-        start_idx = max(0, len(df) - 100)
-        for i in range(start_idx, len(df)):
+        for i in range(len(df)):
             row = df.iloc[i]
             kdj_row = kdj_df.iloc[i]
             data.append({
@@ -814,8 +813,15 @@ def get_stock_detail(code):
                 'D': round(kdj_row['D'], 2) if pd.notna(kdj_row['D']) else None,
                 'J': round(kdj_row['J'], 2) if pd.notna(kdj_row['J']) else None
             })
-        
-        return jsonify({'success': True, 'code': code, 'data': data})
+
+        return jsonify({
+            'success': True,
+            'code': code,
+            'data': data,
+            'total_count': len(data),
+            'start_date': data[0]['date'] if data else '',
+            'end_date': data[-1]['date'] if data else ''
+        })
     except Exception as e:
         logger.error(f"获取股票详情失败: {e}")
         return jsonify({'success': False, 'error': str(e)})

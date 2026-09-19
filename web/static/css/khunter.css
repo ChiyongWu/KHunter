@@ -1259,3 +1259,134 @@
     font-weight: 600;
     color: #374151;
 }
+
+/* ========== K线图组件（全量数据 + 范围切换 + 十字光标） ========== */
+
+/* 工具条：左侧范围切换按钮组 + 右侧区间统计 */
+.kline-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+    border-radius: 8px 8px 0 0;
+    flex-wrap: wrap;
+}
+
+.kline-range-group {
+    display: flex;
+    gap: 4px;
+}
+
+.kline-range-group button {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid #e5e7eb;
+    background: #ffffff;
+    color: #4b5563;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.kline-range-group button:hover {
+    border-color: #3b82f6;
+    color: #3b82f6;
+}
+
+.kline-range-group button.active {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: #ffffff;
+}
+
+/* 区间统计（起止日期 + 区间涨跌幅） */
+.kline-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: #6b7280;
+    font-family: 'Monaco', 'Consolas', monospace;
+}
+
+.kline-stats .up,
+.kline-tooltip-row .up {
+    color: #ef4444;
+    font-weight: 600;
+}
+
+.kline-stats .down,
+.kline-tooltip-row .down {
+    color: #10b981;
+    font-weight: 600;
+}
+
+/* 图表绘制区：容器500px - 工具条高度，主画布 + 悬浮画布叠加 */
+.kline-chart-area {
+    position: relative;
+    height: calc(100% - 42px);
+    overflow: hidden;
+    border-radius: 0 0 8px 8px;
+}
+
+.kline-main-canvas,
+.kline-overlay-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: block;
+}
+
+/* 悬浮层仅绘制十字光标，十字指针交互 */
+.kline-overlay-canvas {
+    z-index: 2;
+    cursor: crosshair;
+}
+
+/* 悬停提示框（跟随鼠标，pointer-events 不阻挡图表交互） */
+.kline-tooltip {
+    position: absolute;
+    z-index: 10;
+    min-width: 180px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    pointer-events: none;
+    font-size: 12px;
+    color: #374151;
+}
+
+.kline-tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    line-height: 1.7;
+    font-family: 'Monaco', 'Consolas', monospace;
+}
+
+.kline-tooltip-row span:first-child {
+    color: #9ca3af;
+    font-family: inherit;
+}
+
+/* 日期行居中加粗，与数据行分隔 */
+.kline-tooltip-row.kline-tooltip-date {
+    justify-content: center;
+    font-weight: 700;
+    color: #1f2937;
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+}
+
+/* 窄屏：工具条换行后压缩图表区高度 */
+@media (max-width: 640px) {
+    .kline-chart-area {
+        height: calc(100% - 76px);
+    }
+}
