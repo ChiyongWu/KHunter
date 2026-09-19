@@ -93,6 +93,11 @@ class MarketTemperature:
         """
         # 检查是否为交易日
         if not self.is_trading_day(trade_date):
+            # 非交易日（周末/节假日）：自动回退到最近一个交易日
+            recent = self.get_recent_trading_day(trade_date)
+            if recent and recent != trade_date:
+                logger.info(f"日期 {trade_date} 非交易日，自动回退到最近交易日 {recent}")
+                return self.calculate(recent, use_cache=use_cache, skip_risk_eval=skip_risk_eval)
             raise DataNotAvailableError(f"日期 {trade_date} 不是交易日，无法计算市场温度")
         
         # 尝试从缓存加载
@@ -218,7 +223,35 @@ class MarketTemperature:
         except Exception as e:
             logger.warning(f"检查交易日失败: {e}")
             return False
-    
+
+    def get_recent_trading_day(self, trade_date: str) -> Optional[str]:
+        """
+        获取 trade_date 之前（含当日）最近的一个交易日
+
+        Args:
+            trade_date: 日期（YYYYMMDD格式）
+
+        Returns:
+            最近的交易日（YYYYMMDD格式），查询失败返回None
+        """
+        try:
+            if not self.tushare_pro:
+                return None
+            start = (datetime.strptime(trade_date, '%Y%m%d') - timedelta(days=30)).strftime('%Y%m%d')
+            df = self.tushare_pro.trade_cal(
+                start_date=start,
+                end_date=trade_date,
+                is_open='1'
+            )
+            if df is None or df.empty:
+                return None
+            # 降序排列取第一个，即最近交易日
+            dates = sorted(df['cal_date'].astype(str).tolist(), reverse=True)
+            return dates[0]
+        except Exception as e:
+            logger.warning(f"查询最近交易日失败: {e}")
+            return None
+
     def get_up_down_ratio_data(self, trade_date: str) -> Dict:
         """
         获取涨跌家数数据
