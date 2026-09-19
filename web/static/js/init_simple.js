@@ -26,20 +26,22 @@ function startInitialization() {
         const initIndustryData = document.getElementById('init-industry-data').checked;
         const initSectorData = document.getElementById('init-sector-data').checked;
         const initFundFlowData = document.getElementById('init-fund-flow-data').checked;
-        
+        const mainboardOnly = document.getElementById('init-mainboard-only').checked;
+
         // 检查是否至少选择了一项
         if (!initBasicData && !initHistoryData && !initIndustryData && !initSectorData && !initFundFlowData) {
             alert('请至少选择一项初始化数据');
             return;
         }
-        
+
         // 构建初始化选项
         const options = {
             basicData: initBasicData,
             historyData: initHistoryData,
             industryData: initIndustryData,
             sectorData: initSectorData,
-            fundFlowData: initFundFlowData
+            fundFlowData: initFundFlowData,
+            mainboardOnly: mainboardOnly
         };
         
         console.log('发送初始化请求到后端...');
@@ -182,15 +184,20 @@ function startReinit() {
             console.log('用户取消了重新初始化');
             return;
         }
-        
+
+        // 读取范围选项（与开始初始化共用同一复选框）
+        const mainboardOnly = document.getElementById('init-mainboard-only').checked;
+
         console.log('发送重新初始化请求...');
-        
+
         fetch('/api/data/reinit', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({})
+            body: JSON.stringify({
+                options: { mainboardOnly: mainboardOnly }
+            })
         })
         .then(response => response.json())
         .then(result => {

@@ -259,14 +259,16 @@ class DataCollectionService:
             'lastUpdate': completeness.get('lastUpdate')
         }
     
-    def start_reinit(self, stock_count: int = None, kline_days: int = None) -> Dict[str, Any]:
+    def start_reinit(self, stock_count: int = None, kline_days: int = None,
+                     options: Optional[Dict] = None) -> Dict[str, Any]:
         """
         强制重新初始化（删除现有数据，重新初始化）
-        
+
         Args:
             stock_count: 初始化股票数量（默认2000）
             kline_days: K线历史天数（默认250）
-        
+            options: 初始化选项（mainboardOnly 等）
+
         Returns:
             dict: 任务信息
         """
@@ -274,18 +276,18 @@ class DataCollectionService:
             stock_count = 2000
         if kline_days is None:
             kline_days = 250
-            
+
         if self.init_status['running']:
             return {
                 'success': False,
                 'message': '已有初始化任务正在运行'
             }
-        
+
         task_id = f"REINIT_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
+
         thread = threading.Thread(
             target=self._run_reinit,
-            args=(task_id, stock_count, kline_days),
+            args=(task_id, stock_count, kline_days, options or {}),
             daemon=True
         )
         thread.start()
@@ -296,14 +298,16 @@ class DataCollectionService:
             'taskId': task_id
         }
     
-    def _run_reinit(self, task_id: str, stock_count: int, kline_days: int):
+    def _run_reinit(self, task_id: str, stock_count: int, kline_days: int,
+                    options: Optional[Dict] = None):
         """
         执行强制重新初始化（在后台线程中运行）
-        
+
         Args:
             task_id: 任务ID
             stock_count: 股票数量（忽略，使用全量）
             kline_days: K线天数（转换为年数，3年约750天）
+            options: 初始化选项（mainboardOnly 等）
         """
         with self.init_lock:
             if self.init_status['running']:
@@ -322,6 +326,8 @@ class DataCollectionService:
                 years = 3
                 self._add_init_log(f"⚠ 重新初始化任务 {task_id} 已启动")
                 self._add_init_log(f"  - 全量初始化，K线年数: {years}")
+                if options and options.get('mainboardOnly'):
+                    self._add_init_log("  - 仅沪深主板（剔除 ST 类、科创板、创业板、北交所）")
                 
                 try:
                     from web_server import emit_init_progress
@@ -351,7 +357,10 @@ class DataCollectionService:
                     None,
                     progress_callback=reinit_progress_cb
                 )
-                data_initializer.init_full_data(years=years)
+                data_initializer.init_full_data(
+                    years=years,
+                    mainboard_only=bool((options or {}).get('mainboardOnly', False))
+                )
                 self._add_init_log("✓ 全量初始化完成")
                 self._update_progress(100)
                 
@@ -513,7 +522,13 @@ class DataCollectionService:
                         None,
                         progress_callback=init_progress_cb
                     )
-                    data_initializer.init_full_data(years=3, stock_dict=stock_dict)
+                    data_initializer.init_full_data(
+                        years=3,
+                        stock_dict=stock_dict,
+                        mainboard_only=bool(options.get('mainboardOnly', False))
+                    )
+                    if options.get('mainboardOnly'):
+                        self._add_init_log("  - 仅沪深主板（剔除 ST 类、科创板、创业板、北交所）")
 
                     self.init_status['progress'] = 100
                     self._add_init_log("✓ 数据初始化完成")
@@ -531,7 +546,7 @@ class DataCollectionService:
                 self.init_status['status'] = 'completed'
                 self.init_status['success'] = 1
                 self._add_init_log("✓ 初始化任务完成")
-                
+
                 # 更新统计信息
                 self.init_status['statistics'] = self.get_tables_stats()
                 

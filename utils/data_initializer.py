@@ -9,6 +9,40 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 
+# 沪深主板代码前缀白名单：
+#   沪主板 600/601/603/605；深主板 000/001/002/003（002 原中小板已并入）
+# 科创板 688/689、创业板 300/301/302、北交所 43x/83x/87x/88x/92x 均不在白名单
+_MAINBOARD_CODE_PREFIXES = ('600', '601', '603', '605', '000', '001', '002', '003')
+
+
+def filter_mainboard_codes(stock_codes: list, stock_dict: dict = None) -> list:
+    """
+    过滤出沪深主板股票（剔除 ST 类、科创板、创业板、北交所）
+
+    规则：
+        1. 代码前缀白名单（见 _MAINBOARD_CODE_PREFIXES），天然排除
+           科创板/创业板/北交所等非主板代码
+        2. 股票名称含 "ST"（覆盖 *ST、ST、S*ST、SST）则剔除；
+           无名称信息时跳过名称过滤（尽力而为）
+
+    参数：
+        stock_codes: 股票代码列表
+        stock_dict: 代码到名称的映射（可选，用于 ST 名称过滤）
+
+    返回：
+        过滤后的股票代码列表
+    """
+    result = []
+    for code in stock_codes:
+        if not str(code).startswith(_MAINBOARD_CODE_PREFIXES):
+            continue
+        name = (stock_dict or {}).get(code, '')
+        if name and 'ST' in str(name).upper():
+            continue
+        result.append(code)
+    return result
+
+
 class DataInitializer:
     """数据初始化器"""
     
@@ -552,16 +586,18 @@ class DataInitializer:
     
     def init_full_data(self, max_stocks: Optional[int] = None, years: int = 3,
                        incremental: bool = False, stock_dict: dict = None,
-                       stock_codes: list = None) -> None:
+                       stock_codes: list = None, mainboard_only: bool = False) -> None:
         """
         统一的初始化入口，支持全量和增量两种模式
-        
+
         参数：
             max_stocks: 最多初始化多少只股票（None 表示全部）
             years: 获取K线数据的年份数（默认 3 年）
             incremental: 是否仅初始化新增股票（默认 False，全量初始化）
             stock_dict: 预获取的股票代码到名称的映射字典（可选，避免重复拉取）
             stock_codes: 直接传入股票代码列表（可选，跳过API拉取步骤）
+            mainboard_only: 仅初始化沪深主板股票（剔除 ST 类、科创板、
+                创业板、北交所），默认 False 全市场
         """
         mode = "增量" if incremental else "全量"
         logger.info(f"开始{mode}初始化数据...")
@@ -591,6 +627,15 @@ class DataInitializer:
                     pass
                 stock_codes = [c for c in stock_codes if c not in existing_stocks]
                 logger.info(f"增量模式: 发现 {len(stock_codes)} 只新股票")
+
+            # 仅沪深主板：剔除 ST 类、科创板、创业板、北交所
+            if mainboard_only:
+                before = len(stock_codes)
+                stock_codes = filter_mainboard_codes(stock_codes, all_stocks)
+                logger.info(
+                    f"仅沪深主板模式: {before} 只过滤后剩余 {len(stock_codes)} 只"
+                    f"（剔除 ST 类、科创板、创业板、北交所）"
+                )
             
             # 限制股票数量
             if max_stocks:

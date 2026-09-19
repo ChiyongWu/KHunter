@@ -2588,9 +2588,10 @@ def start_reinit():
     请求体（可选）：
         {
             'stockCount': 2000,
-            'klineDays': 250
+            'klineDays': 250,
+            'options': {'mainboardOnly': true}
         }
-    
+
     返回：
         任务信息
     """
@@ -2598,8 +2599,9 @@ def start_reinit():
         data = request.get_json() or {}
         stock_count = data.get('stockCount')
         kline_days = data.get('klineDays')
-        
-        result = data_collection_service.start_reinit(stock_count, kline_days)
+        options = data.get('options', {})
+
+        result = data_collection_service.start_reinit(stock_count, kline_days, options)
         return jsonify(result)
     except Exception as e:
         logger.error(f"启动重新初始化失败: {str(e)}")
