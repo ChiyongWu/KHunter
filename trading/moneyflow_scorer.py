@@ -955,12 +955,12 @@ class MoneyflowScorer:
         """
         logger.debug(f"开始计算资金面得分: {stock_code}, 日期: {score_date}")
 
-        # 检查是否为交易日
-        from utils.trade_date_utils import is_trading_day
+        # 检查是否为交易日（非交易日回退到最近交易日，资金流向/北向资金均为交易日数据）
+        from utils.trade_date_utils import is_trading_day, get_previous_trading_day
         if not is_trading_day(score_date):
-            logger.debug(f"日期 {score_date} 不是交易日，跳过资金面评分")
-            detail = MoneyflowDetail()
-            return 0, detail
+            latest = get_previous_trading_day(score_date)
+            logger.info(f"日期 {score_date} 不是交易日，回退到最近交易日 {latest} 计算资金面评分")
+            score_date = latest
 
         # 初始化详情对象
         detail = MoneyflowDetail()

@@ -294,6 +294,13 @@ class TechnicalScorer:
 
         # 统一日期格式
         formatted_date = self._format_date(score_date)
+
+        # 非交易日回退到最近交易日（选股记录按交易日落库，周六/周日查询当天会漏掉周五记录）
+        from utils.trade_date_utils import is_trading_day, get_previous_trading_day
+        if not is_trading_day(formatted_date):
+            latest = get_previous_trading_day(formatted_date)
+            logger.info(f"日期 {formatted_date} 不是交易日，回退到最近交易日 {latest} 计算技术面评分")
+            formatted_date = self._format_date(latest)
         
         # 如果没有传入策略列表，从数据库查询
         if hit_strategies is None:

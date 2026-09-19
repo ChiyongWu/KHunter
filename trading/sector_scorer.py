@@ -724,12 +724,12 @@ class SectorScorer:
         """
         logger.debug(f"开始计算板块强度得分: {stock_code}, 日期: {score_date}")
 
-        # 检查是否为交易日
-        from utils.trade_date_utils import is_trading_day
+        # 检查是否为交易日（非交易日回退到最近交易日，板块行情/资金流向均为交易日数据）
+        from utils.trade_date_utils import is_trading_day, get_previous_trading_day
         if not is_trading_day(score_date):
-            logger.debug(f"日期 {score_date} 不是交易日，跳过板块强度评分")
-            detail = SectorDetail()
-            return 0, detail
+            latest = get_previous_trading_day(score_date)
+            logger.info(f"日期 {score_date} 不是交易日，回退到最近交易日 {latest} 计算板块强度")
+            score_date = latest
 
         # 初始化详情对象
         detail = SectorDetail()
