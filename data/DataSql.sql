@@ -768,6 +768,9 @@ CREATE TABLE IF NOT EXISTS khunter (
     -- industry: 所属行业，类型VARCHAR(50)，可选，例如银行
     sector VARCHAR(50),
     -- sector: 所属板块，类型VARCHAR(50)，可选，例如金融
+    key_date DATE,
+    -- key_date: 关键日，类型DATE，可选，格式YYYY-MM-DD
+    -- 说明：形态实际形成的日期（如金叉日、涨停日），与选入日期 hunting_date 区分
     hunting_date DATE NOT NULL,
     -- hunting_date: 选入日期，类型DATE，必填，格式YYYY-MM-DD
     -- 说明：股票被系统选入股票池的日期（T+N日）
