@@ -167,6 +167,7 @@ function renderHotSectors(result) {
                         <th>板块名称</th>
                         <th style="${headerStyle('pct_chg')}" onclick="sortHotSectors('pct_chg')">涨幅${sortArrow('pct_chg')}</th>
                         <th style="${headerStyle('ytd_pct_chg')}" onclick="sortHotSectors('ytd_pct_chg')">年内涨幅${sortArrow('ytd_pct_chg')}</th>
+                        <th style="${headerStyle('prev_year_pct_chg')}" onclick="sortHotSectors('prev_year_pct_chg')">上一年涨幅${sortArrow('prev_year_pct_chg')}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -186,6 +187,7 @@ function renderHotSectors(result) {
                 </td>
                 <td style="text-align: right;">${formatPctChg(sector.pct_chg)}</td>
                 <td style="text-align: right;">${formatPctChg(sector.ytd_pct_chg)}</td>
+                <td style="text-align: right;">${formatPctChg(sector.prev_year_pct_chg)}</td>
             </tr>
         `;
     });
@@ -259,10 +261,10 @@ export async function loadHotSectors(type = hotSectorType, page = 1) {
 
 /**
  * 切换热门板块排序（点击表头触发）：同列翻转升降序，异列则该列降序，并回到第 1 页
- * @param {string} col - 排序字段：pct_chg 当日涨幅 / ytd_pct_chg 年内涨幅
+ * @param {string} col - 排序字段：pct_chg 当日涨幅 / ytd_pct_chg 年内涨幅 / prev_year_pct_chg 上一年涨幅
  */
 export function sortHotSectors(col) {
-    if (col !== 'pct_chg' && col !== 'ytd_pct_chg') {
+    if (col !== 'pct_chg' && col !== 'ytd_pct_chg' && col !== 'prev_year_pct_chg') {
         return;
     }
     if (hotSectorSortBy === col) {

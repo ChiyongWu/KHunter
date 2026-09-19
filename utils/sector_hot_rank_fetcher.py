@@ -3,16 +3,16 @@
 """
 热门板块数据采集器
 
-通过 Tushare 通达信接口抓取板块行情（含年初至今涨跌幅），写入 sector_hot_rank 表，
+通过 Tushare 通达信接口抓取板块行情（含年初至今涨跌幅、上一年涨跌幅），写入 sector_hot_rank 表，
 供仪表盘"热门板块"卡片展示最近交易日的热门概念/行业板块。
 
-数据源（每个交易日约 2 次请求）：
+数据源（每个交易日约 3 次请求，含 1 次上一年年末行情）：
 - tdx_index  板块清单（idx_type 概念板块/行业板块）
 - tdx_daily  板块日行情（pct_change 当日涨跌幅、ytd 年初至今涨跌幅%）
 """
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -59,7 +59,10 @@ class SectorHotRankFetcher:
                 logger.warning(f"热门板块数据不完整（trade_date={trade_date}），跳过本次落库")
                 return 0
 
-            return self._merge_and_store(trade_date, df_index, df_daily)
+            # 上一年涨幅为增强字段：获取失败仅置空，不阻塞主流程落库
+            prev_year_map = self._fetch_prev_year_ytd(ts_date)
+
+            return self._merge_and_store(trade_date, df_index, df_daily, prev_year_map)
         except Exception as e:
             logger.error(f"热门板块数据落库失败: {trade_date}, {e}")
             return 0
@@ -93,8 +96,42 @@ class SectorHotRankFetcher:
             logger.error(f"获取板块行情失败: {ts_date}, {e}")
             return None
 
+    def _fetch_prev_year_ytd(self, ts_date: str) -> Optional[dict]:
+        """
+        获取上一年自然年涨跌幅：取上一年年末最近交易日的 ytd（年末年初至今 = 上一年全年涨跌幅）
+
+        从上一年 12 月 31 日起最多回溯 10 个自然日寻找有数据的交易日。
+
+        Returns:
+            {ts_code: 上一年涨跌幅}；获取失败返回 None（不阻塞主流程落库）
+        """
+        try:
+            pro = get_tushare_pro()
+            if pro is None:
+                logger.warning("未配置Tushare api_key，上一年涨幅置空")
+                return None
+            year_end = date(int(ts_date[:4]) - 1, 12, 31)
+            for offset in range(10):
+                day = (year_end - timedelta(days=offset)).strftime('%Y%m%d')
+                _tushare_limiter.wait_if_needed()
+                df = pro.tdx_daily(trade_date=day)
+                if df is not None and not df.empty and 'ytd' in df.columns:
+                    result = {
+                        str(row.get('ts_code', '')).strip(): float(row['ytd'])
+                        for _, row in df.iterrows() if pd.notna(row.get('ytd'))
+                    }
+                    if result:
+                        logger.info(f"上一年涨幅基准日: {day}, {len(result)} 个板块")
+                        return result
+            logger.warning(f"上一年年末行情获取失败（trade_date={ts_date}），上一年涨幅置空")
+            return None
+        except Exception as e:
+            logger.warning(f"上一年涨幅获取失败: {ts_date}, {e}")
+            return None
+
     def _merge_and_store(self, trade_date: str, df_index: pd.DataFrame,
-                         df_daily: pd.DataFrame) -> int:
+                         df_daily: pd.DataFrame,
+                         prev_year_map: Optional[dict] = None) -> int:
         """按板块代码拼装清单与行情并写入数据库"""
         # 板块代码 → (名称, 类型)
         index_map = {}
@@ -131,6 +168,7 @@ class SectorHotRankFetcher:
                 pct_chg = float(pct_val) if pd.notna(pct_val) else 0.0
                 ytd_val = row.get('ytd')
                 ytd_pct_chg = float(ytd_val) if pd.notna(ytd_val) else None
+                prev_year_pct_chg = (prev_year_map or {}).get(code)
 
                 # 同一交易日重跑按 UNIQUE(trade_date, sector_code) 覆盖更新
                 check_sql = """
@@ -142,23 +180,24 @@ class SectorHotRankFetcher:
                     update_sql = """
                         UPDATE sector_hot_rank
                         SET sector_name = ?, sector_type = ?, pct_chg = ?,
-                            ytd_pct_chg = ?, main_net_flow = NULL, created_date = ?
+                            ytd_pct_chg = ?, prev_year_pct_chg = ?,
+                            main_net_flow = NULL, created_date = ?
                         WHERE trade_date = ? AND sector_code = ?
                     """
                     self.db_manager.execute_with_retry(update_sql, (
-                        name, sec_type, pct_chg, ytd_pct_chg, now_str,
-                        trade_date, code
+                        name, sec_type, pct_chg, ytd_pct_chg, prev_year_pct_chg,
+                        now_str, trade_date, code
                     ))
                 else:
                     insert_sql = """
                         INSERT INTO sector_hot_rank
                         (trade_date, sector_code, sector_name, sector_type,
-                         pct_chg, ytd_pct_chg, main_net_flow, created_date)
-                        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                         pct_chg, ytd_pct_chg, prev_year_pct_chg, main_net_flow, created_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
                     """
                     self.db_manager.execute_with_retry(insert_sql, (
                         trade_date, code, name, sec_type,
-                        pct_chg, ytd_pct_chg, now_str
+                        pct_chg, ytd_pct_chg, prev_year_pct_chg, now_str
                     ))
                 saved_count += 1
 

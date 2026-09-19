@@ -988,6 +988,8 @@ CREATE TABLE IF NOT EXISTS sector_hot_rank (
     -- pct_chg: 板块涨跌幅，百分比，例如1.27
     ytd_pct_chg REAL,
     -- ytd_pct_chg: 年初至今涨跌幅%，例如30.5表示涨30.5%、-41.2表示跌41.2%
+    prev_year_pct_chg REAL,
+    -- prev_year_pct_chg: 上一年（自然年）涨跌幅%，例如18.2表示上一年全年涨18.2%
     main_net_flow REAL,
     -- main_net_flow: 主力净流入额，单位元，例如208000000
     created_date DATETIME,

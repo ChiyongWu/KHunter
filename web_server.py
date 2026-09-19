@@ -409,7 +409,7 @@ def get_hot_sectors():
 
         # 排序字段与方向（白名单校验后拼接，防注入）
         sort_by = request.args.get('sort_by', 'pct_chg')
-        if sort_by not in ('pct_chg', 'ytd_pct_chg'):
+        if sort_by not in ('pct_chg', 'ytd_pct_chg', 'prev_year_pct_chg'):
             sort_by = 'pct_chg'
         sort_order = request.args.get('sort_order', 'desc')
         if sort_order not in ('asc', 'desc'):
@@ -433,10 +433,10 @@ def get_hot_sectors():
         total_pages = (total + page_size - 1) // page_size
 
         rows = db_manager.query(f"""
-            SELECT sector_code, sector_name, pct_chg, ytd_pct_chg
+            SELECT sector_code, sector_name, pct_chg, ytd_pct_chg, prev_year_pct_chg
             FROM sector_hot_rank
             WHERE trade_date = ? AND sector_type = ?
-            ORDER BY {sort_by} {sort_order}
+            ORDER BY ({sort_by} IS NULL), {sort_by} {sort_order}
             LIMIT ? OFFSET ?
         """, (trade_date, sector_type, page_size, (page - 1) * page_size))
 
@@ -447,7 +447,8 @@ def get_hot_sectors():
                 'sector_code': r['sector_code'],
                 'sector_name': r['sector_name'],
                 'pct_chg': r['pct_chg'],
-                'ytd_pct_chg': r['ytd_pct_chg']
+                'ytd_pct_chg': r['ytd_pct_chg'],
+                'prev_year_pct_chg': r['prev_year_pct_chg']
             })
 
         return jsonify({

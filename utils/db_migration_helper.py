@@ -195,7 +195,8 @@ class DatabaseMigrationHelper:
         """
         迁移 sector_hot_rank 表：
         1. 添加 ytd_pct_chg 列（年初至今涨跌幅，通达信数据源）
-        2. 清理旧的同花顺 .TI 板块数据（数据源已切换为通达信 .TDX）
+        2. 添加 prev_year_pct_chg 列（上一年自然年涨跌幅）
+        3. 清理旧的同花顺 .TI 板块数据（数据源已切换为通达信 .TDX）
 
         Returns:
             bool: 如果迁移成功或无需迁移则返回 True
@@ -224,6 +225,15 @@ class DatabaseMigrationHelper:
                 logger.info("✓ ytd_pct_chg 列已成功添加到 sector_hot_rank 表")
             else:
                 logger.info("✓ sector_hot_rank 表已有 ytd_pct_chg 列")
+
+            # 添加 prev_year_pct_chg 列
+            if 'prev_year_pct_chg' not in col_names:
+                logger.info("正在为 sector_hot_rank 表添加 prev_year_pct_chg 列...")
+                cursor.execute("ALTER TABLE sector_hot_rank ADD COLUMN prev_year_pct_chg REAL")
+                conn.commit()
+                logger.info("✓ prev_year_pct_chg 列已成功添加到 sector_hot_rank 表")
+            else:
+                logger.info("✓ sector_hot_rank 表已有 prev_year_pct_chg 列")
 
             # 清理旧的同花顺 .TI 数据（数据源已切换为通达信 .TDX）
             cursor.execute("SELECT COUNT(*) FROM sector_hot_rank WHERE sector_code LIKE '%.TI'")
@@ -338,7 +348,7 @@ def ensure_database_schema(db_path: str = 'data/stock_selection.db') -> bool:
     # 检查并添加 buy_range 列
     success = helper.check_and_add_khunter_buy_range_column() and success
 
-    # 迁移 sector_hot_rank 表（ytd_pct_chg 列 + 清理 .TI 旧数据）
+    # 迁移 sector_hot_rank 表（ytd/上一年涨幅列 + 清理 .TI 旧数据）
     success = helper.check_and_migrate_sector_hot_rank_ytd() and success
     
     # 打印迁移状态
