@@ -122,7 +122,8 @@ class DataInitializer:
 
         策略：
         - 已有 K 线数据：委派给 KlineUpdater 执行增量更新（与日常更新流程一致）
-        - 无 K 线数据：TickFlow 优先全量拉取，智能降级 + 自动恢复
+        - 无 K 线数据：tushare 中转站优先全量拉取，失败降级 TickFlow，再降级腾讯财经
+          （智能降级 + 自动恢复）
 
         参数：
             stock_codes: 股票代码列表
@@ -160,7 +161,19 @@ class DataInitializer:
             except Exception:
                 last_update_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
 
-            target_date = datetime.now().strftime('%Y-%m-%d')
+            # 目标更新日期复用交易时间校验器的交易日语义（与日常更新流程一致）：
+            # 非交易日（周末/节假日）取最近一个交易日。若直接用自然日，
+            # 周末/节假日当日在任何数据源都不存在K线，就绪探测会永远判
+            # "数据源尚未就绪"而跳过本次更新
+            try:
+                from utils.trading_time_validator import TradingTimeValidator
+                _, _, target_date = TradingTimeValidator().validate_update_time()
+                if not target_date:
+                    target_date = datetime.now().strftime('%Y-%m-%d')
+            except Exception:
+                target_date = datetime.now().strftime('%Y-%m-%d')
+            logger.info(f"目标更新日期: {target_date}")
+
             self._report_progress(progress_start, "正在增量更新K线数据...")
 
             from utils.kline_updater import KlineUpdater
@@ -186,6 +199,12 @@ class DataInitializer:
         total_inserted = 0
         # fallback_mode: 是否已降级到腾讯财经
         fallback_mode = False
+        # tushare 中转站状态：全量拉取失败达阈值后本轮初始化禁用（直接走 TickFlow/腾讯链）
+        tushare_disabled = False
+        # tushare 全量缓存：None=未拉取；dict=已拉取。全量初始化只做一次
+        # "按交易日覆盖全市场"的拉取（交易日数×2 次调用），后续批次直接切片，
+        # 避免逐只模式（股票数×2 次调用）在 5000+ 只场景多花 7 倍调用量
+        ts_full_cache = None
         # 连续 TickFlow 失败计数（用于判断是否永久降级）
         consecutive_tf_fails = 0
         # 连续 3 次失败才永久降级
@@ -201,8 +220,8 @@ class DataInitializer:
 
         logger.info("=" * 60)
         logger.info(f"K线初始化开始（全量）| 股票: {total} 只 | 年份: {years}年 | 批次大小: {batch_size}")
-        logger.info(f"数据源策略: TickFlow 优先(批间 3s 延迟) → TickFlow 失败重试(30s) → 腾讯财经降级(2线程)")
-        logger.info(f"永久降级阈值: 连续 {TF_PERMANENT_THRESHOLD} 次 TickFlow 失败")
+        logger.info(f"数据源策略: tushare中转站优先(pro.daily批量) → TickFlow 优先(批间 3s 延迟) → TickFlow 失败重试(30s) → 腾讯财经降级(2线程)")
+        logger.info(f"永久降级阈值: tushare 全量拉取失败 1 次即禁用 | TickFlow 连续 {TF_PERMANENT_THRESHOLD} 次失败")
         logger.info("=" * 60)
 
         try:
@@ -212,8 +231,42 @@ class DataInitializer:
                 batch_codes = stock_codes[batch_idx:batch_idx + batch_size]
                 batch_num = batch_idx // batch_size + 1
 
+                # ============ 步骤0: tushare 中转站优先 ============
+                # 全量场景只在首个批次做一次"按交易日覆盖全市场"的拉取并缓存，
+                # 之后所有批次从缓存切片，不再逐批请求中转站
+                use_tushare_result = False
+                if not tushare_disabled:
+                    if ts_full_cache is None:
+                        logger.info(
+                            f"tushare 中转站: 全量按交易日一次性拉取 {total} 只 × {days} 条，"
+                            f"预计约 {days * 2} 次接口调用…"
+                        )
+                        ts_full_cache, ts_ok = self.stock_data_fetcher._fetch_stock_batch_tushare(
+                            stock_codes, days=days
+                        )
+                        if not ts_ok:
+                            ts_full_cache = {}
+                            tushare_disabled = True
+                            logger.warning(
+                                "tushare 中转站不可用，本轮初始化全程走 TickFlow/腾讯链"
+                            )
+                        else:
+                            logger.info(
+                                f"tushare 全量拉取完成: {len(ts_full_cache)}/{total} 只有数据"
+                            )
+                    if ts_full_cache:
+                        kline_dict = {
+                            c: ts_full_cache[c] for c in batch_codes if c in ts_full_cache
+                        }
+                        use_tushare_result = True
+                        logger.debug(
+                            f"批次{batch_num}: tushare 中转站命中 {len(kline_dict)}/{len(batch_codes)} 只"
+                        )
+
                 # ============ 步骤1: 选择数据源获取 K 线 ============
-                if not fallback_mode:
+                if use_tushare_result:
+                    pass   # tushare 已获取本批数据
+                elif not fallback_mode:
                     # ---------- TickFlow 优先模式 ----------
                     kline_dict, api_ok = self.stock_data_fetcher._fetch_stock_batch_tickflow(
                         batch_codes, days=days
@@ -370,7 +423,9 @@ class DataInitializer:
                 # 每批次输出进度日志
                 completed = min(batch_idx + len(batch_codes), total)
                 progress_pct = completed / total * 100
-                if fallback_mode:
+                if use_tushare_result:
+                    mode_label = "[tushare中转站]"
+                elif fallback_mode:
                     mode_label = "[腾讯财经降级]"
                 elif consecutive_tf_fails > 0:
                     mode_label = f"[TickFlow(重试{consecutive_tf_fails}次)]"
