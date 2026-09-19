@@ -235,7 +235,9 @@ class MarketTemperatureDAO:
             是否删除成功
         """
         try:
-            self.db.execute('DELETE FROM market_temperature WHERE trade_date = ?', (trade_date,))
+            # execute 不 commit，需显式事务避免悬挂写事务与数据不落盘
+            with self.db.transaction():
+                self.db.execute('DELETE FROM market_temperature WHERE trade_date = ?', (trade_date,))
             logger.info(f"删除市场温度数据: {trade_date}")
             return True
         except Exception as e:

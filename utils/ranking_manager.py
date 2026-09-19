@@ -529,19 +529,16 @@ class RankingManager:
             # 0. 清除旧的评分数据（强制重新计算时）
             if force_recalculate:
                 try:
-                    # 清除 stock_score 表中该日期的数据
-                    delete_score_sql = "DELETE FROM stock_score WHERE score_date = ?"
-                    self.db_manager.execute_with_retry(delete_score_sql, (selection_date,))
-                    logger.info(f"已清除 {selection_date} 的旧评分数据")
-                    
-                    # 清除 stock_score_detail 表中该日期的数据
-                    delete_detail_sql = "DELETE FROM stock_score_detail WHERE score_date = ?"
-                    self.db_manager.execute_with_retry(delete_detail_sql, (selection_date,))
-                    logger.info(f"已清除 {selection_date} 的旧评分详情数据")
-                    
-                    # 提交删除操作
-                    conn = self.db_manager.connect()
-                    conn.commit()
+                    with self.db_manager.transaction():
+                        # 清除 stock_score 表中该日期的数据
+                        delete_score_sql = "DELETE FROM stock_score WHERE score_date = ?"
+                        self.db_manager.execute_with_retry(delete_score_sql, (selection_date,))
+                        logger.info(f"已清除 {selection_date} 的旧评分数据")
+                        
+                        # 清除 stock_score_detail 表中该日期的数据
+                        delete_detail_sql = "DELETE FROM stock_score_detail WHERE score_date = ?"
+                        self.db_manager.execute_with_retry(delete_detail_sql, (selection_date,))
+                        logger.info(f"已清除 {selection_date} 的旧评分详情数据")
                 except Exception as e:
                     logger.warning(f"清除旧数据失败: {e}")
             
@@ -597,13 +594,14 @@ class RankingManager:
                     # 获取最佳板块
                     sector = self._get_best_sector(stock_code, selection_date)
                     
-                    # 更新数据库
+                    # 更新数据库（单条事务，远程评分计算不占写锁）
                     update_sql = """
                         UPDATE stock_selection_record 
                         SET score = ?, sector = ? 
                         WHERE id = ?
                     """
-                    cursor = self.db_manager.execute_with_retry(update_sql, (score, sector, record_id))
+                    with self.db_manager.transaction():
+                        self.db_manager.execute_with_retry(update_sql, (score, sector, record_id))
                     logger.debug(f"更新评分成功: ID={record_id}, 股票={stock_code}, 评分={score}, 板块={sector}")
                     recalculated_count += 1
                     
@@ -611,15 +609,7 @@ class RankingManager:
                     logger.error(f"重新计算评分失败: {stock_code}({stock_name}) - {str(e)}")
                     failed_count += 1
             
-            # 3. 提交事务
-            try:
-                conn = self.db_manager.connect()
-                conn.commit()
-                logger.debug("评分更新事务提交成功")
-            except Exception as e:
-                logger.error(f"事务提交失败: {e}")
-            
-            # 4. 重新生成排名
+            # 3. 重新生成排名
             try:
                 # 查询所有有评分的股票
                 all_stocks_sql = """
@@ -633,21 +623,16 @@ class RankingManager:
                 """
                 all_stocks = self.db_manager.query(all_stocks_sql, (selection_date,))
                 
-                # 重新分配排名
-                for i, stock in enumerate(all_stocks, 1):
-                    update_rank_sql = """
-                        UPDATE stock_selection_record 
-                        SET rank_position = ? 
-                        WHERE id = ?
-                    """
-                    try:
+                # 重新分配排名（整体事务，保证排名原子性：全部成功或全部回滚）
+                with self.db_manager.transaction():
+                    for i, stock in enumerate(all_stocks, 1):
+                        update_rank_sql = """
+                            UPDATE stock_selection_record 
+                            SET rank_position = ? 
+                            WHERE id = ?
+                        """
                         self.db_manager.execute_with_retry(update_rank_sql, (i, stock['id']))
-                    except Exception as e:
-                        logger.error(f"更新排名失败: {stock['id']} - {e}")
                 
-                # 提交排名更新
-                conn = self.db_manager.connect()
-                conn.commit()
                 logger.info(f"已重新生成排名，共 {len(all_stocks)} 只股票")
                 
             except Exception as e:

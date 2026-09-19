@@ -308,6 +308,9 @@ class FundFlowFetcher(DataFetcher):
         saved_count = 0
         
         try:
+            # 整批写入使用显式事务：execute_with_retry 不 commit，
+            # 若不手动管理会导致悬挂写事务（database is locked + 数据不落盘）
+            self.db_manager.begin_transaction()
             # 遍历数据并保存到数据库
             for idx, row in df_flow.iterrows():
                 try:
@@ -380,9 +383,14 @@ class FundFlowFetcher(DataFetcher):
                 except Exception as e:
                     logger.debug(f"保存行业 {row.get('ts_code', '')} 的资金流向数据失败: {e}")
             
+            self.db_manager.commit()
             logger.info(f"行业资金流向数据保存完成: {saved_count} 条")
         
         except Exception as e:
+            try:
+                self.db_manager.rollback()
+            except Exception:
+                pass
             logger.error(f"保存行业资金流向数据失败: {e}")
         
         return saved_count
@@ -432,6 +440,9 @@ class FundFlowFetcher(DataFetcher):
         saved_count = 0
         
         try:
+            # 整批写入使用显式事务：execute_with_retry 不 commit，
+            # 若不手动管理会导致悬挂写事务（database is locked + 数据不落盘）
+            self.db_manager.begin_transaction()
             # 遍历数据并保存到数据库
             for idx, row in df_flow.iterrows():
                 try:
@@ -503,9 +514,14 @@ class FundFlowFetcher(DataFetcher):
                 except Exception as e:
                     logger.debug(f"保存板块 {row.get('ts_code', '')} 的资金流向数据失败: {e}")
             
+            self.db_manager.commit()
             logger.info(f"板块资金流向数据保存完成: {saved_count} 条")
         
         except Exception as e:
+            try:
+                self.db_manager.rollback()
+            except Exception:
+                pass
             logger.error(f"保存板块资金流向数据失败: {e}")
         
         return saved_count

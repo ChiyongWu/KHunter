@@ -297,6 +297,9 @@ class FundFlowUpdater:
         failed = 0
         
         try:
+            # DELETE + 批量插入放在同一事务中：execute_with_retry 不 commit，
+            # 需显式管理事务避免悬挂写事务与数据不落盘
+            self.db_manager.begin_transaction()
             logger.info(f"更新个股资金流向: 获取最近 {days} 天的数据...")
             
             # 计算时间范围
@@ -325,6 +328,7 @@ class FundFlowUpdater:
                 logger.warning(f"获取个股资金流向数据失败或无数据")
                 failed = 1
             
+            self.db_manager.commit()
             return {
                 'added': added,
                 'updated': updated,
@@ -332,6 +336,10 @@ class FundFlowUpdater:
             }
         
         except Exception as e:
+            try:
+                self.db_manager.rollback()
+            except Exception:
+                pass
             logger.error(f"更新个股资金流向失败: {str(e)}")
             return {
                 'added': added,
@@ -360,6 +368,9 @@ class FundFlowUpdater:
         failed = 0
         
         try:
+            # DELETE + 批量插入放在同一事务中：execute_with_retry 不 commit，
+            # 需显式管理事务避免悬挂写事务与数据不落盘
+            self.db_manager.begin_transaction()
             logger.info(f"更新行业资金流向: 获取最近 {days} 天的数据...")
             
             # 计算时间范围
@@ -388,6 +399,7 @@ class FundFlowUpdater:
                 logger.warning(f"获取行业资金流向数据失败或无数据")
                 failed = 1
             
+            self.db_manager.commit()
             return {
                 'added': added,
                 'updated': updated,
@@ -395,6 +407,10 @@ class FundFlowUpdater:
             }
         
         except Exception as e:
+            try:
+                self.db_manager.rollback()
+            except Exception:
+                pass
             logger.error(f"更新行业资金流向失败: {str(e)}")
             return {
                 'added': added,
@@ -423,6 +439,9 @@ class FundFlowUpdater:
         failed = 0
         
         try:
+            # DELETE + 批量插入放在同一事务中：execute_with_retry 不 commit，
+            # 需显式管理事务避免悬挂写事务与数据不落盘
+            self.db_manager.begin_transaction()
             logger.info(f"更新板块资金流向: 获取最近 {days} 天的数据...")
             
             # 计算时间范围
@@ -451,6 +470,7 @@ class FundFlowUpdater:
                 logger.warning(f"获取板块资金流向数据失败或无数据")
                 failed = 1
             
+            self.db_manager.commit()
             return {
                 'added': added,
                 'updated': updated,
@@ -458,6 +478,10 @@ class FundFlowUpdater:
             }
         
         except Exception as e:
+            try:
+                self.db_manager.rollback()
+            except Exception:
+                pass
             logger.error(f"更新板块资金流向失败: {str(e)}")
             return {
                 'added': added,

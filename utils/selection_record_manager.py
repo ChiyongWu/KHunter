@@ -222,47 +222,43 @@ class SelectionRecordManager:
                     logger.error(f"处理信号失败: {str(e)}")
                     stats['error'] += 1
             
-            # 处理每个股票
-            for stock_info in stock_map.values():
-                try:
-                    stock_code = stock_info['stock_code']
-                    stock_name = stock_info['stock_name']
-                    strategy_name = stock_info['strategy_name']
-                    industry = stock_info['industry']
-                    selection_price = stock_info['selection_price']
-                    key_dates = stock_info['key_dates']
-                    
-                    # 检查是否重复选入
-                    duplicate_info = self.check_duplicate(stock_code, selection_date)
-                    
-                    if duplicate_info['is_duplicate']:
-                        if duplicate_info['should_update']:
-                            # 删除旧记录，保存新记录
-                            self.delete_old_record(stock_code, selection_date)
+            # 处理每个股票（整体事务：DELETE + INSERT 原子提交，异常自动回滚）
+            with self.db_manager.transaction():
+                for stock_info in stock_map.values():
+                    try:
+                        stock_code = stock_info['stock_code']
+                        stock_name = stock_info['stock_name']
+                        strategy_name = stock_info['strategy_name']
+                        industry = stock_info['industry']
+                        selection_price = stock_info['selection_price']
+                        key_dates = stock_info['key_dates']
+                        
+                        # 检查是否重复选入
+                        duplicate_info = self.check_duplicate(stock_code, selection_date)
+                        
+                        if duplicate_info['is_duplicate']:
+                            if duplicate_info['should_update']:
+                                # 删除旧记录，保存新记录
+                                self.delete_old_record(stock_code, selection_date)
+                                self._insert_record(strategy_name, stock_code, stock_name,
+                                                  industry, selection_date, selection_time,
+                                                  selection_price, key_dates, stock_info.get('strategy_count', 1))
+                                stats['updated'] += 1
+                            else:
+                                # 当天内，跳过
+                                stats['skipped'] += 1
+                        else:
+                            # 新股票，直接保存
                             self._insert_record(strategy_name, stock_code, stock_name,
                                               industry, selection_date, selection_time,
                                               selection_price, key_dates, stock_info.get('strategy_count', 1))
-                            stats['updated'] += 1
-                        else:
-                            # 当天内，跳过
-                            stats['skipped'] += 1
-                    else:
-                        # 新股票，直接保存
-                        self._insert_record(strategy_name, stock_code, stock_name,
-                                          industry, selection_date, selection_time,
-                                          selection_price, key_dates, stock_info.get('strategy_count', 1))
-                        stats['saved'] += 1
-                except Exception as e:
-                    logger.error(f"保存股票 {stock_info.get('stock_code')} 失败: {str(e)}")
-                    stats['error'] += 1
+                            stats['saved'] += 1
+                    except Exception as e:
+                        logger.error(f"保存股票 {stock_info.get('stock_code')} 失败: {str(e)}")
+                        stats['error'] += 1
             
             logger.info(f"选股结果保存完成 - 保存: {stats['saved']}, 跳过: {stats['skipped']}, "
                        f"更新: {stats['updated']}, 错误: {stats['error']}")
-            
-            # 统一提交事务，确保所有INSERT操作持久化到数据库
-            if stats['saved'] > 0 or stats['updated'] > 0:
-                conn = self.db_manager.connect()
-                conn.commit()
             
             return {
                 'success': True,

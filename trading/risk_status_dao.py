@@ -242,7 +242,9 @@ class RiskStatusDAO:
             是否删除成功
         """
         try:
-            self.db.execute('DELETE FROM risk_status WHERE date = ?', (date,))
+            # execute 不 commit，需显式事务避免悬挂写事务与数据不落盘
+            with self.db.transaction():
+                self.db.execute('DELETE FROM risk_status WHERE date = ?', (date,))
             logger.info(f"删除风控状态: {date}")
             return True
         except Exception as e:
