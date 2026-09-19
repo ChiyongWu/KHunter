@@ -400,6 +400,14 @@ class AKShareFetcher:
                 'kline_updated': kline_result.get('updated', 0),
             })
 
+        # 第6步：更新热门板块数据（独立落库，失败不阻塞K线更新结果）
+        try:
+            from utils.sector_hot_rank_fetcher import SectorHotRankFetcher
+            hot_rank_saved = SectorHotRankFetcher(self.db_manager).fetch_and_store(target_date)
+            logger.info(f"热门板块数据更新完成: {hot_rank_saved} 条")
+        except Exception as e:
+            logger.warning(f"热门板块数据更新失败（不影响主流程）: {e}")
+
         return {
             'success': kline_result.get('success', False),
             'skipped': source_not_ready,
