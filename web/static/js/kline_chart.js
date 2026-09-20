@@ -75,7 +75,7 @@ function initKlineChart(containerId, rawData) {
             viewStart: 0,
             viewEnd: formatted.candleData.length,
             layout: null,                       // 绘制布局参数（十字光标用）
-            subIndicator: 'volume',             // 副图当前指标：volume / macd / kdj
+            subIndicator: 'volume',             // 副图当前指标：volume / macd / kdj / rsi
             showBOLL: false,                    // BOLL布林带主图叠加开关
         };
 
@@ -95,6 +95,7 @@ function initKlineChart(containerId, rawData) {
                         <button type="button" data-sub="volume" class="active" title="副图显示成交量">成交量</button>
                         <button type="button" data-sub="macd" title="副图显示MACD">MACD</button>
                         <button type="button" data-sub="kdj" title="副图显示KDJ">KDJ</button>
+                        <button type="button" data-sub="rsi" title="副图显示RSI">RSI</button>
                     </div>
                     <button type="button" class="kline-boll-btn" title="布林带叠加显示在K线主图">BOLL</button>
                 </div>
@@ -181,6 +182,9 @@ function initKlineChart(containerId, rawData) {
                 bollMidArr: f.bollMidArr.slice(s, e),
                 bollUpperArr: f.bollUpperArr.slice(s, e),
                 bollLowerArr: f.bollLowerArr.slice(s, e),
+                rsi6Arr: f.rsi6Arr.slice(s, e),
+                rsi12Arr: f.rsi12Arr.slice(s, e),
+                rsi24Arr: f.rsi24Arr.slice(s, e),
             };
             state.layout = drawKlineChart(ctx, mainCanvas, viewData, w, h, {
                 subIndicator: state.subIndicator,
@@ -463,6 +467,9 @@ function initKlineChart(containerId, rawData) {
             const bMid = state.formatted.bollMidArr[state.viewStart + idx];
             const bUp = state.formatted.bollUpperArr[state.viewStart + idx];
             const bLow = state.formatted.bollLowerArr[state.viewStart + idx];
+            const r6 = state.formatted.rsi6Arr[state.viewStart + idx];
+            const r12 = state.formatted.rsi12Arr[state.viewStart + idx];
+            const r24 = state.formatted.rsi24Arr[state.viewStart + idx];
             tooltipIndexCache = idx; // 同步成交量索引（findVolume 依赖）
 
             const row = (label, value, cls = '') =>
@@ -488,6 +495,11 @@ function initKlineChart(containerId, rawData) {
                     : '') +
                 (state.subIndicator === 'kdj'
                     ? row('KDJ', `${fmt(k, 1)} / ${fmt(d, 1)} / ${fmt(j, 1)}`)
+                    : '') +
+                (state.subIndicator === 'rsi'
+                    ? row('RSI6', fmt(r6, 1)) +
+                      row('RSI12', fmt(r12, 1)) +
+                      row('RSI24', fmt(r24, 1))
                     : '') +
                 (hoverPrice != null ? row('光标价', hoverPrice.toFixed(2)) : '');
 
@@ -795,6 +807,9 @@ function drawKlineChart(ctx, canvas, viewData, width, height, options = {}) {
     } else if (subIndicator === 'kdj') {
         subYLabel = 'KDJ';
         drawKdjChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleSpacing);
+    } else if (subIndicator === 'rsi') {
+        subYLabel = 'RSI';
+        drawRsiChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleSpacing);
     } else {
         drawVolumeChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleWidth, candleSpacing);
     }
@@ -1089,6 +1104,50 @@ function drawKdjChart(ctx, viewData, padding, startY, height, candleSpacing) {
 }
 
 /**
+ * 绘制RSI副图（RSI6/RSI12/RSI24 三线 + 30/70 超买超卖参考线）
+ * RSI 固定取值范围 0~100
+ */
+function drawRsiChart(ctx, viewData, padding, startY, height, candleSpacing) {
+    const rsi6 = viewData.rsi6Arr || [];
+    const rsi12 = viewData.rsi12Arr || [];
+    const rsi24 = viewData.rsi24Arr || [];
+    if (rsi6.length === 0) return;
+
+    // RSI 固定范围 0~100
+    const minVal = 0;
+    const maxVal = 100;
+    const range = maxVal - minVal;
+
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+    // 30/70 超买超卖参考线
+    [30, 70].forEach(level => {
+        const y = startY + height - ((level - minVal) / range) * height;
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(padding + candleSpacing * rsi6.length, y);
+        ctx.stroke();
+        ctx.fillStyle = '#bbb';
+        ctx.textAlign = 'left';
+        ctx.fillText(String(level), padding + 4, y - 2);
+    });
+
+    // RSI6 / RSI12 / RSI24 三线
+    drawSubLines(ctx, [
+        { arr: rsi6, color: '#2962FF' },
+        { arr: rsi12, color: '#FF6D00' },
+        { arr: rsi24, color: '#9333ea' },
+    ], padding, startY, height, minVal, range, candleSpacing);
+
+    drawSubLegend(ctx, [
+        { label: 'RSI6', color: '#2962FF' },
+        { label: 'RSI12', color: '#FF6D00' },
+        { label: 'RSI24', color: '#9333ea' },
+    ], padding, startY);
+}
+
+/**
  * 绘制BOLL布林带叠加（主图三轨线 + 图例，位于MA图例下方）
  * @param {CanvasRenderingContext2D} ctx - Canvas上下文
  * @param {Object} viewData - 当前视图数据（bollMidArr/bollUpperArr/bollLowerArr）
@@ -1240,6 +1299,9 @@ function formatKlineData(rawData) {
         bollMidArr: mapField('boll_mid'),
         bollUpperArr: mapField('boll_upper'),
         bollLowerArr: mapField('boll_lower'),
+        rsi6Arr: mapField('rsi6'),
+        rsi12Arr: mapField('rsi12'),
+        rsi24Arr: mapField('rsi24'),
     };
 }
 

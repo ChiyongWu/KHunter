@@ -601,10 +601,11 @@ def get_stock_detail(code):
         df = df.sort_values('date', ascending=True).reset_index(drop=True)
         
         # 计算KDJ指标
-        from utils.technical import KDJ, MACD, BOLL
+        from utils.technical import KDJ, MACD, BOLL, RSI
         kdj_df = KDJ(df, n=9, m1=3, m2=3)
         macd_df = MACD(df, fastperiod=12, slowperiod=26, signalperiod=9)
         boll_df = BOLL(df, n=20, p=2)
+        rsi_df = RSI(df, periods=(6, 12, 24))
 
         # 返回全量K线数据（KDJ/MACD/BOLL等指标基于全量计算，保证均线/指标连续性；
         # 展示范围由前端时间范围切换控件控制）
@@ -614,6 +615,7 @@ def get_stock_detail(code):
             kdj_row = kdj_df.iloc[i]
             macd_row = macd_df.iloc[i]
             boll_row = boll_df.iloc[i]
+            rsi_row = rsi_df.iloc[i]
 
             def _round2(val):
                 return round(val, 2) if pd.notna(val) else None
@@ -635,7 +637,10 @@ def get_stock_detail(code):
                 'macd_hist': _round2(macd_row['macd_hist']),
                 'boll_mid': _round2(boll_row['boll_mid']),
                 'boll_upper': _round2(boll_row['boll_upper']),
-                'boll_lower': _round2(boll_row['boll_lower'])
+                'boll_lower': _round2(boll_row['boll_lower']),
+                'rsi6': _round2(rsi_row['rsi6']),
+                'rsi12': _round2(rsi_row['rsi12']),
+                'rsi24': _round2(rsi_row['rsi24'])
             })
 
         return jsonify({

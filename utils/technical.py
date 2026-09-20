@@ -445,6 +445,55 @@ def BOLL(df, n=20, p=2):
     return result
 
 
+def RSI(df, periods=(6, 12, 24)):
+    """
+    RSI指标计算 - 相对强弱指标
+    通达信公式（SMA(X,N,1) = Wilder平滑，alpha=1/N）：
+    LC := REF(CLOSE,1);
+    RSI1 := SMA(MAX(CLOSE-LC,0),N1,1) / SMA(ABS(CLOSE-LC),N1,1) * 100;
+
+    参数：
+        df: DataFrame，必须包含 'close' 列
+        periods: 周期元组，默认 (6, 12, 24)，返回 rsi6/rsi12/rsi24
+    """
+    if df is None or df.empty:
+        empty = {f'rsi{p}': [] for p in periods}
+        return pd.DataFrame(empty, index=df.index if df is not None else [])
+
+    # 检测数据顺序
+    try:
+        is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+    except (IndexError, KeyError):
+        is_descending = False
+
+    # 统一转换为正序计算（从早到晚）
+    if is_descending:
+        df_calc = df.iloc[::-1].copy().reset_index(drop=True)
+    else:
+        df_calc = df.copy().reset_index(drop=True)
+
+    # 涨跌幅（与前一交易日收盘价比较）
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+
+    # Wilder 平滑（alpha=1/n，等价于通达信 SMA(X,n,1)）
+    result = pd.DataFrame(index=df_calc.index)
+    for n in periods:
+        avg_gain = gain.ewm(alpha=1.0 / n, adjust=False, min_periods=1).mean()
+        avg_loss = loss.ewm(alpha=1.0 / n, adjust=False, min_periods=1).mean()
+        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        rsi = 100 - 100 / (1 + rs)
+        result[f'rsi{n}'] = rsi
+
+    # 恢复原始顺序
+    if is_descending:
+        result = result.iloc[::-1].reset_index(drop=True)
+
+    result.index = df.index
+    return result
+
+
 def calculate_price_change(df, method='prev_close'):
     """
     计算价格变化率 - 统一的涨幅计算函数
