@@ -2,10 +2,11 @@
  * K线图表模块 - 使用Canvas绘制
  * 功能：全量K线数据展示、时间范围切换（近1月/近3月/近6月/近1年/全部）、
  *       拖拽框选放大、滚轮以光标为锚点缩放、双击/按钮还原、
- *       十字光标悬停提示、区间涨跌统计、MA均线、成交量
+ *       十字光标悬停提示、区间涨跌统计、MA均线、
+ *       副图指标标签切换（成交量/MACD/KDJ）、BOLL布林带主图叠加
  *
- * 数据契约：后端 /api/stock/<code> 返回全量K线（升序），
- *           展示范围由前端切换控件控制，MA/KDJ 基于全量计算保证连续性
+ * 数据契约：后端 /api/stock/<code> 返回全量K线（升序）+ KDJ/MACD/BOLL 指标值，
+ *           展示范围由前端切换控件控制，指标基于全量计算保证连续性
  */
 
 // 全局变量存储图表实例
@@ -74,18 +75,29 @@ function initKlineChart(containerId, rawData) {
             viewStart: 0,
             viewEnd: formatted.candleData.length,
             layout: null,                       // 绘制布局参数（十字光标用）
+            subIndicator: 'volume',             // 副图当前指标：volume / macd / kdj
+            showBOLL: false,                    // BOLL布林带主图叠加开关
         };
 
-        // 构建DOM结构：工具条 + 图表区（主画布/悬浮层/提示框）
+        // 构建DOM结构：工具条（范围切换 + 副图指标 + BOLL开关） + 图表区（主画布/悬浮层/提示框）
         container.innerHTML = `
             <div class="kline-toolbar">
-                <div class="kline-range-group">
-                    ${KLINE_RANGES.map(r =>
-                        `<button type="button" data-range="${r.key}"${r.key === 'all' ? ' class="active"' : ''}>${r.label}</button>`
-                    ).join('')}
+                <div class="kline-toolbar-left">
+                    <div class="kline-range-group">
+                        ${KLINE_RANGES.map(r =>
+                            `<button type="button" data-range="${r.key}"${r.key === 'all' ? ' class="active"' : ''}>${r.label}</button>`
+                        ).join('')}
+                    </div>
+                    <button type="button" class="kline-reset-btn" disabled
+                            title="还原到当前选定的标准范围（也可双击图表）">⤾ 还原</button>
+                    <span class="kline-toolbar-divider"></span>
+                    <div class="kline-range-group kline-sub-group">
+                        <button type="button" data-sub="volume" class="active" title="副图显示成交量">成交量</button>
+                        <button type="button" data-sub="macd" title="副图显示MACD">MACD</button>
+                        <button type="button" data-sub="kdj" title="副图显示KDJ">KDJ</button>
+                    </div>
+                    <button type="button" class="kline-boll-btn" title="布林带叠加显示在K线主图">BOLL</button>
                 </div>
-                <button type="button" class="kline-reset-btn" disabled
-                        title="还原到当前选定的标准范围（也可双击图表）">⤾ 还原</button>
                 <div class="kline-stats" id="kline-range-stats"></div>
             </div>
             <div class="kline-chart-area">
@@ -163,8 +175,17 @@ function initKlineChart(containerId, rawData) {
                 kArr: f.kArr.slice(s, e),
                 dArr: f.dArr.slice(s, e),
                 jArr: f.jArr.slice(s, e),
+                difArr: f.difArr.slice(s, e),
+                deaArr: f.deaArr.slice(s, e),
+                macdHistArr: f.macdHistArr.slice(s, e),
+                bollMidArr: f.bollMidArr.slice(s, e),
+                bollUpperArr: f.bollUpperArr.slice(s, e),
+                bollLowerArr: f.bollLowerArr.slice(s, e),
             };
-            state.layout = drawKlineChart(ctx, mainCanvas, viewData, w, h);
+            state.layout = drawKlineChart(ctx, mainCanvas, viewData, w, h, {
+                subIndicator: state.subIndicator,
+                showBOLL: state.showBOLL,
+            });
         };
 
         // 范围切换按钮事件
@@ -177,6 +198,27 @@ function initKlineChart(containerId, rawData) {
             applyRange(btn.dataset.range);
             resetBtn.disabled = true;   // 回到标准范围后还原按钮失效
             updateStats();
+            drawView();
+            clearCrosshair();
+        });
+
+        // 副图指标切换事件（成交量 / MACD / KDJ）
+        const subGroup = container.querySelector('.kline-sub-group');
+        subGroup.addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-sub]');
+            if (!btn) return;
+            subGroup.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            state.subIndicator = btn.dataset.sub;
+            drawView();
+            clearCrosshair();
+        });
+
+        // BOLL布林带主图叠加开关
+        const bollBtn = container.querySelector('.kline-boll-btn');
+        bollBtn.addEventListener('click', () => {
+            state.showBOLL = !state.showBOLL;
+            bollBtn.classList.toggle('active', state.showBOLL);
             drawView();
             clearCrosshair();
         });
@@ -415,10 +457,17 @@ function initKlineChart(containerId, rawData) {
             const ma5 = state.formatted.ma5Arr[state.viewStart + idx];
             const ma10 = state.formatted.ma10Arr[state.viewStart + idx];
             const ma20 = state.formatted.ma20Arr[state.viewStart + idx];
+            const dif = state.formatted.difArr[state.viewStart + idx];
+            const dea = state.formatted.deaArr[state.viewStart + idx];
+            const mh = state.formatted.macdHistArr[state.viewStart + idx];
+            const bMid = state.formatted.bollMidArr[state.viewStart + idx];
+            const bUp = state.formatted.bollUpperArr[state.viewStart + idx];
+            const bLow = state.formatted.bollLowerArr[state.viewStart + idx];
             tooltipIndexCache = idx; // 同步成交量索引（findVolume 依赖）
 
             const row = (label, value, cls = '') =>
                 `<div class="kline-tooltip-row"><span>${label}</span><span class="${cls}">${value}</span></div>`;
+            const fmt = (v, n = 2) => v != null ? v.toFixed(n) : '-';
 
             tooltipEl.innerHTML =
                 `<div class="kline-tooltip-row kline-tooltip-date">${fmtDate(item.time)}</div>` +
@@ -427,11 +476,19 @@ function initKlineChart(containerId, rawData) {
                 row('低', item.low.toFixed(2)) +
                 row('收', item.close.toFixed(2), pct >= 0 ? 'up' : 'down') +
                 row('涨跌', `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}（${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%）`, pctCls) +
-                row('成交量', formatVolume(findVolume(item.time))) +
-                row('MA5', ma5 != null ? ma5.toFixed(2) : '-') +
-                row('MA10', ma10 != null ? ma10.toFixed(2) : '-') +
-                row('MA20', ma20 != null ? ma20.toFixed(2) : '-') +
-                row('KDJ', `${k != null ? k.toFixed(1) : '-'} / ${d != null ? d.toFixed(1) : '-'} / ${j != null ? j.toFixed(1) : '-'}`) +
+                (state.subIndicator === 'volume' ? row('成交量', formatVolume(findVolume(item.time))) : '') +
+                row('MA5', fmt(ma5)) +
+                row('MA10', fmt(ma10)) +
+                row('MA20', fmt(ma20)) +
+                (state.showBOLL ? row('BOLL', `${fmt(bMid)} / ${fmt(bUp)} / ${fmt(bLow)}`) : '') +
+                (state.subIndicator === 'macd'
+                    ? row('DIF', fmt(dif), dif != null && dif >= 0 ? 'up' : 'down') +
+                      row('DEA', fmt(dea), dea != null && dea >= 0 ? 'up' : 'down') +
+                      row('MACD', fmt(mh), mh != null && mh >= 0 ? 'up' : 'down')
+                    : '') +
+                (state.subIndicator === 'kdj'
+                    ? row('KDJ', `${fmt(k, 1)} / ${fmt(d, 1)} / ${fmt(j, 1)}`)
+                    : '') +
                 (hoverPrice != null ? row('光标价', hoverPrice.toFixed(2)) : '');
 
             // 提示框定位：跟随鼠标，靠近右边界时翻转
@@ -590,9 +647,13 @@ function drawMALegend(ctx, maConfigs, padding) {
  * @param {Object} viewData - 当前视图数据
  * @param {number} width - 绘制宽度
  * @param {number} height - 绘制高度
+ * @param {Object} options - 绘制选项 { subIndicator: 'volume'|'macd'|'kdj', showBOLL: bool }
  * @returns {Object} 布局参数（十字光标定位用）
  */
-function drawKlineChart(ctx, canvas, viewData, width, height) {
+function drawKlineChart(ctx, canvas, viewData, width, height, options = {}) {
+    const subIndicator = options.subIndicator || 'volume';
+    const showBOLL = !!options.showBOLL;
+
     // 获取设备像素比，用于高清显示
     const dpr = window.devicePixelRatio || 1;
     const displayWidth = width;
@@ -620,8 +681,13 @@ function drawKlineChart(ctx, canvas, viewData, width, height) {
     ctx.textRendering = 'optimizeLegibility';
     ctx.imageSmoothingEnabled = true;
 
-    // 获取价格范围
-    const prices = viewData.candleData.map(d => [d.high, d.low]).flat();
+    // 获取价格范围（BOLL开启时把上/下轨纳入，避免轨道线被裁剪）
+    let prices = viewData.candleData.map(d => [d.high, d.low]).flat();
+    if (showBOLL) {
+        [viewData.bollUpperArr, viewData.bollLowerArr, viewData.bollMidArr].forEach(arr => {
+            (arr || []).forEach(v => { if (v != null) prices.push(v); });
+        });
+    }
     const minPrice = Math.min(...prices);
     const maxPrice = Math.max(...prices);
     const priceRange = maxPrice - minPrice || 1;
@@ -716,8 +782,22 @@ function drawKlineChart(ctx, canvas, viewData, width, height) {
     // 绘制均线
     drawMovingAverages(ctx, viewData, padding, klineHeight, adjustedMin, adjustedRange, candleSpacing);
 
-    // 绘制成交量图表
-    drawVolumeChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleWidth, candleSpacing);
+    // BOLL布林带叠加（开关开启时绘制三轨线 + 图例）
+    if (showBOLL) {
+        drawBollBands(ctx, viewData, padding, klineHeight, adjustedMin, adjustedRange, candleSpacing);
+    }
+
+    // 绘制副图（按标签切换：成交量 / MACD / KDJ）
+    let subYLabel = '成交量';
+    if (subIndicator === 'macd') {
+        subYLabel = 'MACD';
+        drawMacdChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleWidth, candleSpacing);
+    } else if (subIndicator === 'kdj') {
+        subYLabel = 'KDJ';
+        drawKdjChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleSpacing);
+    } else {
+        drawVolumeChart(ctx, viewData, padding, volumeStartY, volumeHeight, candleWidth, candleSpacing);
+    }
 
     // 绘制坐标轴
     ctx.strokeStyle = '#333';
@@ -746,11 +826,11 @@ function drawKlineChart(ctx, canvas, viewData, width, height) {
     ctx.fillText('价格 (¥)', 0, 0);
     ctx.restore();
 
-    // 绘制成交量Y轴标签
+    // 绘制副图Y轴标签（随副图指标切换）
     ctx.save();
     ctx.translate(15, volumeStartY + volumeHeight / 2);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText('成交量', 0, 0);
+    ctx.fillText(subYLabel, 0, 0);
     ctx.restore();
 
     // 绘制X轴标签
@@ -831,6 +911,239 @@ function drawVolumeChart(ctx, viewData, padding, volumeStartY, volumeHeight, can
 }
 
 /**
+ * 在副图内绘制折线序列（MACD/KDJ共用）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文
+ * @param {Array} seriesList - 序列配置 [{ arr, color }]
+ * @param {number} padding - 内边距
+ * @param {number} startY - 副图起始Y坐标
+ * @param {number} height - 副图高度
+ * @param {number} minVal - 数据最小值
+ * @param {number} range - 数据范围（max - min）
+ * @param {number} candleSpacing - K线间距
+ */
+function drawSubLines(ctx, seriesList, padding, startY, height, minVal, range, candleSpacing) {
+    seriesList.forEach(config => {
+        if (!config.arr || config.arr.length === 0) return;
+        ctx.strokeStyle = config.color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        let isFirstPoint = true;
+        config.arr.forEach((value, i) => {
+            if (value === null || value === undefined) return;
+            const x = padding + i * candleSpacing + candleSpacing / 2;
+            const y = startY + height - ((value - minVal) / range) * height;
+            if (isFirstPoint) {
+                ctx.moveTo(x, y);
+                isFirstPoint = false;
+            } else {
+                ctx.lineTo(x, y);
+            }
+        });
+        ctx.stroke();
+    });
+}
+
+/**
+ * 副图图例（左上角彩色标签行）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文
+ * @param {Array} labels - [{ label, color }]
+ * @param {number} padding - 内边距
+ * @param {number} startY - 副图起始Y坐标
+ */
+function drawSubLegend(ctx, labels, padding, startY) {
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'left';
+    let x = padding + 4;
+    const y = startY + 12;
+    labels.forEach(item => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(x, y - 7, 10, 2);
+        ctx.fillText(item.label, x + 14, y);
+        x += 14 + ctx.measureText(item.label).width + 10;
+    });
+}
+
+/**
+ * 绘制MACD副图（柱状图 + DIF/DEA双线 + 零轴）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文
+ * @param {Object} viewData - 当前视图数据（difArr/deaArr/macdHistArr）
+ * @param {number} padding - 内边距
+ * @param {number} startY - 副图起始Y坐标
+ * @param {number} height - 副图高度
+ * @param {number} candleWidth - K线宽度
+ * @param {number} candleSpacing - K线间距
+ */
+function drawMacdChart(ctx, viewData, padding, startY, height, candleWidth, candleSpacing) {
+    const dif = viewData.difArr || [];
+    const dea = viewData.deaArr || [];
+    const hist = viewData.macdHistArr || [];
+    if (dif.length === 0) return;
+
+    // 三组数据合并统计极值（零值必须包含在范围内）
+    let maxVal = 0, minVal = 0;
+    [dif, dea, hist].forEach(arr => arr.forEach(v => {
+        if (v == null) return;
+        if (v > maxVal) maxVal = v;
+        if (v < minVal) minVal = v;
+    }));
+    if (maxVal === minVal) maxVal = minVal + 1;
+    const range = maxVal - minVal;
+
+    // MACD柱状图（红涨绿跌，围绕零轴绘制）
+    const zeroY = startY + height - ((0 - minVal) / range) * height;
+    hist.forEach((value, i) => {
+        if (value == null) return;
+        const x = padding + i * candleSpacing + candleSpacing / 2;
+        const y = startY + height - ((value - minVal) / range) * height;
+        ctx.fillStyle = value >= 0 ? UP_COLOR : DOWN_COLOR;
+        const barY = Math.min(y, zeroY);
+        const barH = Math.max(1, Math.abs(zeroY - y));
+        ctx.fillRect(x - candleWidth / 2, barY, candleWidth, barH);
+    });
+
+    // 零轴虚线
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(padding, zeroY);
+    ctx.lineTo(padding + candleSpacing * dif.length, zeroY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // DIF / DEA 双线
+    drawSubLines(ctx, [
+        { arr: dif, color: '#2962FF' },
+        { arr: dea, color: '#FF6D00' },
+    ], padding, startY, height, minVal, range, candleSpacing);
+
+    // 图例 + 极值标签
+    drawSubLegend(ctx, [
+        { label: 'DIF', color: '#2962FF' },
+        { label: 'DEA', color: '#FF6D00' },
+        { label: 'MACD', color: '#9ca3af' },
+    ], padding, startY);
+    ctx.fillStyle = '#999';
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(maxVal.toFixed(2), padding + 4, startY + 24);
+    ctx.fillText(minVal.toFixed(2), padding + 4, startY + height - 4);
+}
+
+/**
+ * 绘制KDJ副图（K/D/J三线 + 20/50/80参考线）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文
+ * @param {Object} viewData - 当前视图数据（kArr/dArr/jArr）
+ * @param {number} padding - 内边距
+ * @param {number} startY - 副图起始Y坐标
+ * @param {number} height - 副图高度
+ * @param {number} candleSpacing - K线间距
+ */
+function drawKdjChart(ctx, viewData, padding, startY, height, candleSpacing) {
+    const k = viewData.kArr || [];
+    const d = viewData.dArr || [];
+    const j = viewData.jArr || [];
+    if (k.length === 0) return;
+
+    // 三线合并统计极值，上下各留10%边距
+    let maxVal = -Infinity, minVal = Infinity;
+    [k, d, j].forEach(arr => arr.forEach(v => {
+        if (v == null) return;
+        if (v > maxVal) maxVal = v;
+        if (v < minVal) minVal = v;
+    }));
+    if (maxVal === -Infinity) return;
+    const span = (maxVal - minVal) || 1;
+    maxVal += span * 0.1;
+    minVal -= span * 0.1;
+    const range = maxVal - minVal;
+
+    // 20/50/80 超买超卖参考线（范围内才绘制）
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+    [20, 50, 80].forEach(level => {
+        if (level < minVal || level > maxVal) return;
+        const y = startY + height - ((level - minVal) / range) * height;
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(padding + candleSpacing * k.length, y);
+        ctx.stroke();
+        ctx.fillStyle = '#bbb';
+        ctx.textAlign = 'left';
+        ctx.fillText(String(level), padding + 4, y - 2);
+    });
+
+    // K / D / J 三线
+    drawSubLines(ctx, [
+        { arr: k, color: '#2962FF' },
+        { arr: d, color: '#FF6D00' },
+        { arr: j, color: '#9333ea' },
+    ], padding, startY, height, minVal, range, candleSpacing);
+
+    drawSubLegend(ctx, [
+        { label: 'K', color: '#2962FF' },
+        { label: 'D', color: '#FF6D00' },
+        { label: 'J', color: '#9333ea' },
+    ], padding, startY);
+}
+
+/**
+ * 绘制BOLL布林带叠加（主图三轨线 + 图例，位于MA图例下方）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文
+ * @param {Object} viewData - 当前视图数据（bollMidArr/bollUpperArr/bollLowerArr）
+ * @param {number} padding - 内边距
+ * @param {number} chartHeight - 主图高度
+ * @param {number} adjustedMin - 调整后的最小价格
+ * @param {number} adjustedRange - 调整后的价格范围
+ * @param {number} candleSpacing - K线间距
+ */
+function drawBollBands(ctx, viewData, padding, chartHeight, adjustedMin, adjustedRange, candleSpacing) {
+    const configs = [
+        { arr: viewData.bollMidArr, color: '#7c3aed', label: 'BOLL-M' },
+        { arr: viewData.bollUpperArr, color: '#0ea5e9', label: 'BOLL-U' },
+        { arr: viewData.bollLowerArr, color: '#ec4899', label: 'BOLL-L' },
+    ];
+
+    const getY = (price) => {
+        return padding + chartHeight - ((price - adjustedMin) / adjustedRange) * chartHeight;
+    };
+
+    configs.forEach(config => {
+        if (!config.arr || config.arr.length === 0) return;
+        ctx.strokeStyle = config.color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        let isFirstPoint = true;
+        config.arr.forEach((value, i) => {
+            if (value === null || value === undefined) return;
+            const x = padding + i * candleSpacing + candleSpacing / 2;
+            const y = getY(value);
+            if (isFirstPoint) {
+                ctx.moveTo(x, y);
+                isFirstPoint = false;
+            } else {
+                ctx.lineTo(x, y);
+            }
+        });
+        ctx.stroke();
+    });
+
+    // 图例：接在MA图例（3行）下方
+    const legendX = padding + 20;
+    const legendY = padding + 20 + 3 * 18;
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'left';
+    configs.forEach((config, index) => {
+        if (!config.arr || config.arr.length === 0) return;
+        const y = legendY + index * 18;
+        ctx.fillStyle = config.color;
+        ctx.fillRect(legendX, y - 8, 12, 2);
+        ctx.fillText(config.label, legendX + 18, y);
+    });
+}
+
+/**
  * 计算简单移动平均线（SMA）
  * @param {Array} prices - 价格数组
  * @param {number} period - 周期（如5、10、20）
@@ -907,6 +1220,11 @@ function formatKlineData(rawData) {
         ? rawData.map(d => (d.J !== null && d.J !== undefined) ? d.J : null)
         : candleData.map(() => null);
 
+    // MACD / BOLL 由后端基于全量数据计算，与KDJ同样按索引对齐
+    const mapField = (field) => rawData.length === candleData.length
+        ? rawData.map(d => (d[field] !== null && d[field] !== undefined) ? d[field] : null)
+        : candleData.map(() => null);
+
     return {
         candleData,
         volumeData,
@@ -915,7 +1233,13 @@ function formatKlineData(rawData) {
         ma20Arr,
         kArr,
         dArr,
-        jArr
+        jArr,
+        difArr: mapField('dif'),
+        deaArr: mapField('dea'),
+        macdHistArr: mapField('macd_hist'),
+        bollMidArr: mapField('boll_mid'),
+        bollUpperArr: mapField('boll_upper'),
+        bollLowerArr: mapField('boll_lower'),
     };
 }
 

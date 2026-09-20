@@ -392,6 +392,59 @@ def MACD(df, fastperiod=12, slowperiod=26, signalperiod=9):
     return result
 
 
+def BOLL(df, n=20, p=2):
+    """
+    BOLL指标计算 - 布林带
+    通达信公式：
+    MID: MA(CLOSE, N)
+    UPPER: MID + P*STD(CLOSE, N)
+    LOWER: MID - P*STD(CLOSE, N)
+
+    注意：数据可能是倒序（最新在前）或正序，需要自动检测并处理
+    """
+    # 检查数据是否为空
+    if df is None or df.empty:
+        return pd.DataFrame({'boll_mid': [], 'boll_upper': [], 'boll_lower': []},
+                            index=df.index if df is not None else [])
+
+    # 检测数据顺序
+    try:
+        is_descending = df['date'].iloc[0] > df['date'].iloc[-1]
+    except (IndexError, KeyError):
+        # 如果无法检测顺序，默认按正序处理
+        is_descending = False
+
+    # 统一转换为正序计算（从早到晚）
+    if is_descending:
+        df_calc = df.iloc[::-1].copy().reset_index(drop=True)
+    else:
+        df_calc = df.copy().reset_index(drop=True)
+
+    # 中轨：N日移动平均
+    mid = df_calc['close'].rolling(window=n, min_periods=1).mean()
+
+    # 标准差（ddof=0 总体标准差，与通达信一致）
+    std = df_calc['close'].rolling(window=n, min_periods=1).std(ddof=0)
+
+    # 上轨 / 下轨
+    upper = mid + p * std
+    lower = mid - p * std
+
+    # 构建结果
+    result = pd.DataFrame({
+        'boll_mid': mid,
+        'boll_upper': upper,
+        'boll_lower': lower
+    })
+
+    # 恢复原始顺序
+    if is_descending:
+        result = result.iloc[::-1].reset_index(drop=True)
+
+    result.index = df.index
+    return result
+
+
 def calculate_price_change(df, method='prev_close'):
     """
     计算价格变化率 - 统一的涨幅计算函数

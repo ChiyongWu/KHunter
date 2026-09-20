@@ -1324,6 +1324,45 @@
     cursor: not-allowed;
 }
 
+/* 工具条左侧按钮容器（范围切换 + 副图指标 + BOLL开关） */
+.kline-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* 工具条分组分隔线 */
+.kline-toolbar-divider {
+    width: 1px;
+    height: 16px;
+    background: #d1d5db;
+    margin: 0 2px;
+}
+
+/* BOLL 主图叠加开关按钮（激活态紫色，与中轨线颜色呼应） */
+.kline-boll-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid #e5e7eb;
+    background: #ffffff;
+    color: #4b5563;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.kline-boll-btn:hover {
+    border-color: #7c3aed;
+    color: #7c3aed;
+}
+
+.kline-boll-btn.active {
+    background: #7c3aed;
+    border-color: #7c3aed;
+    color: #ffffff;
+}
+
 /* 框选拖拽进行中：光标提示缩放语义 */
 .kline-overlay-canvas.kline-dragging {
     cursor: zoom-in;
