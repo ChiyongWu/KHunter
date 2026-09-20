@@ -78,6 +78,12 @@ class SectorHotRankFetcher:
             df = pro.tdx_index()
             if df is not None and not df.empty and 'idx_type' in df.columns:
                 df = df[df['idx_type'].isin(self.IDX_TYPE_MAP.keys())]
+                # 通达信行业板块含 880(老版粗分类)/881(新版细分类)两套体系，
+                # 19 个同名板块会重复展示（如证券=880472/881394），仅保留 880 系列
+                if 'ts_code' in df.columns:
+                    is_industry = df['idx_type'] == '行业板块'
+                    is_881 = df['ts_code'].astype(str).str.startswith('881')
+                    df = df[~(is_industry & is_881)]
             return df
         except Exception as e:
             logger.error(f"获取板块清单失败: {e}")
@@ -170,6 +176,17 @@ class SectorHotRankFetcher:
                 ytd_pct_chg = float(ytd_val) if pd.notna(ytd_val) else None
                 prev_year_pct_chg = (prev_year_map or {}).get(code)
 
+                # 通达信行情扩展字段（amount/bm_net/bm_buy_net 单位万元）
+                def _opt(col):
+                    val = row.get(col)
+                    return float(val) if pd.notna(val) else None
+
+                amount = _opt('amount')
+                bm_net = _opt('bm_net')
+                bm_ratio = _opt('bm_ratio')
+                bm_buy_net = _opt('bm_buy_net')
+                bm_buy_ratio = _opt('bm_buy_ratio')
+
                 # 同一交易日重跑按 UNIQUE(trade_date, sector_code) 覆盖更新
                 check_sql = """
                     SELECT id FROM sector_hot_rank
@@ -181,23 +198,30 @@ class SectorHotRankFetcher:
                         UPDATE sector_hot_rank
                         SET sector_name = ?, sector_type = ?, pct_chg = ?,
                             ytd_pct_chg = ?, prev_year_pct_chg = ?,
+                            amount = ?, bm_net = ?, bm_ratio = ?,
+                            bm_buy_net = ?, bm_buy_ratio = ?,
                             main_net_flow = NULL, created_date = ?
                         WHERE trade_date = ? AND sector_code = ?
                     """
                     self.db_manager.execute_with_retry(update_sql, (
                         name, sec_type, pct_chg, ytd_pct_chg, prev_year_pct_chg,
+                        amount, bm_net, bm_ratio, bm_buy_net, bm_buy_ratio,
                         now_str, trade_date, code
                     ))
                 else:
                     insert_sql = """
                         INSERT INTO sector_hot_rank
                         (trade_date, sector_code, sector_name, sector_type,
-                         pct_chg, ytd_pct_chg, prev_year_pct_chg, main_net_flow, created_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                         pct_chg, ytd_pct_chg, prev_year_pct_chg,
+                         amount, bm_net, bm_ratio, bm_buy_net, bm_buy_ratio,
+                         main_net_flow, created_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                     """
                     self.db_manager.execute_with_retry(insert_sql, (
                         trade_date, code, name, sec_type,
-                        pct_chg, ytd_pct_chg, prev_year_pct_chg, now_str
+                        pct_chg, ytd_pct_chg, prev_year_pct_chg,
+                        amount, bm_net, bm_ratio, bm_buy_net, bm_buy_ratio,
+                        now_str
                     ))
                 saved_count += 1
 

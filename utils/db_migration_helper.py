@@ -235,6 +235,16 @@ class DatabaseMigrationHelper:
             else:
                 logger.info("✓ sector_hot_rank 表已有 prev_year_pct_chg 列")
 
+            # 添加通达信行情扩展列（成交额 + 主力/主买资金四字段）
+            for col in ('amount', 'bm_net', 'bm_ratio', 'bm_buy_net', 'bm_buy_ratio'):
+                if col not in col_names:
+                    logger.info(f"正在为 sector_hot_rank 表添加 {col} 列...")
+                    cursor.execute(f"ALTER TABLE sector_hot_rank ADD COLUMN {col} REAL")
+                    conn.commit()
+                    logger.info(f"✓ {col} 列已成功添加到 sector_hot_rank 表")
+                else:
+                    logger.info(f"✓ sector_hot_rank 表已有 {col} 列")
+
             # 清理旧的同花顺 .TI 数据（数据源已切换为通达信 .TDX）
             cursor.execute("SELECT COUNT(*) FROM sector_hot_rank WHERE sector_code LIKE '%.TI'")
             old_count = cursor.fetchone()[0]

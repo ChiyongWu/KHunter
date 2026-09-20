@@ -125,6 +125,42 @@ function formatPctChg(pct) {
 }
 
 /**
+ * 格式化成交额：接口单位万元，转亿元显示，保留2位小数（不涨跌配色）
+ * @param {number} val - 成交额（万元）
+ */
+function formatAmountYi(val) {
+    if (val === null || val === undefined || isNaN(val)) {
+        return '<span class="text-muted">-</span>';
+    }
+    return `<span>${(val / 10000).toFixed(2)}亿</span>`;
+}
+
+/**
+ * 格式化资金净额：接口单位万元，转亿元显示，保留2位小数，红正绿负（A股配色）
+ * @param {number} val - 净额（万元）
+ */
+function formatFlowYi(val) {
+    if (val === null || val === undefined || isNaN(val)) {
+        return '<span class="text-muted">-</span>';
+    }
+    const yi = val / 10000;
+    const colorClass = yi > 0 ? 'text-danger' : (yi < 0 ? 'text-success' : 'text-muted');
+    return `<span class="${colorClass}">${yi.toFixed(2)}亿</span>`;
+}
+
+/**
+ * 格式化资金占比：%显示，保留2位小数，红正绿负（A股配色）
+ * @param {number} val - 占比 %
+ */
+function formatFlowPct(val) {
+    if (val === null || val === undefined || isNaN(val)) {
+        return '<span class="text-muted">-</span>';
+    }
+    const colorClass = val > 0 ? 'text-danger' : (val < 0 ? 'text-success' : 'text-muted');
+    return `<span class="${colorClass}">${val.toFixed(2)}%</span>`;
+}
+
+/**
  * 渲染热门板块卡片内容（tab + 榜单表格 + 数据日期）
  * @param {Object|null} result - 接口返回数据，null 表示加载失败
  */
@@ -168,6 +204,11 @@ function renderHotSectors(result) {
                         <th style="${headerStyle('pct_chg')}" onclick="sortHotSectors('pct_chg')">涨幅${sortArrow('pct_chg')}</th>
                         <th style="${headerStyle('ytd_pct_chg')}" onclick="sortHotSectors('ytd_pct_chg')">年内涨幅${sortArrow('ytd_pct_chg')}</th>
                         <th style="${headerStyle('prev_year_pct_chg')}" onclick="sortHotSectors('prev_year_pct_chg')">上一年涨幅${sortArrow('prev_year_pct_chg')}</th>
+                        <th style="text-align: right;">成交额</th>
+                        <th style="text-align: right;">主力净额</th>
+                        <th style="text-align: right;">主力占比</th>
+                        <th style="text-align: right;">主买净额</th>
+                        <th style="text-align: right;">主买占比</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -188,6 +229,11 @@ function renderHotSectors(result) {
                 <td style="text-align: right;">${formatPctChg(sector.pct_chg)}</td>
                 <td style="text-align: right;">${formatPctChg(sector.ytd_pct_chg)}</td>
                 <td style="text-align: right;">${formatPctChg(sector.prev_year_pct_chg)}</td>
+                <td style="text-align: right;">${formatAmountYi(sector.amount)}</td>
+                <td style="text-align: right;">${formatFlowYi(sector.bm_net)}</td>
+                <td style="text-align: right;">${formatFlowPct(sector.bm_ratio)}</td>
+                <td style="text-align: right;">${formatFlowYi(sector.bm_buy_net)}</td>
+                <td style="text-align: right;">${formatFlowPct(sector.bm_buy_ratio)}</td>
             </tr>
         `;
     });

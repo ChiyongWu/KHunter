@@ -990,6 +990,16 @@ CREATE TABLE IF NOT EXISTS sector_hot_rank (
     -- ytd_pct_chg: 年初至今涨跌幅%，例如30.5表示涨30.5%、-41.2表示跌41.2%
     prev_year_pct_chg REAL,
     -- prev_year_pct_chg: 上一年（自然年）涨跌幅%，例如18.2表示上一年全年涨18.2%
+    amount REAL,
+    -- amount: 成交额，单位万元，例如3547325.24
+    bm_net REAL,
+    -- bm_net: 主力净额，单位万元，例如284838.3
+    bm_ratio REAL,
+    -- bm_ratio: 主力占比%，例如8.03
+    bm_buy_net REAL,
+    -- bm_buy_net: 主买净额，单位万元（接口文档标注为元，实测口径为万元，与 bm_ratio=主买净额/成交额 吻合），例如443730.33
+    bm_buy_ratio REAL,
+    -- bm_buy_ratio: 主买占比%，例如12.51
     main_net_flow REAL,
     -- main_net_flow: 主力净流入额，单位元，例如208000000
     created_date DATETIME,
